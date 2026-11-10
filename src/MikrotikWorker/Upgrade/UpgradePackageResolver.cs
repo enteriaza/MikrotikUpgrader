@@ -57,14 +57,35 @@ internal sealed class UpgradePackageResolver(
             return Fail($"No packages for target {targetVersion} were found in FirmwareFiles.");
         }
 
-        bool hasMain = installedPackages.Any(static p => IsMainRouterOsPackage(p.Name) || IsSystemPackage(p.Name));
-        if (!hasMain)
+        // Only independently installed packages need their own .npk.
+        // Bundled components (bundle=<main>) are upgraded by the combined routeros-* package.
+        List<InstalledPackageInfo> independentlyInstalled = installedPackages
+            .Where(static p => !p.IsBundledComponent)
+            .ToList();
+
+        if (independentlyInstalled.Count == 0)
         {
-            return Fail("Installed packages do not include a main 'routeros'/'routeros-{arch}' or 'system' package.");
+            return Fail("No independently installed packages were found (expected a main routeros-* package).");
+        }
+
+        List<InstalledPackageInfo> mainPackages = independentlyInstalled
+            .Where(static p => IsMainRouterOsPackage(p.Name))
+            .ToList();
+
+        if (mainPackages.Count == 0)
+        {
+            return Fail(
+                "No main combined RouterOS package was found. Expected an unbundled 'routeros' or 'routeros-{arch}' entry.");
+        }
+
+        if (mainPackages.Count > 1)
+        {
+            return Fail(
+                $"Multiple main RouterOS packages are installed: {string.Join(", ", mainPackages.Select(p => p.Name))}.");
         }
 
         List<ResolvedUpgradePackage> selected = [];
-        foreach (InstalledPackageInfo installed in installedPackages)
+        foreach (InstalledPackageInfo installed in independentlyInstalled)
         {
             string catalogName = NormalizeInstalledPackageName(installed.Name, normalizedArch);
             List<FirmwarePackageInfo> matches = policyCatalog
@@ -75,7 +96,7 @@ internal sealed class UpgradePackageResolver(
             if (matches.Count == 0)
             {
                 return Fail(
-                    $"No target package found for installed package '{installed.Name}' (catalog name '{catalogName}', architecture '{normalizedArch}', version {targetVersion}).");
+                    $"No target package found for independently installed package '{installed.Name}' (catalog name '{catalogName}', architecture '{normalizedArch}', version {targetVersion}).");
             }
 
             if (matches.Count > 1)

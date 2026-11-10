@@ -130,8 +130,9 @@ internal sealed class MikrotikApiClient(
             string disabledRaw = row.GetResponseFieldOrDefault("disabled", "false") ?? "false";
             bool disabled = disabledRaw.Equals("true", StringComparison.OrdinalIgnoreCase)
                 || disabledRaw.Equals("yes", StringComparison.OrdinalIgnoreCase);
+            string? bundle = NullIfWhiteSpace(row.GetResponseFieldOrDefault("bundle", null));
 
-            packages.Add(new InstalledPackageInfo(name.Trim(), version.Trim(), disabled));
+            packages.Add(new InstalledPackageInfo(name.Trim(), version.Trim(), disabled, bundle));
         }
 
         return packages;
@@ -203,10 +204,42 @@ internal sealed class MikrotikApiClient(
                 size = 0;
             }
 
-            return new RouterFileInfo(name, size);
+            string? id = NullIfWhiteSpace(row.GetResponseFieldOrDefault(".id", null));
+            return new RouterFileInfo(name, size, id);
         }
 
         return null;
+    }
+
+    public async Task RemoveFileAsync(
+        ITikConnection connection,
+        string fileName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        RouterFileInfo? existing = await FindFileAsync(connection, fileName, cancellationToken)
+            .ConfigureAwait(false);
+        if (existing is null)
+        {
+            return;
+        }
+
+        ITikCommand command = connection.CreateCommand("/file/remove");
+        if (!string.IsNullOrWhiteSpace(existing.Id))
+        {
+            command.AddParameter(".id", existing.Id);
+        }
+        else
+        {
+            // Fallback for transports that expose name-based numbers.
+            command.AddParameter("numbers", existing.Name);
+        }
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        logger.LogInformation("Issued /file/remove for {File}", fileName);
     }
 
     public async Task WaitForFileAsync(
@@ -245,20 +278,78 @@ internal sealed class MikrotikApiClient(
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationFileName);
         cancellationToken.ThrowIfCancellationRequested();
 
+        // Remove any prior partial/stale destination so size verification cannot pass a leftover file.
+        RouterFileInfo? existing = await FindFileAsync(connection, destinationFileName, cancellationToken)
+            .ConfigureAwait(false);
+        if (existing is not null)
+        {
+            logger.LogInformation(
+                "Removing existing router file before fetch. File={File}, SizeBytes={SizeBytes}",
+                destinationFileName,
+                existing.SizeBytes);
+            await RemoveFileAsync(connection, destinationFileName, cancellationToken).ConfigureAwait(false);
+        }
+
         ITikCommand command = connection.CreateCommand("/tool/fetch");
         command.AddParameter("url", url);
         command.AddParameter("dst-path", destinationFileName);
         command.AddParameter("mode", "http");
         command.AddParameter("keep-result", "yes");
 
-        Task execute = command.ExecuteNonQueryAsync(cancellationToken);
-        Task finished = await Task.WhenAny(execute, Task.Delay(timeout, cancellationToken)).ConfigureAwait(false);
-        if (finished != execute)
+        // /tool/fetch emits multiple !re progress sentences; ExecuteNonQuery rejects that shape.
+        int timeoutSec = Math.Max(1, (int)Math.Ceiling(timeout.TotalSeconds));
+        using CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
+
+        List<ITikReSentence> sentences = [];
+        try
+        {
+            await foreach (ITikReSentence sentence in command
+                               .ExecuteListUntilDoneAsync(timeoutSec, timeoutCts.Token)
+                               .ConfigureAwait(false))
+            {
+                sentences.Add(sentence);
+                string? status = sentence.GetResponseFieldOrDefault("status", null);
+                string? downloaded = sentence.GetResponseFieldOrDefault("downloaded", null);
+                string? total = sentence.GetResponseFieldOrDefault("total", null);
+                if (!string.IsNullOrWhiteSpace(status))
+                {
+                    logger.LogInformation(
+                        "Fetch progress. File={File}, Status={Status}, Downloaded={Downloaded}, Total={Total}",
+                        destinationFileName,
+                        status,
+                        downloaded,
+                        total);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
         {
             throw new TimeoutException($"Fetch of '{destinationFileName}' exceeded {timeout}.");
         }
 
-        await execute.ConfigureAwait(false);
+        ITikReSentence? final = sentences.LastOrDefault(static s =>
+            string.Equals(s.GetResponseFieldOrDefault("status", null), "finished", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s.GetResponseFieldOrDefault("status", null), "failed", StringComparison.OrdinalIgnoreCase));
+        if (final is null)
+        {
+            throw new InvalidOperationException(
+                $"Fetch of '{destinationFileName}' completed without a finished/failed status sentence.");
+        }
+
+        string finalStatus = final.GetResponseFieldOrDefault("status", string.Empty) ?? string.Empty;
+        if (!finalStatus.Equals("finished", StringComparison.OrdinalIgnoreCase))
+        {
+            string failure = final.GetResponseFieldOrDefault("failure", null)
+                ?? final.GetResponseFieldOrDefault("message", null)
+                ?? finalStatus;
+            throw new InvalidOperationException($"Fetch of '{destinationFileName}' failed: {failure}");
+        }
+
         logger.LogInformation("Completed /tool/fetch dst-path={File}", destinationFileName);
     }
 

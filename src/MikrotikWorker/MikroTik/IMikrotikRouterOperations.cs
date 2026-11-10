@@ -34,6 +34,14 @@ internal interface IMikrotikRouterOperations : IMikrotikDeviceInfoReader
         TimeSpan pollInterval,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Removes a single file by exact name. Never uses wildcards.
+    /// </summary>
+    Task RemoveFileAsync(
+        ITikConnection connection,
+        string fileName,
+        CancellationToken cancellationToken = default);
+
     Task FetchUrlToFileAsync(
         ITikConnection connection,
         string url,
