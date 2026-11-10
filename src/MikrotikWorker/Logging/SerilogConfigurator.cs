@@ -18,6 +18,12 @@ internal static class SerilogConfigurator
     internal const string FileOutputTemplate =
         "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] ({SourceContext}) {Message:lj}{NewLine}{Exception}";
 
+    /// <summary>
+    /// Concise per-device file template — correlation metadata lives in the session header.
+    /// </summary>
+    internal const string DeviceFileOutputTemplate =
+        "{Timestamp:HH:mm:ss} {Level:u3} {Message:lj}{NewLine}{Exception}";
+
     public static SerilogOptions BindOptions(IConfiguration configuration)
     {
         SerilogOptions options = new();
@@ -48,7 +54,11 @@ internal static class SerilogConfigurator
             .MinimumLevel.Is(minimumLevel)
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .MinimumLevel.Override("Microsoft.AspNetCore", LogEventLevel.Warning)
-            .MinimumLevel.Override("Microsoft.Hosting.Lifecycle", LogEventLevel.Information)
+            // Keep hosting/Kestrel lifecycle and Serilog request logging at Information.
+            .MinimumLevel.Override("Microsoft.Hosting.Lifetime", LogEventLevel.Information)
+            .MinimumLevel.Override("Microsoft.AspNetCore.Hosting.Diagnostics", LogEventLevel.Information)
+            .MinimumLevel.Override("Microsoft.AspNetCore.Server.Kestrel", LogEventLevel.Information)
+            .MinimumLevel.Override("Serilog.AspNetCore.RequestLoggingMiddleware", LogEventLevel.Information)
             .MinimumLevel.Override("System", LogEventLevel.Warning)
             .Enrich.FromLogContext()
             .Enrich.WithProperty("Application", applicationName)
@@ -63,9 +73,11 @@ internal static class SerilogConfigurator
 
         if (options.WriteToConsole)
         {
-            loggerConfiguration.WriteTo.Console(
-                outputTemplate: ConsoleOutputTemplate,
-                standardErrorFromLevel: LogEventLevel.Error);
+            loggerConfiguration.WriteTo.Logger(lc => lc
+                .Filter.ByExcluding(DeviceLogFilters.IsDeviceDetailExcludedFromServiceLog)
+                .WriteTo.Console(
+                    outputTemplate: ConsoleOutputTemplate,
+                    standardErrorFromLevel: LogEventLevel.Error));
         }
 
         if (options.WriteToFile)
@@ -77,18 +89,20 @@ internal static class SerilogConfigurator
             // Async wrapper keeps scheduler/HTTP threads off synchronous disk I/O.
             // Bounded buffer; blockWhenFull avoids silent loss under burst load.
             // CloseAndFlush on shutdown drains the buffer (brief delay possible).
-            loggerConfiguration.WriteTo.Async(
-                configure => configure.File(
-                    path: logFilePath,
-                    rollingInterval: ParseRollingInterval(options.RollingInterval),
-                    retainedFileCountLimit: options.RetainedFileCountLimit,
-                    fileSizeLimitBytes: options.FileSizeLimitBytes,
-                    rollOnFileSizeLimit: options.RollOnFileSizeLimit,
-                    shared: true,
-                    encoding: Encoding.UTF8,
-                    outputTemplate: FileOutputTemplate),
-                bufferSize: options.AsyncBufferCapacity,
-                blockWhenFull: options.AsyncBlockWhenFull);
+            loggerConfiguration.WriteTo.Logger(lc => lc
+                .Filter.ByExcluding(DeviceLogFilters.IsDeviceDetailExcludedFromServiceLog)
+                .WriteTo.Async(
+                    configure => configure.File(
+                        path: logFilePath,
+                        rollingInterval: ParseRollingInterval(options.RollingInterval),
+                        retainedFileCountLimit: options.RetainedFileCountLimit,
+                        fileSizeLimitBytes: options.FileSizeLimitBytes,
+                        rollOnFileSizeLimit: options.RollOnFileSizeLimit,
+                        shared: true,
+                        encoding: Encoding.UTF8,
+                        outputTemplate: FileOutputTemplate),
+                    bufferSize: options.AsyncBufferCapacity,
+                    blockWhenFull: options.AsyncBlockWhenFull));
         }
 
         if (options.DeviceLogEnabled && deviceLogWriter is not null)

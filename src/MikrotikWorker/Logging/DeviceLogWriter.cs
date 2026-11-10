@@ -11,15 +11,17 @@ namespace MikrotikWorker.Logging;
 
 /// <summary>
 /// Bounded async writer that appends device-scoped log lines without retaining a handle per device.
-/// A single consumer serializes all device-file writes.
+/// A single consumer serializes all device-file writes. Pending→identity promotion is queued on the
+/// same channel and records a redirect so late writes to the pending key cannot orphan events.
 /// </summary>
 internal sealed class DeviceLogWriter : IHostedService, IDisposable
 {
     private readonly SerilogOptions _options;
-    private readonly Channel<DeviceLogEntry> _channel;
+    private readonly Channel<DeviceLogWorkItem> _channel;
     private readonly object _writeGate = new();
+    private readonly Dictionary<string, string> _keyRedirects = new(StringComparer.Ordinal);
     private readonly MessageTemplateTextFormatter _formatter = new(
-        SerilogConfigurator.FileOutputTemplate,
+        SerilogConfigurator.DeviceFileOutputTemplate,
         formatProvider: null);
     private Task? _consumer;
     private int _stopped;
@@ -35,7 +37,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
             SingleReader = true,
             SingleWriter = false,
         };
-        _channel = Channel.CreateBounded<DeviceLogEntry>(channelOptions);
+        _channel = Channel.CreateBounded<DeviceLogWorkItem>(channelOptions);
     }
 
     public long WriteFailureCount => Interlocked.Read(ref _writeFailureCount);
@@ -54,61 +56,54 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
 
         using StringWriter writer = new();
         _formatter.Format(logEvent, writer);
-        DeviceLogEntry entry = new(deviceLogKey, writer.ToString());
+        EnqueueOrWrite(new DeviceLogWorkItem.Append(deviceLogKey, writer.ToString()));
+    }
 
-        if (_channel.Writer.TryWrite(entry))
+    public void WriteRaw(string deviceLogKey, string text)
+    {
+        if (!_options.DeviceLogEnabled || string.IsNullOrWhiteSpace(deviceLogKey) || Volatile.Read(ref _stopped) != 0)
         {
             return;
         }
 
-        if (!_options.DeviceLogAsyncBlockWhenFull)
-        {
-            // Configured to avoid blocking the logging caller: fall back to synchronous append
-            // so the event is not silently dropped.
-            try
-            {
-                WriteEntry(entry);
-            }
-            catch (Exception ex)
-            {
-                RecordWriteFailure(entry.DeviceLogKey, ex);
-            }
+        EnqueueOrWrite(new DeviceLogWorkItem.Append(deviceLogKey, text));
+    }
 
+    /// <summary>
+    /// Moves any pending pre-identity log content into the identity-based file, then deletes the pending file.
+    /// Queued on the same consumer as appends so ordering is preserved; a redirect map catches late writes.
+    /// </summary>
+    public void PromoteKey(string fromKey, string toKey)
+    {
+        if (!_options.DeviceLogEnabled
+            || string.IsNullOrWhiteSpace(fromKey)
+            || string.IsNullOrWhiteSpace(toKey)
+            || string.Equals(fromKey, toKey, StringComparison.Ordinal))
+        {
             return;
         }
 
-        try
+        if (Volatile.Read(ref _stopped) != 0)
         {
-            // Backpressure: wait for capacity, then write (Serilog sinks are synchronous).
-            while (Volatile.Read(ref _stopped) == 0)
-            {
-                ValueTask<bool> wait = _channel.Writer.WaitToWriteAsync();
-                if (!wait.IsCompletedSuccessfully)
-                {
-                    wait.AsTask().GetAwaiter().GetResult();
-                }
-                else if (!wait.Result)
-                {
-                    return;
-                }
-
-                if (_channel.Writer.TryWrite(entry))
-                {
-                    return;
-                }
-            }
+            // Channel may already be completing; report so operators know pending content may remain.
+            Log.Warning(
+                "Device log promotion skipped because the writer is stopping. From={FromKey}, To={ToKey}",
+                fromKey,
+                toKey);
+            return;
         }
-        catch (Exception ex)
+
+        EnqueueOrWrite(new DeviceLogWorkItem.Promote(fromKey, toKey));
+    }
+
+    /// <summary>
+    /// Test seam: resolves the active file key after any promotions.
+    /// </summary>
+    internal string ResolveRedirectedKey(string deviceLogKey)
+    {
+        lock (_writeGate)
         {
-            try
-            {
-                WriteEntry(entry);
-            }
-            catch (Exception writeEx)
-            {
-                RecordWriteFailure(entry.DeviceLogKey, writeEx);
-                Log.Warning(ex, "Device log enqueue failed for {DeviceLogKey}", entry.DeviceLogKey);
-            }
+            return ResolveActiveKey_NoLock(deviceLogKey);
         }
     }
 
@@ -142,8 +137,9 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
                 {
                     await _consumer.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Log.Warning(ex, "Device log consumer did not finish draining before shutdown wait expired");
                 }
             }
         }
@@ -154,20 +150,75 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         StopAsync(CancellationToken.None).GetAwaiter().GetResult();
     }
 
+    private void EnqueueOrWrite(DeviceLogWorkItem item)
+    {
+        if (_channel.Writer.TryWrite(item))
+        {
+            return;
+        }
+
+        if (!_options.DeviceLogAsyncBlockWhenFull)
+        {
+            try
+            {
+                ProcessItem(item);
+            }
+            catch (Exception ex)
+            {
+                RecordWriteFailure(item.PrimaryKey, ex);
+            }
+
+            return;
+        }
+
+        try
+        {
+            while (Volatile.Read(ref _stopped) == 0)
+            {
+                ValueTask<bool> wait = _channel.Writer.WaitToWriteAsync();
+                if (!wait.IsCompletedSuccessfully)
+                {
+                    wait.AsTask().GetAwaiter().GetResult();
+                }
+                else if (!wait.Result)
+                {
+                    return;
+                }
+
+                if (_channel.Writer.TryWrite(item))
+                {
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                ProcessItem(item);
+            }
+            catch (Exception writeEx)
+            {
+                RecordWriteFailure(item.PrimaryKey, writeEx);
+                Log.Warning(ex, "Device log enqueue failed for {DeviceLogKey}", item.PrimaryKey);
+            }
+        }
+    }
+
     private async Task ConsumeAsync()
     {
         try
         {
-            await foreach (DeviceLogEntry entry in _channel.Reader.ReadAllAsync(CancellationToken.None)
+            await foreach (DeviceLogWorkItem item in _channel.Reader.ReadAllAsync(CancellationToken.None)
                                .ConfigureAwait(false))
             {
                 try
                 {
-                    WriteEntry(entry);
+                    ProcessItem(item);
                 }
                 catch (Exception ex)
                 {
-                    RecordWriteFailure(entry.DeviceLogKey, ex);
+                    RecordWriteFailure(item.PrimaryKey, ex);
                 }
             }
         }
@@ -177,21 +228,25 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
-    private void WriteEntry(DeviceLogEntry entry)
+    private void ProcessItem(DeviceLogWorkItem item)
     {
-        // Serialize consumer and sync-fallback writers so BlockWhenFull=false cannot race the same file.
+        switch (item)
+        {
+            case DeviceLogWorkItem.Append append:
+                WriteLine(append.DeviceLogKey, append.Line);
+                break;
+            case DeviceLogWorkItem.Promote promote:
+                PromoteFiles(promote.FromKey, promote.ToKey);
+                break;
+        }
+    }
+
+    private void WriteLine(string deviceLogKey, string line)
+    {
         lock (_writeGate)
         {
-            string safeName = entry.DeviceLogKey;
-            foreach (char c in Path.GetInvalidFileNameChars())
-            {
-                safeName = safeName.Replace(c, '_');
-            }
-
-            // Also replace characters invalid on Linux when running on Windows helpers, and vice versa.
-            safeName = safeName.Replace(':', '_').Replace('*', '_').Replace('?', '_').Replace('"', '_');
-
-            string path = Path.Combine(DeviceLogDirectory, Path.GetFileName(safeName));
+            string activeKey = ResolveActiveKey_NoLock(deviceLogKey);
+            string path = ResolvePath(activeKey);
             Directory.CreateDirectory(DeviceLogDirectory);
             using FileStream stream = new(
                 path,
@@ -201,9 +256,77 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
                 bufferSize: 4096,
                 FileOptions.SequentialScan);
             using StreamWriter writer = new(stream, Encoding.UTF8);
-            writer.Write(entry.Line);
+            writer.Write(line);
             writer.Flush();
         }
+    }
+
+    private void PromoteFiles(string fromKey, string toKey)
+    {
+        lock (_writeGate)
+        {
+            // Register redirect first so concurrent/sync-fallback writes to fromKey land on toKey.
+            _keyRedirects[fromKey] = toKey;
+
+            string fromPath = ResolvePath(fromKey);
+            string toPath = ResolvePath(toKey);
+            if (!File.Exists(fromPath))
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(DeviceLogDirectory);
+                string pendingContent = File.ReadAllText(fromPath, Encoding.UTF8);
+                if (!string.IsNullOrEmpty(pendingContent))
+                {
+                    // Append only — never truncate an existing identity log.
+                    File.AppendAllText(toPath, pendingContent, Encoding.UTF8);
+                }
+
+                File.Delete(fromPath);
+            }
+            catch (Exception ex)
+            {
+                RecordWriteFailure(fromKey, ex);
+                Log.Warning(
+                    ex,
+                    "Failed to promote device log from {FromKey} to {ToKey}",
+                    fromKey,
+                    toKey);
+            }
+        }
+    }
+
+    private string ResolveActiveKey_NoLock(string deviceLogKey)
+    {
+        string current = deviceLogKey;
+        // Guard against accidental cycles.
+        for (int i = 0; i < 8; i++)
+        {
+            if (!_keyRedirects.TryGetValue(current, out string? next)
+                || string.Equals(current, next, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            current = next;
+        }
+
+        return current;
+    }
+
+    private string ResolvePath(string deviceLogKey)
+    {
+        string safeName = deviceLogKey;
+        foreach (char c in Path.GetInvalidFileNameChars())
+        {
+            safeName = safeName.Replace(c, '_');
+        }
+
+        safeName = safeName.Replace(':', '_').Replace('*', '_').Replace('?', '_').Replace('"', '_');
+        return Path.Combine(DeviceLogDirectory, Path.GetFileName(safeName));
     }
 
     private void RecordWriteFailure(string deviceLogKey, Exception ex)
@@ -213,5 +336,10 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         Log.Warning(ex, "Failed to append device log for {DeviceLogKey}", deviceLogKey);
     }
 
-    private readonly record struct DeviceLogEntry(string DeviceLogKey, string Line);
+    private abstract record DeviceLogWorkItem(string PrimaryKey)
+    {
+        public sealed record Append(string DeviceLogKey, string Line) : DeviceLogWorkItem(DeviceLogKey);
+
+        public sealed record Promote(string FromKey, string ToKey) : DeviceLogWorkItem(FromKey);
+    }
 }

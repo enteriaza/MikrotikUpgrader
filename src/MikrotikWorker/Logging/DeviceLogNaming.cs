@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 
 namespace MikrotikWorker.Logging;
 
@@ -7,19 +6,68 @@ internal static class DeviceLogNaming
 {
     public const string DeviceLogKeyPropertyName = "DeviceLogKey";
 
-    public static string BuildFileName(string? routerIdentityOrName, IPAddress routerIp)
+    /// <summary>
+    /// Marks a device-scoped event that should also appear in the service log at Information level.
+    /// </summary>
+    public const string ServiceSummaryPropertyName = "ServiceSummary";
+
+    /// <summary>
+    /// Marks a log event that must stay in the service log only (not the per-device file),
+    /// even while a <see cref="DeviceLogScope"/> is active.
+    /// </summary>
+    public const string ServiceOnlyPropertyName = "ServiceOnly";
+
+    /// <summary>
+    /// Persistent per-device log file: <c>{Identity}_{IP}.log</c>.
+    /// </summary>
+    public static string BuildDeviceLogFileName(string? routerIdentity, IPAddress routerIp)
     {
         ArgumentNullException.ThrowIfNull(routerIp);
-
-        string label = string.IsNullOrWhiteSpace(routerIdentityOrName)
-            ? "router"
-            : Sanitize(routerIdentityOrName);
-        string ip = Sanitize(routerIp.ToString());
-        return $"{label}_{ip}.log";
+        return BuildDeviceStem(routerIdentity, routerIp) + ".log";
     }
 
-    public static string BuildDeviceLogKey(string? routerIdentityOrName, IPAddress routerIp) =>
-        BuildFileName(routerIdentityOrName, routerIp);
+    /// <summary>
+    /// Shared stem for device log and timestamped backup artefacts: <c>{Identity}_{IP}</c>.
+    /// </summary>
+    public static string BuildDeviceStem(string? routerIdentity, IPAddress routerIp)
+    {
+        ArgumentNullException.ThrowIfNull(routerIp);
+        string label = string.IsNullOrWhiteSpace(routerIdentity)
+            ? "router"
+            : Sanitize(routerIdentity);
+        return $"{label}_{SanitizeIp(routerIp)}";
+    }
+
+    public static string BuildPendingLogFileName(IPAddress routerIp)
+    {
+        ArgumentNullException.ThrowIfNull(routerIp);
+        return "pending_" + SanitizeIp(routerIp) + ".log";
+    }
+
+    /// <summary>
+    /// Registers the identity→IP mapping when a registry is supplied, and always returns
+    /// <c>{Identity}_{IP}.log</c> so distinct routers never share a log by identity alone.
+    /// </summary>
+    public static string ResolveIdentityLogFileName(
+        DeviceLogIdentityRegistry? registry,
+        string? routerIdentity,
+        IPAddress routerIp)
+    {
+        ArgumentNullException.ThrowIfNull(routerIp);
+        string stem = BuildDeviceStem(routerIdentity, routerIp);
+        registry?.TryRegister(
+            string.IsNullOrWhiteSpace(routerIdentity) ? "router" : Sanitize(routerIdentity),
+            routerIp.ToString(),
+            out _);
+        return stem + ".log";
+    }
+
+    public static string SanitizeIp(IPAddress routerIp)
+    {
+        ArgumentNullException.ThrowIfNull(routerIp);
+        // IPv4 keeps dotted notation ('.' is allowed). IPv6 ':' becomes '_'.
+        return Sanitize(routerIp.ToString());
+    }
 
     public static string Sanitize(string value)
     {
@@ -38,7 +86,7 @@ internal static class DeviceLogNaming
             {
                 buffer[written++] = c;
             }
-            else if (c is ' ' or ':' or '/' or '\\')
+            else if (c is ' ' or ':' or '/' or '\\' or '%' or '[' or ']')
             {
                 buffer[written++] = '_';
             }

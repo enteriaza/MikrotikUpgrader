@@ -4,13 +4,18 @@ using Serilog.Events;
 namespace MikrotikWorker.Logging;
 
 /// <summary>
-/// Mirrors events that carry <see cref="DeviceLogNaming.DeviceLogKeyPropertyName"/> into per-device files.
+/// Mirrors device-scoped events into per-device files. Service-only markers are skipped.
 /// </summary>
 internal sealed class DeviceLogSink(DeviceLogWriter writer) : ILogEventSink
 {
     public void Emit(LogEvent logEvent)
     {
         ArgumentNullException.ThrowIfNull(logEvent);
+
+        if (DeviceLogFilters.IsServiceOnlyEvent(logEvent))
+        {
+            return;
+        }
 
         if (!logEvent.Properties.TryGetValue(DeviceLogNaming.DeviceLogKeyPropertyName, out LogEventPropertyValue? value))
         {

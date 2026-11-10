@@ -12,29 +12,58 @@ namespace MikrotikWorker.Tests;
 public sealed class DeviceLogTests
 {
     [Fact]
-    public void DeviceLogNaming_IncludesIp_ToAvoidIdentityCollisions()
+    public void DeviceLogNaming_IdentityStem_MatchesBackupSanitisation()
     {
-        string a = DeviceLogNaming.BuildFileName("MikroTik", IPAddress.Parse("198.18.0.83"));
-        string b = DeviceLogNaming.BuildFileName("MikroTik", IPAddress.Parse("198.18.0.84"));
-        Assert.NotEqual(a, b);
-        Assert.Contains("198.18.0.83", a, StringComparison.Ordinal);
-        Assert.Contains("198.18.0.84", b, StringComparison.Ordinal);
+        IPAddress ip = IPAddress.Parse("198.18.0.83");
+        Assert.Equal("MikroTik_198.18.0.83.log", DeviceLogNaming.BuildDeviceLogFileName("MikroTik", ip));
+        Assert.Equal("MikroTik_198.18.0.83", DeviceLogNaming.BuildDeviceStem("MikroTik", ip));
+        Assert.Equal("MikroTik", DeviceLogNaming.Sanitize("MikroTik"));
     }
 
     [Fact]
-    public void DeviceLogNaming_WorksWithoutIdentity()
+    public void DeviceLogNaming_PendingUsesIpUntilIdentityKnown()
     {
-        string name = DeviceLogNaming.BuildFileName(null, IPAddress.Parse("10.0.0.5"));
-        Assert.Equal("router_10.0.0.5.log", name);
+        Assert.Equal("pending_198.18.0.83.log", DeviceLogNaming.BuildPendingLogFileName(IPAddress.Parse("198.18.0.83")));
+    }
+
+    [Fact]
+    public void DeviceLogNaming_CollisionUsesIdentityPlusIp()
+    {
+        DeviceLogIdentityRegistry registry = new();
+        string first = DeviceLogNaming.ResolveIdentityLogFileName(
+            registry,
+            "MikroTik",
+            IPAddress.Parse("198.18.0.83"));
+        string second = DeviceLogNaming.ResolveIdentityLogFileName(
+            registry,
+            "MikroTik",
+            IPAddress.Parse("198.18.0.84"));
+
+        Assert.Equal("MikroTik_198.18.0.83.log", first);
+        Assert.Equal("MikroTik_198.18.0.84.log", second);
+    }
+
+    [Fact]
+    public void DeviceLogNaming_SameIdentityAndIp_ReusesStem()
+    {
+        DeviceLogIdentityRegistry registry = new();
+        string first = DeviceLogNaming.ResolveIdentityLogFileName(
+            registry,
+            "MikroTik",
+            IPAddress.Parse("198.18.0.83"));
+        string second = DeviceLogNaming.ResolveIdentityLogFileName(
+            registry,
+            "MikroTik",
+            IPAddress.Parse("198.18.0.83"));
+        Assert.Equal("MikroTik_198.18.0.83.log", first);
+        Assert.Equal("MikroTik_198.18.0.83.log", second);
     }
 
     [Fact]
     public void DeviceLogNaming_SanitizesUnsafePathCharacters()
     {
-        string name = DeviceLogNaming.BuildFileName(@"CORE:01/..\evil", IPAddress.Parse("10.0.0.7"));
+        string name = DeviceLogNaming.BuildDeviceLogFileName(@"CORE:01/..\evil", IPAddress.Parse("10.0.0.7"));
         Assert.Equal("CORE_01_.._evil_10.0.0.7.log", name);
-        Assert.DoesNotContain(Path.DirectorySeparatorChar.ToString(), name, StringComparison.Ordinal);
-        Assert.DoesNotContain(":", name, StringComparison.Ordinal);
         Assert.Equal(-1, name.IndexOfAny(Path.GetInvalidFileNameChars()));
     }
 
@@ -54,7 +83,7 @@ public sealed class DeviceLogTests
         DeviceLogWriter writer = new(Options.Create(options));
         await writer.StartAsync(CancellationToken.None);
 
-        string key = DeviceLogNaming.BuildFileName("CORE-01", IPAddress.Parse("192.168.1.10"));
+        string key = DeviceLogNaming.BuildDeviceLogFileName("CORE-01", IPAddress.Parse("10.1.2.3"));
         LogEvent evt = CreateEvent("Connection succeeded for router (no secrets)");
         writer.Emit(key, evt);
 
@@ -69,21 +98,92 @@ public sealed class DeviceLogTests
     }
 
     [Fact]
-    public void DeviceLogScope_PushesStableKeyFromJobMetadata()
+    public void DeviceLogScope_StartsPending_ThenPromotesToIdentity()
     {
         MikrotikScheduledJob job = new()
         {
-            ImportId = Guid.NewGuid(),
+            ImportId = Guid.Parse("3e00880a-b421-4c69-997b-963f5c8a9f05"),
             SourceFileName = "a.csv",
             RowNumber = 2,
-            RouterName = "CORE-01",
+            RouterName = "LIVE-TEST",
             RouterIp = IPAddress.Parse("10.1.2.3"),
             DateStartUtc = DateTime.UtcNow,
             DateStopUtc = DateTime.UtcNow.AddHours(1),
         };
 
         using DeviceLogScope scope = DeviceLogScope.Begin(job);
-        Assert.Equal("CORE-01_10.1.2.3.log", scope.DeviceLogKey);
+        Assert.Equal("pending_10.1.2.3.log", scope.DeviceLogKey);
+        scope.SetRouterIdentity("MikroTik");
+        Assert.Equal("MikroTik_10.1.2.3.log", scope.DeviceLogKey);
+    }
+
+    [Fact]
+    public async Task DeviceLogScope_WritesSessionHeaderOnce_WithoutRepeatingCorrelationOnLines()
+    {
+        string logRoot = Directory.CreateTempSubdirectory("devlogs-header-").FullName;
+        DeviceLogWriter writer = new(Options.Create(new SerilogOptions
+        {
+            LogDirectory = logRoot,
+            DeviceLogEnabled = true,
+            DeviceLogDirectory = "Devices",
+        }));
+        await writer.StartAsync(CancellationToken.None);
+
+        MikrotikScheduledJob job = new()
+        {
+            ImportId = Guid.Parse("3e00880a-b421-4c69-997b-963f5c8a9f05"),
+            SourceFileName = "a.csv",
+            RowNumber = 2,
+            RouterName = "LIVE-TEST",
+            RouterIp = IPAddress.Parse("198.18.0.83"),
+            DateStartUtc = DateTime.UtcNow,
+            DateStopUtc = DateTime.UtcNow.AddHours(1),
+        };
+
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 19, 13, 56, TimeSpan.Zero));
+        using (DeviceLogScope scope = DeviceLogScope.Begin(job, writer, new DeviceLogIdentityRegistry(), time))
+        {
+            scope.SetRouterIdentity("MikroTik");
+            writer.Emit(scope.DeviceLogKey, CreateEvent("Connected successfully"));
+        }
+
+        await writer.StopAsync(CancellationToken.None);
+        writer.Dispose();
+
+        string content = await File.ReadAllTextAsync(Path.Combine(writer.DeviceLogDirectory, "MikroTik_198.18.0.83.log"));
+        Assert.Contains("Device: MikroTik", content, StringComparison.Ordinal);
+        Assert.Contains("Address: 198.18.0.83", content, StringComparison.Ordinal);
+        Assert.Contains("CSV name: LIVE-TEST", content, StringComparison.Ordinal);
+        Assert.Contains("Import ID: 3e00880a-b421-4c69-997b-963f5c8a9f05", content, StringComparison.Ordinal);
+        Assert.Contains("Connected successfully", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("ImportId=", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("JobId=", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("RouterIp=", content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DeviceLogWriter_PromoteKey_MovesPendingIntoIdentityFile()
+    {
+        string logRoot = Directory.CreateTempSubdirectory("devlogs-promote-").FullName;
+        DeviceLogWriter writer = new(Options.Create(new SerilogOptions
+        {
+            LogDirectory = logRoot,
+            DeviceLogEnabled = true,
+            DeviceLogDirectory = "Devices",
+        }));
+        await writer.StartAsync(CancellationToken.None);
+
+        writer.Emit("pending_10.0.0.1.log", CreateEvent("pre-identity"));
+        writer.PromoteKey("pending_10.0.0.1.log", "MikroTik_10.0.0.1.log");
+        writer.Emit("MikroTik_10.0.0.1.log", CreateEvent("post-identity"));
+
+        await writer.StopAsync(CancellationToken.None);
+        writer.Dispose();
+
+        Assert.False(File.Exists(Path.Combine(writer.DeviceLogDirectory, "pending_10.0.0.1.log")));
+        string content = await File.ReadAllTextAsync(Path.Combine(writer.DeviceLogDirectory, "MikroTik_10.0.0.1.log"));
+        Assert.Contains("pre-identity", content, StringComparison.Ordinal);
+        Assert.Contains("post-identity", content, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -100,7 +200,7 @@ public sealed class DeviceLogTests
         }));
 
         await writer.StartAsync(CancellationToken.None);
-        string key = DeviceLogNaming.BuildFileName("DRAIN", IPAddress.Parse("10.0.0.9"));
+        string key = DeviceLogNaming.BuildDeviceLogFileName("DRAIN", IPAddress.Parse("10.0.0.1"));
         for (int i = 0; i < 50; i++)
         {
             writer.Emit(key, CreateEvent($"drain-line-{i}"));
@@ -147,7 +247,7 @@ public sealed class DeviceLogTests
         }));
 
         await writer.StartAsync(CancellationToken.None);
-        string key = DeviceLogNaming.BuildFileName("CONC", IPAddress.Parse("10.0.0.8"));
+        string key = DeviceLogNaming.BuildDeviceLogFileName("CONC", IPAddress.Parse("10.0.0.1"));
         ConcurrentBag<string> markers = [];
         await Task.WhenAll(Enumerable.Range(0, 100).Select(async i =>
         {
@@ -180,8 +280,9 @@ public sealed class DeviceLogTests
         }));
 
         await writer.StartAsync(CancellationToken.None);
-        string keyA = DeviceLogNaming.BuildFileName("SAME", IPAddress.Parse("10.0.0.1"));
-        string keyB = DeviceLogNaming.BuildFileName("SAME", IPAddress.Parse("10.0.0.2"));
+        DeviceLogIdentityRegistry registry = new();
+        string keyA = DeviceLogNaming.ResolveIdentityLogFileName(registry, "SAME", IPAddress.Parse("10.0.0.1"));
+        string keyB = DeviceLogNaming.ResolveIdentityLogFileName(registry, "SAME", IPAddress.Parse("10.0.0.2"));
         writer.Emit(keyA, CreateEvent("device-a-only"));
         writer.Emit(keyB, CreateEvent("device-b-only"));
         await writer.StopAsync(CancellationToken.None);
@@ -209,8 +310,7 @@ public sealed class DeviceLogTests
         }));
 
         await writer.StartAsync(CancellationToken.None);
-        string key = DeviceLogNaming.BuildFileName("FAIL", IPAddress.Parse("10.0.0.3"));
-        // A directory occupying the target file path makes append fail without affecting StartAsync.
+        string key = DeviceLogNaming.BuildDeviceLogFileName("FAIL", IPAddress.Parse("10.0.0.1"));
         Directory.CreateDirectory(Path.Combine(writer.DeviceLogDirectory, key));
         writer.Emit(key, CreateEvent("should-fail-to-append"));
         await writer.StopAsync(CancellationToken.None);
@@ -233,7 +333,7 @@ public sealed class DeviceLogTests
         }));
 
         await writer.StartAsync(CancellationToken.None);
-        string key = DeviceLogNaming.BuildFileName("SYNC", IPAddress.Parse("10.0.0.4"));
+        string key = DeviceLogNaming.BuildDeviceLogFileName("SYNC", IPAddress.Parse("10.0.0.1"));
         for (int i = 0; i < 200; i++)
         {
             writer.Emit(key, CreateEvent($"sync-fallback-{i}"));
@@ -248,11 +348,35 @@ public sealed class DeviceLogTests
         Assert.Equal(0, writer.WriteFailureCount);
     }
 
-    private static LogEvent CreateEvent(string message) =>
+    [Fact]
+    public void DeviceLogFilters_ExcludeDeviceDetail_ButKeepWarningsAndSummaries()
+    {
+        LogEvent detail = CreateEvent(
+            "Connected successfully",
+            new LogEventProperty("DeviceLogKey", new ScalarValue("MikroTik.log")));
+
+        LogEvent summary = CreateEvent(
+            "Router job started",
+            new LogEventProperty("DeviceLogKey", new ScalarValue("MikroTik.log")),
+            new LogEventProperty("ServiceSummary", new ScalarValue(true)));
+
+        LogEvent warning = new(
+            DateTimeOffset.UtcNow,
+            LogEventLevel.Warning,
+            exception: null,
+            messageTemplate: new MessageTemplateParser().Parse("something went wrong"),
+            properties: [new LogEventProperty("DeviceLogKey", new ScalarValue("MikroTik.log"))]);
+
+        Assert.True(DeviceLogFilters.IsDeviceDetailExcludedFromServiceLog(detail));
+        Assert.False(DeviceLogFilters.IsDeviceDetailExcludedFromServiceLog(summary));
+        Assert.False(DeviceLogFilters.IsDeviceDetailExcludedFromServiceLog(warning));
+    }
+
+    private static LogEvent CreateEvent(string message, params LogEventProperty[] properties) =>
         new(
             DateTimeOffset.UtcNow,
             LogEventLevel.Information,
             exception: null,
             messageTemplate: new MessageTemplateParser().Parse(message),
-            properties: []);
+            properties: properties);
 }
