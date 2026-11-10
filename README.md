@@ -7,7 +7,11 @@
 - a tik4net-based native RouterOS API communication foundation
 - CSV-based scheduled job ingestion with a bounded, time-aware in-memory scheduler
 
-CSV ingestion, in-memory scheduling, and **connect/disconnect-only** router job execution are implemented. **Firmware upgrades, package transfers, and RouterOS configuration changes are not implemented yet.**
+CSV ingestion, in-memory scheduling, RouterOS assessment, **mandatory pre-upgrade backup**, package fetch/install via reboot, and post-upgrade verification are implemented for **RouterOS v6 → 6.49.23**.
+
+**Hardware verification status:** one controlled live upgrade of test router `198.18.0.83` (`mipsbe` / hEX PoE / `960PGS`) from **6.49.19 → 6.49.23** completed successfully. That proves the v6 path on that architecture; it does **not** prove fleet-wide production readiness for every board, architecture, or optional-package combination.
+
+**Out of scope for this milestone:** RouterOS v7 migration, `/system/routerboard/upgrade`, multi-router fleet orchestration, and durable job persistence.
 
 **Deployment model:** a single application instance. All job and scheduling state is in memory only. There is no durable job store. A restart discards in-memory state; retained CSV files are the operator-controlled source for re-import (which may repeat work).
 
@@ -29,8 +33,10 @@ MikrotikWorker/
 ├── appsettings.json
 ├── FirmwareFiles/
 │   └── mikrotik/
+├── Backups/                         # Pre-upgrade .rsc / .backup / manifests (not served)
 ├── Logs/
-│   └── application-YYYYMMDD.log     # Central Serilog application log
+│   ├── application-YYYYMMDD.log     # Central Serilog application log
+│   └── Devices/                     # Per-device mirrored job logs
 └── ScheduledJobs/
     ├── *.csv                        # Incoming drop folder
     ├── Processing/
@@ -182,45 +188,63 @@ Target RouterOS baseline (configurable, default **6.49.23**). Versions are parse
 
 `FirmwareAssessment:TargetRouterOsVersion` and `FirmwareUpgrade:TargetRouterOsVersion` must remain **v6** releases; v7 targets are rejected at startup.
 
-**Package matching** uses the FirmwareFiles catalog:
+**Package matching** uses the FirmwareFiles catalog and the live `/system/package/print` `bundle` field:
 
-- Main v6: `routeros-{arch}-{version}.npk`
-- Optional/split v6: `{name}-{version}-{arch}.npk` (e.g. `tr069-client-6.49.23-mipsbe.npk`, `user-manager-6.49.23-mipsbe.npk`)
-- Device `ppc` maps to `powerpc` for matching
-- Exact package name + architecture + version required; ambiguous duplicates fail safe
+- Combined main package: unbundled `routeros` / `routeros-{arch}` → catalog `routeros-{arch}-{version}.npk` (e.g. `routeros-mipsbe-6.49.23.npk`)
+- Bundled components (`bundle=<main>`, including disabled ones such as `ipv6`) are **not** fetched separately
+- Independently installed optionals (`bundle` empty): `{name}-{version}-{arch}.npk` (e.g. `tr069-client-6.49.23-mipsbe.npk`)
+- Exact package identity + architecture + version required; ambiguous duplicates fail safe
 
-RouterBOARD current vs upgrade firmware is collected and logged only. This milestone never runs `/system/routerboard/upgrade`. RouterOS v7.23.8 upgrades are deferred.
+RouterBOARD current vs upgrade firmware is collected and logged before and after RouterOS upgrade. This milestone never runs `/system/routerboard/upgrade`. RouterOS v7 package migration remains deferred.
 
 ### Automated RouterOS v6 → 6.49.23 upgrade
 
 Enable with `FirmwareUpgrade:Enabled=true` and set `AdvertisedBaseUrl` to an HTTP URL **reachable from routers** (not localhost), ending in `/firmware_files`.
 
+**Live proof (single test router):** `198.18.0.83` was upgraded 6.49.19 → 6.49.23 using only `routeros-mipsbe-6.49.23.npk` (verified immediately post-reconnect). Evidence is retained under local `OperationalEvidence/` (gitignored). Operators should re-check the live version before treating the lab device as remaining on 6.49.23.
+
 Sequence for eligible devices:
 
-1. Inventory installed packages (`/system/package/print`)
-2. Resolve the complete target package set (main + every installed optional package)
+1. Inventory installed packages (`/system/package/print`, including `bundle`)
+2. Resolve independently installed packages only (main + true optionals)
 3. **Mandatory pre-upgrade backup** (blocking):
    - `/export file={name}` → `{name}.rsc`
    - `/system/backup/save name={name}` (optional separate `BackupPassword`; never the login password)
    - Wait until both files exist with non-zero size
-   - Retrieve via **SFTP** to `Backups/Exports/` and `Backups/Binary/` (API `contents` cannot transfer binary intact on RouterOS v6)
-   - Write SHA-256 + JSON manifest under `Backups/Manifests/`
-4. Only then `/tool/fetch` each package from Kestrel (`mode=http`, `keep-result=yes`, `dst-path=…`)
-5. Verify on-router file sizes against the catalog
-6. `/system/reboot` (`.npk` install on reboot)
-7. Reconnect and verify exact RouterOS 6.49.23 + installed package versions
+   - Retrieve via **SFTP** to `Backups/Exports/` and `Backups/Binary/`
+   - Verify local size + SHA-256; write JSON manifest under `Backups/Manifests/`
+   - Delete **only** the two job-created remote backup files and verify absence
+4. Only then `/tool/fetch` each required package from Kestrel (`mode=http`, `keep-result=yes`, `dst-path=…`)
+5. Poll until on-router file sizes match the catalog (RouterOS can report an intermediate size briefly)
+6. `/system/reboot` exactly once (`.npk` install on reboot)
+7. Bounded reconnect; verify exact RouterOS 6.49.23 + installed package versions
+8. Log RouterBOARD firmware before/after without upgrading it
 
-Backup failure, missing packages, fetch failures, or verification mismatches stop that device — no fetch/reboot after a failed backup. There is no automatic rollback or durable crash recovery: if the worker stops mid-upgrade, inspect the device and re-import the CSV manually.
+Backup failure, remote cleanup failure, missing packages, fetch failures, or verification mismatches stop that device — no fetch/reboot after a failed backup/cleanup. There is no automatic rollback or durable crash recovery: if the worker stops mid-upgrade, inspect the device and re-import the CSV manually.
 
-Backups may contain secrets. They are stored under `Backups/` (not under `FirmwareFiles`, not served by Kestrel, not published). Protect the directory with filesystem ACLs. Backups are never auto-deleted.
+#### Manual recovery (no persistent job store)
+
+1. Preserve central `Backups/` artefacts and `Logs/Devices/` for the router.
+2. Determine whether the device rebooted and which RouterOS version is running.
+3. If packages remain staged but the version is unchanged, decide manually whether to reboot once.
+4. If the upgrade failed mid-fetch, free disk space / remove partial `.npk` files before retrying.
+5. Re-import the CSV only after the operator accepts possible repeat work.
+
+Backups may contain secrets. They are stored under `Backups/` (not under `FirmwareFiles`, not served by Kestrel, not published). Protect the directory with filesystem ACLs. Successful job backups are never auto-deleted from central storage.
+
+#### Windows Firewall / Kestrel reachability
+
+Routers must reach `AdvertisedBaseUrl` on the worker host. On Windows, allow inbound **TCP 8080** to the worker process (or an equivalent scoped rule). For lab hosts serving only the test router, prefer RemoteAddress=`198.18.0.83` and the Private profile. Program-scoped rules for `MikrotikWorker.exe` are preferred for production; test-hosted Kestrel (`testhost`) may need a port rule when running `Category=LiveUpgrade`.
 
 ### Per-device logs
 
-Beside the application log, each router job mirrors connection + assessment events to:
+`RouterJobExecutor` pushes a `DeviceLogKey` via `DeviceLogScope`. Serilog's `DeviceLogSink` mirrors those events into:
 
 `Logs/Devices/{RouterName}_{RouterIp}.log`
 
-Example: `Logs/Devices/MikroTik_198.18.0.83.log` (name sanitized; IP prevents identity collisions). The writer uses a bounded async queue and opens/closes files per write so the process does not retain a handle per device.
+Example: `Logs/Devices/LIVE-TEST_198.18.0.83.log` (name sanitized; IP prevents identity collisions). The `DeviceLogWriter` uses a bounded async queue and opens/closes files per write so the process does not retain a handle per device. Shutdown drains the queue (`StopAsync` / `Log.CloseAndFlushAsync`).
+
+Production device logs are expected to cover job start, connection, inventory/resolution, backup + remote cleanup, fetch/staging, reboot, reconnect, post-upgrade verification, RouterBOARD before/after, and final outcome. Credentials and configuration contents must never appear.
 
 ### In-memory scheduler
 
@@ -250,7 +274,7 @@ curl -O http://127.0.0.1:8080/firmware_files/mikrotik/routeros-tile-6.49.23.npk
 
 ## Logging (Serilog)
 
-Serilog is the **single** logging provider for the Generic Host, Worker Services, ScheduledJobs, Kestrel, and ASP.NET Core infrastructure. Components continue to use constructor-injected `ILogger<T>`; there is one central application log in this milestone (per-router log files come later).
+Serilog is the **single** logging provider for the Generic Host, Worker Services, ScheduledJobs, Kestrel, and ASP.NET Core infrastructure. Components continue to use constructor-injected `ILogger<T>`.
 
 ### Destinations
 
@@ -258,6 +282,7 @@ Serilog is the **single** logging provider for the Generic Host, Worker Services
 |---|---|
 | Console | Readable template with timestamp, level, source context, message, exception |
 | Rolling file | `Logs/application-YYYYMMDD.log` beside the published binaries |
+| Per-device files | `Logs/Devices/{RouterName}_{RouterIp}.log` when `DeviceLogEnabled=true` |
 
 Relative `LogDirectory` values resolve from `AppContext.BaseDirectory` (not the process working directory). The log directory is created automatically.
 
@@ -287,7 +312,11 @@ Trade-off: under extreme burst load, `AsyncBlockWhenFull` can briefly slow the l
       "WriteToConsole": true,
       "WriteToFile": true,
       "AsyncBufferCapacity": 10000,
-      "AsyncBlockWhenFull": true
+      "AsyncBlockWhenFull": true,
+      "DeviceLogEnabled": true,
+      "DeviceLogDirectory": "Devices",
+      "DeviceLogAsyncCapacity": 10000,
+      "DeviceLogAsyncBlockWhenFull": true
     }
   }
 }
@@ -311,9 +340,15 @@ HTTP request logging uses Serilog request middleware (method, path, status, dura
 
 Console output goes to the service journal when running under systemd. Prefer the rolling file under `Logs/` for persistent operational history. Point `LogDirectory` at a writable path if the service user cannot write beside the binaries.
 
-### Future per-router logs
+### Known limitations (v6 milestone)
 
-Router operations should keep structured properties such as `RouterName`, `RouterIp`, `RouterIdentity`, `JobId`, and `ImportId` (and `LogContext` where useful). Per-router sinks are **not** implemented yet; a later milestone can route by those properties without changing every call site.
+- Proven on one live `mipsbe` test router; other architectures/boards remain unit/fake-covered unless separately exercised
+- No durable job store / crash recovery
+- No automatic rollback
+- RouterBOARD firmware upgrade is intentionally deferred
+- RouterOS v7 migration is intentionally deferred
+- Small flash devices need enough free space for the full `.npk` before fetch
+- Windows hosts must explicitly allow inbound firmware HTTP from routers
 
 ## Configuration excerpt
 
