@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>MikrotikWorker</RootNamespace>
+    <AssemblyName>MikrotikWorker</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MikrotikWorker.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\FirmwareFiles\**\*">
+      <Link>FirmwareFiles\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <!-- Local secrets: usable for development/output, never publish. -->
+    <Content Update="appsettings.*.local.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CsvHelper" />
+    <PackageReference Include="Serilog.AspNetCore" />
+    <PackageReference Include="Serilog.Sinks.Async" />
+    <PackageReference Include="SSH.NET" />
+    <PackageReference Include="tik4net" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Backups are runtime data, never publish content. -->
+    <Content Remove="Backups\**\*" />
+    <None Include="Backups\**\*" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+</Project>
