@@ -56,3 +56,11 @@ Desktop.ini
 ## Secrets / local env
 *.env
 appsettings.*.local.json
+
+## Local operational artefacts (never commit)
+OperationalEvidence/
+Backups/
+Backups-*/
+**/Backups-Live*/
+**/Logs-Live*/
+**/Logs/Devices/
