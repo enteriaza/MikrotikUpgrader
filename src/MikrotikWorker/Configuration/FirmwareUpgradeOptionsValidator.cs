@@ -39,6 +39,13 @@ internal sealed class FirmwareUpgradeOptionsValidator : IValidateOptions<Firmwar
             errors.Add("FirmwareUpgrade:PostUpgradeVerifyTimeout must be greater than zero.");
         }
 
+        if (options.PostUpgradeVerifyTimeout > options.RebootTimeout
+            && options.RebootTimeout > TimeSpan.Zero)
+        {
+            errors.Add(
+                "FirmwareUpgrade:PostUpgradeVerifyTimeout must not exceed FirmwareUpgrade:RebootTimeout (absolute post-reboot deadline).");
+        }
+
         if (options.BackupFileReadyTimeout <= TimeSpan.Zero)
         {
             errors.Add("FirmwareUpgrade:BackupFileReadyTimeout must be greater than zero.");

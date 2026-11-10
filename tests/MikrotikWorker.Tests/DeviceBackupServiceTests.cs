@@ -43,6 +43,62 @@ public sealed class DeviceBackupServiceTests
             result.Manifest.ExportSha256);
         Assert.False(ops.FetchCalled);
         Assert.False(ops.RebootCalled);
+        Assert.True(result.RemoteCleanupSucceeded);
+        Assert.Equal(2, ops.RemovedFiles.Count);
+        Assert.Empty(ops.Files.Keys);
+        Assert.StartsWith("CORE-01_", Path.GetFileName(result.ExportLocalPath), StringComparison.Ordinal);
+        Assert.StartsWith("CORE-01_", Path.GetFileName(result.BinaryLocalPath), StringComparison.Ordinal);
+        Assert.Equal(
+            Path.GetFileNameWithoutExtension(result.ExportLocalPath),
+            Path.GetFileNameWithoutExtension(result.BinaryLocalPath));
+        Assert.Equal("CORE-01", result.Manifest.RouterIdentity);
+        Assert.Equal("CORE-01", result.Manifest.RouterName);
+        Assert.Contains("10.0.0.50", Path.GetFileName(result.ExportLocalPath!), StringComparison.Ordinal);
+        Assert.StartsWith("CORE-01_10.0.0.50_", Path.GetFileName(result.ExportLocalPath!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LocalVerificationFailure_DoesNotDeleteRemoteFiles()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-no-delete-").FullName;
+        RecordingRouterOps ops = new();
+        InMemoryFileTransfer transfer = new() { CorruptLocalSize = true };
+        DeviceBackupService service = CreateService(backupRoot, ops, transfer);
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(ops.RemovedFiles);
+        Assert.True(ops.Files.Count >= 1);
+    }
+
+    [Fact]
+    public async Task RemoteDeletionFailure_RetainsCentralBackups_AndFails()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-cleanup-fail-").FullName;
+        RecordingRouterOps ops = new() { RemoveThrows = true };
+        DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.RemoteCleanupFailed);
+        Assert.True(File.Exists(result.ExportLocalPath));
+        Assert.True(File.Exists(result.BinaryLocalPath));
+        Assert.True(File.Exists(result.ManifestLocalPath));
+        Assert.NotEmpty(result.RemainingRemoteFiles);
     }
 
     [Fact]
@@ -105,6 +161,63 @@ public sealed class DeviceBackupServiceTests
 
         Assert.False(result.Succeeded);
         Assert.False(ops.FetchCalled);
+        Assert.Empty(ops.RemovedFiles);
+        Assert.True(ops.Files.Count >= 1);
+    }
+
+    [Fact]
+    public async Task Cleanup_RemovesOnlyJobBackupFiles()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-unrelated-").FullName;
+        RecordingRouterOps ops = new();
+        ops.Files["unrelated-config.rsc"] = 99;
+        ops.Files["other.backup"] = 88;
+        DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.Equal(2, ops.RemovedFiles.Count);
+        Assert.DoesNotContain("unrelated-config.rsc", ops.RemovedFiles);
+        Assert.DoesNotContain("other.backup", ops.RemovedFiles);
+        Assert.True(ops.Files.ContainsKey("unrelated-config.rsc"));
+        Assert.True(ops.Files.ContainsKey("other.backup"));
+    }
+
+    [Fact]
+    public async Task CancellationDuringCleanup_PreservesCentralBackups()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-cancel-cleanup-").FullName;
+        RecordingRouterOps ops = new() { RemoveDelay = TimeSpan.FromSeconds(5) };
+        using CancellationTokenSource cts = new();
+        DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
+
+        Task<DeviceBackupResult> task = service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            cts.Token);
+
+        while (ops.RemovedFiles.Count == 0 && !task.IsCompleted)
+        {
+            await Task.Delay(20);
+        }
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await task);
+
+        string[] localFiles = Directory.GetFiles(backupRoot, "*", SearchOption.AllDirectories);
+        Assert.Contains(localFiles, static p => p.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(localFiles, static p => p.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(localFiles, static p => p.EndsWith(".json", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -116,6 +229,111 @@ public sealed class DeviceBackupServiceTests
         string second = BackupFileNaming.EnsureUniquePath(dir, "same.rsc");
         Assert.NotEqual(first, second);
         Assert.False(File.Exists(second));
+    }
+
+    [Fact]
+    public void BackupFileNaming_UsesSanitisedIdentityAndSharedTimestamp()
+    {
+        DateTimeOffset stamp = new(2026, 11, 10, 18, 53, 28, 655, TimeSpan.Zero);
+        IPAddress ip = IPAddress.Parse("10.0.0.50");
+        string baseName = BackupFileNaming.BuildBaseName("MikroTik", ip, stamp);
+        Assert.Equal("MikroTik_10.0.0.50_20261110_185328_655", baseName);
+        Assert.Equal(baseName + ".rsc", baseName + ".rsc");
+        Assert.Equal(baseName + ".backup", baseName + ".backup");
+    }
+
+    [Fact]
+    public void BackupFileNaming_SanitisesUnsafeIdentityCharacters()
+    {
+        IPAddress ip = IPAddress.Parse("10.0.0.7");
+        string baseName = BackupFileNaming.BuildBaseName(@"CORE:01/..\evil", ip, DateTimeOffset.Parse("2026-11-10T12:00:00.123Z"));
+        Assert.Equal("CORE_01_.._evil_10.0.0.7_20261110_120000_123", baseName);
+        Assert.Equal(-1, baseName.IndexOfAny(Path.GetInvalidFileNameChars()));
+        Assert.DoesNotContain(":", baseName, StringComparison.Ordinal);
+        Assert.DoesNotContain("/", baseName, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", baseName, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BackupFileNaming_EmptyOrInvalidIdentity_FallsBackSafely()
+    {
+        DateTimeOffset stamp = DateTimeOffset.Parse("2026-11-10T12:00:00.001Z");
+        IPAddress ip = IPAddress.Parse("10.0.0.50");
+        Assert.Equal("router_10.0.0.50_20261110_120000_001", BackupFileNaming.BuildBaseName(null, ip, stamp));
+        Assert.Equal("router_10.0.0.50_20261110_120000_001", BackupFileNaming.BuildBaseName("   ", ip, stamp));
+        Assert.Equal("router_10.0.0.50_20261110_120000_001", BackupFileNaming.BuildBaseName("@@@", ip, stamp));
+    }
+
+    [Fact]
+    public void BackupFileNaming_MillisecondPrecision_PreventsCollisions()
+    {
+        IPAddress ip = IPAddress.Parse("10.0.0.50");
+        string a = BackupFileNaming.BuildBaseName("MikroTik", ip, DateTimeOffset.Parse("2026-11-10T12:00:00.001Z"));
+        string b = BackupFileNaming.BuildBaseName("MikroTik", ip, DateTimeOffset.Parse("2026-11-10T12:00:00.002Z"));
+        Assert.NotEqual(a, b);
+    }
+
+    [Fact]
+    public void BackupFileNaming_AllocateUniqueBaseName_KeepsAllThreeArtefactsOnSameStem()
+    {
+        string root = Directory.CreateTempSubdirectory("bk-stem-").FullName;
+        string exports = Path.Combine(root, "Exports");
+        string binary = Path.Combine(root, "Binary");
+        string manifests = Path.Combine(root, "Manifests");
+        DateTimeOffset stamp = DateTimeOffset.Parse("2026-11-10T12:00:00.100Z");
+        IPAddress ip = IPAddress.Parse("10.0.0.50");
+        using BackupStemReservation first = BackupFileNaming.AllocateUniqueBaseName("MikroTik", ip, stamp, exports, binary, manifests);
+        // Marker reserves the stem; next allocation must bump the shared stem for all three extensions.
+        using BackupStemReservation second = BackupFileNaming.AllocateUniqueBaseName("MikroTik", ip, stamp, exports, binary, manifests);
+        Assert.Equal("MikroTik_10.0.0.50_20261110_120000_100", first.Stem);
+        Assert.Equal("MikroTik_10.0.0.50_20261110_120000_100_1", second.Stem);
+        Assert.True(File.Exists(first.MarkerPath));
+        Assert.True(File.Exists(second.MarkerPath));
+        Assert.False(File.Exists(second.ExportLocalPath));
+        Assert.False(File.Exists(second.BinaryLocalPath));
+        Assert.False(File.Exists(second.ManifestLocalPath));
+    }
+
+    [Fact]
+    public async Task SuccessfulBackup_UsesIdentityFilenames_AndCleansExactRemoteFiles()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-identity-").FullName;
+        RecordingRouterOps ops = new();
+        ops.Files["unrelated.rsc"] = 10;
+        DeviceBackupService service = CreateService(
+            backupRoot,
+            ops,
+            new InMemoryFileTransfer(),
+            fixedTime: new DateTimeOffset(2026, 11, 10, 19, 0, 0, 123, TimeSpan.Zero));
+
+        MikrotikDeviceInfo device = new()
+        {
+            Identity = "MikroTik",
+            Version = "6.49.19",
+            ArchitectureName = "mipsbe",
+            BoardName = "hEX PoE",
+            RouterboardModel = "960PGS",
+        };
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            device,
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.Equal("MikroTik_10.0.0.50_20261110_190000_123.rsc", result.Manifest!.ExportFileName);
+        Assert.Equal("MikroTik_10.0.0.50_20261110_190000_123.backup", result.Manifest.BinaryBackupFileName);
+        Assert.Equal("MikroTik_10.0.0.50_20261110_190000_123.rsc", result.Manifest.RemoteExportFileName);
+        Assert.Equal("MikroTik_10.0.0.50_20261110_190000_123.backup", result.Manifest.RemoteBinaryFileName);
+        Assert.Equal(
+            ["MikroTik_10.0.0.50_20261110_190000_123.rsc", "MikroTik_10.0.0.50_20261110_190000_123.backup"],
+            ops.RemovedFiles);
+        Assert.True(ops.Files.ContainsKey("unrelated.rsc"));
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("export-body"))).ToLowerInvariant(),
+            result.Manifest.ExportSha256);
     }
 
     [Fact]
@@ -158,6 +376,7 @@ public sealed class DeviceBackupServiceTests
         Assert.False(result.Succeeded);
         Assert.Contains("size mismatch", result.FailureReason, StringComparison.OrdinalIgnoreCase);
         Assert.False(ops.FetchCalled);
+        Assert.Empty(ops.RemovedFiles);
     }
 
     [Fact]
@@ -184,7 +403,8 @@ public sealed class DeviceBackupServiceTests
     private static DeviceBackupService CreateService(
         string backupRoot,
         RecordingRouterOps ops,
-        IMikrotikFileTransferClient transfer) =>
+        IMikrotikFileTransferClient transfer,
+        DateTimeOffset? fixedTime = null) =>
         new(
             ops,
             transfer,
@@ -195,7 +415,7 @@ public sealed class DeviceBackupServiceTests
                 BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(10),
                 ScpTimeout = TimeSpan.FromSeconds(5),
             }),
-            TimeProvider.System,
+            fixedTime is null ? TimeProvider.System : new FakeTimeProvider(fixedTime.Value),
             NullLogger<DeviceBackupService>.Instance);
 
     private static MikrotikScheduledJob CreateJob() =>
@@ -224,13 +444,21 @@ public sealed class DeviceBackupServiceTests
     {
         public bool ExportThrows { get; init; }
 
+        public bool RemoveThrows { get; init; }
+
         public long BinarySize { get; init; } = 12;
 
         public TimeSpan ExportDelay { get; init; }
 
+        public TimeSpan RemoveDelay { get; init; }
+
         public bool FetchCalled { get; private set; }
 
         public bool RebootCalled { get; private set; }
+
+        public Dictionary<string, long> Files => _files;
+
+        public List<string> RemovedFiles { get; } = [];
 
         private readonly Dictionary<string, long> _files = new(StringComparer.OrdinalIgnoreCase);
 
@@ -243,7 +471,7 @@ public sealed class DeviceBackupServiceTests
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([new("routeros", "6.49.19", false)]);
+            Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([new("routeros-mipsbe", "6.49.19", false)]);
 
         public async Task ExportConfigurationToFileAsync(
             ITikConnection connection,
@@ -280,7 +508,7 @@ public sealed class DeviceBackupServiceTests
         {
             if (_files.TryGetValue(fileName, out long size))
             {
-                return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, size));
+                return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, size, "*1"));
             }
 
             return Task.FromResult<RouterFileInfo?>(null);
@@ -298,6 +526,25 @@ public sealed class DeviceBackupServiceTests
             {
                 throw new TimeoutException("not ready");
             }
+        }
+
+        public async Task RemoveFileAsync(
+            ITikConnection connection,
+            string fileName,
+            CancellationToken cancellationToken = default)
+        {
+            RemovedFiles.Add(fileName);
+            if (RemoveDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(RemoveDelay, cancellationToken);
+            }
+
+            if (RemoveThrows)
+            {
+                throw new IOException("remove failed");
+            }
+
+            _files.Remove(fileName);
         }
 
         public Task FetchUrlToFileAsync(
@@ -346,7 +593,10 @@ public sealed class DeviceBackupServiceTests
             byte[] payload = remoteFileName.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase)
                 ? Encoding.UTF8.GetBytes(CorruptLocalSize ? "x" : "export-body")
                 : Enumerable.Repeat((byte)7, CorruptLocalSize ? 1 : 12).ToArray();
-            File.WriteAllBytes(localFilePath, payload);
+            // Match production SFTP: never overwrite an existing local artefact.
+            using FileStream output = new(localFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            output.Write(payload);
+            output.Flush();
             return Task.CompletedTask;
         }
     }

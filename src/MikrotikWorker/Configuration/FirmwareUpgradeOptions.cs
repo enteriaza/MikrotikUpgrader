@@ -27,8 +27,17 @@ public sealed class FirmwareUpgradeOptions
 
     public TimeSpan ReconnectInterval { get; set; } = TimeSpan.FromSeconds(15);
 
-    public TimeSpan RebootTimeout { get; set; } = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// Absolute maximum time from successful reboot initiation through reconnection and
+    /// post-reboot verification. Default and operational value: five minutes.
+    /// </summary>
+    public TimeSpan RebootTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Optional shorter poll budget for waiting for the target RouterOS version to appear after
+    /// reconnect. Always capped by the remaining <see cref="RebootTimeout"/> window and cannot
+    /// extend the absolute reboot deadline.
+    /// </summary>
     public TimeSpan PostUpgradeVerifyTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
     public TimeSpan BackupFileReadyTimeout { get; set; } = TimeSpan.FromMinutes(2);

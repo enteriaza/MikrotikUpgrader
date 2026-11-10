@@ -6,13 +6,73 @@ namespace MikrotikWorker.Backup;
 
 internal static class BackupFileNaming
 {
-    public static string BuildBaseName(string? routerName, IPAddress routerIp, DateTimeOffset timestampUtc)
+    private static readonly object StemAllocationGate = new();
+    public const string StemAllocationMarkerExtension = ".stem.alloc";
+
+    /// <summary>
+    /// Builds a shared stem for export/binary/manifest files:
+    /// <c>{Identity}_{IP}_{yyyyMMdd_HHmmss_fff}</c>.
+    /// </summary>
+    public static string BuildBaseName(string? routerIdentity, IPAddress routerIp, DateTimeOffset timestampUtc)
     {
-        string label = DeviceLogNaming.Sanitize(
-            string.IsNullOrWhiteSpace(routerName) ? "router" : routerName);
-        string ip = DeviceLogNaming.Sanitize(routerIp.ToString());
-        string stamp = timestampUtc.UtcDateTime.ToString("yyyyMMddTHHmmssfffZ", CultureInfo.InvariantCulture);
-        return $"{label}_{ip}_{stamp}";
+        ArgumentNullException.ThrowIfNull(routerIp);
+        string deviceStem = DeviceLogNaming.BuildDeviceStem(routerIdentity, routerIp);
+        string stamp = timestampUtc.UtcDateTime.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
+        return $"{deviceStem}_{stamp}";
+    }
+
+    /// <summary>
+    /// Atomically reserves one free stem for <c>.rsc</c>, <c>.backup</c> and <c>.json</c> together.
+    /// Claims via a sidecar marker under a process-wide lock — never creates empty content files
+    /// and never falls back to identity-only naming.
+    /// </summary>
+    public static BackupStemReservation AllocateUniqueBaseName(
+        string? routerIdentity,
+        IPAddress routerIp,
+        DateTimeOffset timestampUtc,
+        string exportsDirectory,
+        string binaryDirectory,
+        string manifestsDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(routerIp);
+        string candidate = BuildBaseName(routerIdentity, routerIp, timestampUtc);
+        Directory.CreateDirectory(exportsDirectory);
+        Directory.CreateDirectory(binaryDirectory);
+        Directory.CreateDirectory(manifestsDirectory);
+
+        lock (StemAllocationGate)
+        {
+            for (int i = 0; i < 10_000; i++)
+            {
+                string stem = i == 0 ? candidate : $"{candidate}_{i}";
+                string exportPath = Path.Combine(exportsDirectory, stem + ".rsc");
+                string binaryPath = Path.Combine(binaryDirectory, stem + ".backup");
+                string manifestPath = Path.Combine(manifestsDirectory, stem + ".json");
+                string markerPath = Path.Combine(manifestsDirectory, stem + StemAllocationMarkerExtension);
+                if (Exists(exportPath)
+                    || Exists(binaryPath)
+                    || Exists(manifestPath)
+                    || Exists(markerPath))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ReserveNewFile(markerPath);
+                }
+                catch (IOException)
+                {
+                    // Lost the race to another claim of the same marker; try next stem.
+                    continue;
+                }
+
+                return new BackupStemReservation(stem, exportPath, binaryPath, manifestPath, markerPath);
+            }
+        }
+
+        throw new IOException(
+            $"Unable to allocate a unique backup stem for identity '{routerIdentity}' at {routerIp}.");
     }
 
     public static string EnsureUniquePath(string directory, string fileName)
@@ -37,4 +97,15 @@ internal static class BackupFileNaming
 
         throw new IOException($"Unable to allocate a unique backup filename for '{fileName}'.");
     }
+
+    private static void ReserveNewFile(string path)
+    {
+        using FileStream stream = new(
+            path,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None);
+    }
+
+    private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
 }

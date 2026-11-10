@@ -1,6 +1,6 @@
 namespace MikrotikWorker.Backup;
 
-public sealed class BackupManifest
+public sealed record BackupManifest
 {
     public required string JobId { get; init; }
 
@@ -37,6 +37,10 @@ public sealed class BackupManifest
     public required string BinaryBackupSha256 { get; init; }
 
     public required string BackupCompletionStatus { get; init; }
+
+    public string? RemoteExportFileName { get; init; }
+
+    public string? RemoteBinaryFileName { get; init; }
 }
 
 public sealed class DeviceBackupResult
@@ -52,4 +56,10 @@ public sealed class DeviceBackupResult
     public string? ManifestLocalPath { get; init; }
 
     public BackupManifest? Manifest { get; init; }
+
+    public bool RemoteCleanupSucceeded { get; init; }
+
+    public bool RemoteCleanupFailed { get; init; }
+
+    public IReadOnlyList<string> RemainingRemoteFiles { get; init; } = [];
 }
