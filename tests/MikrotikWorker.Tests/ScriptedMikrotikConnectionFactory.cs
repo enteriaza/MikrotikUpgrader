@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using MikrotikWorker.MikroTik;
 using tik4net;
 
@@ -6,7 +7,9 @@ namespace MikrotikWorker.Tests;
 internal sealed class ScriptedMikrotikConnectionFactory(Func<MikrotikConnectionOptions, ITikConnection> factory)
     : IMikrotikConnectionFactory
 {
-    public List<MikrotikConnectionOptions> Connections { get; } = [];
+    private readonly ConcurrentQueue<MikrotikConnectionOptions> _connections = new();
+
+    public IReadOnlyList<MikrotikConnectionOptions> Connections => _connections.ToArray();
 
     public Task<ITikConnection> CreateAsync(
         MikrotikConnectionOptions connection,
@@ -14,7 +17,7 @@ internal sealed class ScriptedMikrotikConnectionFactory(Func<MikrotikConnectionO
     {
         MikrotikConnectionOptionsValidator.Validate(connection);
         cancellationToken.ThrowIfCancellationRequested();
-        Connections.Add(connection);
+        _connections.Enqueue(connection);
         return Task.FromResult(factory(connection));
     }
 }

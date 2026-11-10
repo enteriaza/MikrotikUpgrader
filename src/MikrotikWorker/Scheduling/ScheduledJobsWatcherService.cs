@@ -51,7 +51,9 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
             _options.Value.DiscoveryQueueCapacity);
 
         _processor.WarnAboutInterruptedProcessingFiles();
+        _logger.LogInformation("Initial CSV reconciliation starting. Root={Root}", _paths.Root);
         EnqueueIncomingScan();
+        _logger.LogInformation("Initial CSV reconciliation completed. Root={Root}", _paths.Root);
 
         StartWatcher();
 

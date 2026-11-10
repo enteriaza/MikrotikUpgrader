@@ -42,14 +42,35 @@ internal sealed class RouterJobExecutionService(
 
     private async Task RunWorkerAsync(int workerId, CancellationToken stoppingToken)
     {
+        logger.LogInformation("Router job worker available. WorkerId={WorkerId}", workerId);
         try
         {
             await foreach (RouterJobWorkItem workItem in queue.Reader.ReadAllAsync(stoppingToken)
                                .ConfigureAwait(false))
             {
+                MikrotikScheduledJob job = workItem.Job;
+                logger.LogInformation(
+                    "Job dequeued for execution. WorkerId={WorkerId}, ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
+                    workerId,
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterIp);
+                logger.LogInformation(
+                    "Worker beginning job. WorkerId={WorkerId}, ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
+                    workerId,
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterIp);
+
                 try
                 {
                     await executor.ExecuteAsync(workItem, completer, stoppingToken).ConfigureAwait(false);
+                    logger.LogInformation(
+                        "Worker finished job. WorkerId={WorkerId}, ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
+                        workerId,
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterIp);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -76,6 +97,10 @@ internal sealed class RouterJobExecutionService(
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             // Expected.
+        }
+        finally
+        {
+            logger.LogInformation("Router job worker stopping. WorkerId={WorkerId}", workerId);
         }
     }
 }

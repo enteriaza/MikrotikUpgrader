@@ -36,6 +36,7 @@ public sealed class Worker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _logger.LogInformation("Worker starting");
         _logger.LogInformation(
             "MikrotikWorker started with heartbeat interval {HeartbeatInterval}. MikroTik integration enabled={MikrotikEnabled}",
             _options.HeartbeatInterval,
@@ -68,6 +69,7 @@ public sealed class Worker : BackgroundService
         }
         finally
         {
+            _logger.LogInformation("Worker stopping");
             _logger.LogInformation("MikrotikWorker stopped");
         }
     }

@@ -121,8 +121,10 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<IValidateOptions<FirmwareUpgradeOptions>, FirmwareUpgradeOptionsValidator>();
 
         builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<DeviceLogIdentityRegistry>();
         builder.Services.AddSingleton<DeviceLogWriter>();
         builder.Services.AddHostedService(static sp => sp.GetRequiredService<DeviceLogWriter>());
+        builder.Services.AddHostedService<ServiceLifecycleLoggingHostedService>();
         builder.Services.AddSingleton<IFirmwarePackageCatalog, FirmwarePackageCatalog>();
         builder.Services.AddSingleton<IDeviceCompatibilityAssessor, DeviceCompatibilityAssessor>();
         builder.Services.AddSingleton<IUpgradePackageResolver, UpgradePackageResolver>();
@@ -195,6 +197,9 @@ public static class MikrotikWorkerHost
             app.UseSerilogRequestLogging(options =>
             {
                 options.IncludeQueryInRequestPath = false;
+                // Method, path, status, duration, remote IP — never query strings, bodies, or auth headers.
+                options.MessageTemplate =
+                    "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms RemoteIp={ClientIp}";
                 options.GetLevel = static (httpContext, elapsed, ex) =>
                 {
                     if (ex is not null || httpContext.Response.StatusCode >= 500)
@@ -211,9 +216,11 @@ public static class MikrotikWorkerHost
                 };
                 options.EnrichDiagnosticContext = static (diagnosticContext, httpContext) =>
                 {
+                    diagnosticContext.Set(
+                        "ClientIp",
+                        httpContext.Connection.RemoteIpAddress?.ToString() ?? "-");
                     diagnosticContext.Set("RequestHost", httpContext.Request.Host.Value);
                     diagnosticContext.Set("RequestScheme", httpContext.Request.Scheme);
-                    diagnosticContext.Set("UserAgent", httpContext.Request.Headers.UserAgent.ToString());
                 };
             });
         }

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
+using MikrotikWorker.Logging;
 
 namespace MikrotikWorker.Scheduling;
 
@@ -267,6 +268,16 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
                 _queue.Enqueue(entry, new JobPriority(job.DateStartUtc, sequence));
                 capacityHeld = false;
             }
+
+            _logger.LogInformation(
+                "Job accepted into scheduler. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, DateStartUtc={DateStartUtc}, DateStopUtc={DateStopUtc}, PendingCount={PendingCount}",
+                job.ImportId,
+                job.JobId,
+                job.RouterName,
+                job.RouterIp,
+                job.DateStartUtc,
+                job.DateStopUtc,
+                PendingCount);
 
             SignalWake();
         }
@@ -632,68 +643,74 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         Exception? error)
     {
         MikrotikScheduledJob job = entry.Job;
-        switch (state)
+        // Terminal outcomes and import completion (CSV archive) are service-lifecycle events.
+        // Keep ServiceOnly active through OnJobTerminal so ambient DeviceLogScope cannot
+        // divert ImportId-bearing archive messages into a device file.
+        using (DeviceLogging.BeginServiceOnly())
         {
-            case ScheduledJobTerminalState.Expired:
-                _logger.LogWarning(
-                    "Job expired. ImportId={ImportId}, JobId={JobId}, RowNumber={RowNumber}, RouterName={RouterName}, RouterIp={RouterIp}, SourceFileName={SourceFileName}, DateStartUtc={DateStartUtc}, DateStopUtc={DateStopUtc}, UtcNow={UtcNow}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RowNumber,
-                    job.RouterName,
-                    job.RouterIp,
-                    job.SourceFileName,
-                    job.DateStartUtc,
-                    job.DateStopUtc,
-                    _timeProvider.GetUtcNow().UtcDateTime,
-                    nameof(ScheduledJobTerminalState.Expired));
-                break;
+            switch (state)
+            {
+                case ScheduledJobTerminalState.Expired:
+                    _logger.LogWarning(
+                        "Job expired. ImportId={ImportId}, JobId={JobId}, RowNumber={RowNumber}, RouterName={RouterName}, RouterIp={RouterIp}, SourceFileName={SourceFileName}, DateStartUtc={DateStartUtc}, DateStopUtc={DateStopUtc}, UtcNow={UtcNow}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RowNumber,
+                        job.RouterName,
+                        job.RouterIp,
+                        job.SourceFileName,
+                        job.DateStartUtc,
+                        job.DateStopUtc,
+                        _timeProvider.GetUtcNow().UtcDateTime,
+                        nameof(ScheduledJobTerminalState.Expired));
+                    break;
 
-            case ScheduledJobTerminalState.Succeeded:
-                _logger.LogInformation(
-                    "Job terminal Succeeded. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    executionDuration,
-                    nameof(ScheduledJobTerminalState.Succeeded));
-                break;
+                case ScheduledJobTerminalState.Succeeded:
+                    _logger.LogInformation(
+                        "Job terminal Succeeded. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        executionDuration,
+                        nameof(ScheduledJobTerminalState.Succeeded));
+                    break;
 
-            case ScheduledJobTerminalState.Failed:
-                _logger.LogError(
-                    error,
-                    "Job terminal Failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    executionDuration,
-                    nameof(ScheduledJobTerminalState.Failed));
-                break;
+                case ScheduledJobTerminalState.Failed:
+                    _logger.LogError(
+                        error,
+                        "Job terminal Failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        executionDuration,
+                        nameof(ScheduledJobTerminalState.Failed));
+                    break;
 
-            case ScheduledJobTerminalState.Cancelled:
-                _logger.LogWarning(
-                    "Job terminal Cancelled. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    executionDuration,
-                    nameof(ScheduledJobTerminalState.Cancelled));
-                break;
+                case ScheduledJobTerminalState.Cancelled:
+                    _logger.LogWarning(
+                        "Job terminal Cancelled. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        executionDuration,
+                        nameof(ScheduledJobTerminalState.Cancelled));
+                    break;
 
-            case ScheduledJobTerminalState.ObservedEligible:
-                _logger.LogInformation(
-                    "Job terminal ObservedEligible (legacy). ImportId={ImportId}, JobId={JobId}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    nameof(ScheduledJobTerminalState.ObservedEligible));
-                break;
+                case ScheduledJobTerminalState.ObservedEligible:
+                    _logger.LogInformation(
+                        "Job terminal ObservedEligible (legacy). ImportId={ImportId}, JobId={JobId}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        nameof(ScheduledJobTerminalState.ObservedEligible));
+                    break;
+            }
+
+            ReleaseCapacity(entry);
+            OnJobTerminal(job.ImportId);
         }
-
-        ReleaseCapacity(entry);
-        OnJobTerminal(job.ImportId);
     }
 
     private void OnJobTerminal(Guid importId)

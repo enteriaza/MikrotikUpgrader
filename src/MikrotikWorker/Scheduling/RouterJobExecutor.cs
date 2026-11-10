@@ -22,7 +22,9 @@ internal sealed class RouterJobExecutor(
     IOptions<FirmwareAssessmentOptions> assessmentOptions,
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     TimeProvider timeProvider,
-    ILogger<RouterJobExecutor> logger)
+    ILogger<RouterJobExecutor> logger,
+    DeviceLogWriter? deviceLogWriter = null,
+    DeviceLogIdentityRegistry? deviceLogIdentityRegistry = null)
 {
     public async Task ExecuteAsync(
         RouterJobWorkItem workItem,
@@ -96,25 +98,29 @@ internal sealed class RouterJobExecutor(
                 return;
             }
 
-            using DeviceLogScope deviceScope = DeviceLogScope.Begin(job);
+            using DeviceLogScope deviceScope = DeviceLogScope.Begin(
+                job,
+                deviceLogWriter,
+                deviceLogIdentityRegistry,
+                timeProvider);
 
-            logger.LogInformation(
-                "Router job started. ImportId={ImportId}, JobId={JobId}, RowNumber={RowNumber}, RouterName={RouterName}, RouterIp={RouterIp}, DateStartUtc={DateStartUtc}, DateStopUtc={DateStopUtc}, DeviceLogKey={DeviceLogKey}",
-                job.ImportId,
-                job.JobId,
-                job.RowNumber,
-                job.RouterName,
-                job.RouterIp,
-                job.DateStartUtc,
-                job.DateStopUtc,
-                deviceScope.DeviceLogKey);
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogInformation(
+                    "Router job started. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterName,
+                    job.RouterIp);
+            }
 
-            logger.LogInformation(
-                "Credential resolution attempted. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp);
+            // Concise device-visible start — correlation belongs in the session header only.
+            logger.LogInformation("Router job started");
+
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogInformation("Credential resolution attempted");
+            }
 
             RouterCredentials? credentials;
             try
@@ -129,13 +135,18 @@ internal sealed class RouterJobExecutor(
 
             if (credentials is null)
             {
-                logger.LogError(
-                    "Credential resolution failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    nameof(ScheduledJobTerminalState.Failed));
+                logger.LogError("Credential resolution failed");
+                using (DeviceLogging.BeginServiceOnly())
+                {
+                    logger.LogError(
+                        "Credential resolution failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        nameof(ScheduledJobTerminalState.Failed));
+                }
+
                 completer.CompleteDispatchedJob(
                     workItem.EntryToken,
                     ScheduledJobTerminalState.Failed,
@@ -143,12 +154,10 @@ internal sealed class RouterJobExecutor(
                 return;
             }
 
-            logger.LogInformation(
-                "Credential resolution successful. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp);
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogInformation("Credential resolution successful");
+            }
 
             MikrotikConnectionOptions connectionOptions = new()
             {
@@ -157,12 +166,7 @@ internal sealed class RouterJobExecutor(
                 Password = credentials.Password,
             };
 
-            logger.LogInformation(
-                "Connection attempt started. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp);
+            logger.LogInformation("Connection attempt started");
 
             ITikConnection? connection = null;
             try
@@ -171,12 +175,7 @@ internal sealed class RouterJobExecutor(
                     .CreateAsync(connectionOptions, cancellationToken)
                     .ConfigureAwait(false);
 
-                logger.LogInformation(
-                    "Connection succeeded. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp);
+                logger.LogInformation("Connected successfully");
 
                 MikrotikDeviceInfo deviceInfo;
                 try
@@ -192,35 +191,29 @@ internal sealed class RouterJobExecutor(
                 catch (Exception ex)
                 {
                     stopwatch.Stop();
-                    logger.LogError(
-                        ex,
-                        "Device information retrieval failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-                        job.ImportId,
-                        job.JobId,
-                        job.RouterName,
-                        job.RouterIp,
-                        nameof(ScheduledJobTerminalState.Failed));
+                    logger.LogError(ex, "Device information retrieval failed");
+                    using (DeviceLogging.BeginServiceOnly())
+                    {
+                        logger.LogError(
+                            ex,
+                            "Device information retrieval failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                            job.ImportId,
+                            job.JobId,
+                            job.RouterName,
+                            job.RouterIp,
+                            nameof(ScheduledJobTerminalState.Failed));
+                    }
+
                     SafeDispose(connection, workItem, completer, stopwatch, job, alreadyFailed: true);
                     return;
                 }
 
                 deviceScope.SetRouterIdentity(deviceInfo.Identity);
+                logger.LogInformation("Device identity: {RouterIdentity}", deviceInfo.Identity);
+                logger.LogInformation("RouterOS version: {RouterOsVersion}", deviceInfo.Version);
+                logger.LogInformation("Architecture: {Architecture}", deviceInfo.ArchitectureName);
                 logger.LogInformation(
-                    "Device identity retrieved. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, RouterIdentity={RouterIdentity}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    deviceInfo.Identity);
-                logger.LogInformation(
-                    "RouterOS and hardware information retrieved. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, RouterIdentity={RouterIdentity}, RouterOsVersion={RouterOsVersion}, Architecture={Architecture}, BoardName={BoardName}, Platform={Platform}, Uptime={Uptime}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    deviceInfo.Identity,
-                    deviceInfo.Version,
-                    deviceInfo.ArchitectureName,
+                    "Board: {BoardName}, platform: {Platform}, uptime: {Uptime}",
                     deviceInfo.BoardName,
                     deviceInfo.Platform,
                     deviceInfo.Uptime);
@@ -234,23 +227,26 @@ internal sealed class RouterJobExecutor(
                 if (preflight.Status != MikrotikPreflightStatus.Succeeded)
                 {
                     logger.LogError(
-                        "Pre-flight validation failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, FailureReason={FailureReason}, JobOutcome={JobOutcome}",
-                        job.ImportId,
-                        job.JobId,
-                        job.RouterName,
-                        job.RouterIp,
-                        preflight.FailureReason,
-                        nameof(ScheduledJobTerminalState.Failed));
+                        "Pre-flight validation failed: {FailureReason}",
+                        preflight.FailureReason);
+                    using (DeviceLogging.BeginServiceOnly())
+                    {
+                        logger.LogError(
+                            "Pre-flight validation failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, FailureReason={FailureReason}, JobOutcome={JobOutcome}",
+                            job.ImportId,
+                            job.JobId,
+                            job.RouterName,
+                            job.RouterIp,
+                            preflight.FailureReason,
+                            nameof(ScheduledJobTerminalState.Failed));
+                    }
+
                     SafeDispose(connection, workItem, completer, stopwatch, job, alreadyFailed: true);
                     return;
                 }
 
                 logger.LogInformation(
-                    "Compatibility assessment started. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, TargetRouterOsVersion={TargetRouterOsVersion}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
+                    "Compatibility assessment started (target {TargetRouterOsVersion})",
                     assessmentOptions.Value.TargetRouterOsVersion);
 
                 DeviceCompatibilityAssessment assessment = compatibilityAssessor.Assess(
@@ -266,19 +262,11 @@ internal sealed class RouterJobExecutor(
 
                 foreach (AssessmentFinding finding in assessment.Findings)
                 {
-                    LogFinding(job, finding);
+                    LogFinding(finding);
                 }
 
                 logger.LogInformation(
-                    "Overall assessment result. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, RouterIdentity={RouterIdentity}, RouterOsVersion={RouterOsVersion}, Architecture={Architecture}, TargetRouterOsVersion={TargetRouterOsVersion}, AssessmentStatus={AssessmentStatus}, PackageCompatibility={PackageCompatibility}, UpgradePath={UpgradePath}, RouterboardAssessment={RouterboardAssessment}, MatchingPackage={MatchingPackage}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    assessment.RouterIdentity,
-                    assessment.RouterOsVersionRaw,
-                    assessment.Architecture,
-                    assessment.TargetRouterOsVersion,
+                    "Assessment result: {AssessmentStatus} (packages={PackageCompatibility}, path={UpgradePath}, routerboard={RouterboardAssessment}, match={MatchingPackage})",
                     assessment.OverallStatus,
                     assessment.PackageCompatibility,
                     assessment.UpgradePath,
@@ -303,16 +291,25 @@ internal sealed class RouterJobExecutor(
                         cancellationToken)
                     .ConfigureAwait(false);
 
-                logger.LogInformation(
-                    "Final upgrade outcome. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, UpgradeOutcome={UpgradeOutcome}, UpgradeDetail={UpgradeDetail}, PostUpgradeVersion={PostUpgradeVersion}, FirmwareUpgradeEnabled={FirmwareUpgradeEnabled}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    upgradeResult.Outcome,
-                    upgradeResult.Detail,
-                    upgradeResult.PostUpgradeVersion,
-                    upgradeOptions.Value.Enabled);
+                using (DeviceLogging.BeginServiceSummary())
+                {
+                    logger.LogInformation(
+                        "Final upgrade outcome: {UpgradeOutcome} (version={PostUpgradeVersion}, detail={UpgradeDetail}, enabled={FirmwareUpgradeEnabled})",
+                        upgradeResult.Outcome,
+                        upgradeResult.PostUpgradeVersion,
+                        upgradeResult.Detail,
+                        upgradeOptions.Value.Enabled);
+                }
+
+                using (DeviceLogging.BeginServiceOnly())
+                {
+                    logger.LogInformation(
+                        "Upgrade outcome correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, UpgradeOutcome={UpgradeOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterIp,
+                        upgradeResult.Outcome);
+                }
 
                 if (!upgradeResult.RebootInitiated)
                 {
@@ -321,16 +318,21 @@ internal sealed class RouterJobExecutor(
                     if (disconnectError is not null)
                     {
                         stopwatch.Stop();
-                        logger.LogError(
-                            disconnectError,
-                            "Disconnection failure. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, AssessmentStatus={AssessmentStatus}, Duration={Duration}, JobOutcome={JobOutcome}",
-                            job.ImportId,
-                            job.JobId,
-                            job.RouterName,
-                            job.RouterIp,
-                            assessment.OverallStatus,
-                            stopwatch.Elapsed,
-                            nameof(ScheduledJobTerminalState.Failed));
+                        logger.LogError(disconnectError, "Disconnection failure");
+                        using (DeviceLogging.BeginServiceOnly())
+                        {
+                            logger.LogError(
+                                disconnectError,
+                                "Disconnection failure. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, AssessmentStatus={AssessmentStatus}, Duration={Duration}, JobOutcome={JobOutcome}",
+                                job.ImportId,
+                                job.JobId,
+                                job.RouterName,
+                                job.RouterIp,
+                                assessment.OverallStatus,
+                                stopwatch.Elapsed,
+                                nameof(ScheduledJobTerminalState.Failed));
+                        }
+
                         completer.CompleteDispatchedJob(
                             workItem.EntryToken,
                             ScheduledJobTerminalState.Failed,
@@ -339,12 +341,7 @@ internal sealed class RouterJobExecutor(
                         return;
                     }
 
-                    logger.LogInformation(
-                        "Connection disconnected successfully. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
-                        job.ImportId,
-                        job.JobId,
-                        job.RouterName,
-                        job.RouterIp);
+                    logger.LogInformation("Connection disconnected successfully");
                 }
                 else
                 {
@@ -353,17 +350,15 @@ internal sealed class RouterJobExecutor(
 
                 stopwatch.Stop();
                 (ScheduledJobTerminalState terminal, bool success) = MapUpgradeOutcome(upgradeResult.Outcome);
-                logger.LogInformation(
-                    "Final job outcome. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, RouterIdentity={RouterIdentity}, AssessmentStatus={AssessmentStatus}, UpgradeOutcome={UpgradeOutcome}, Duration={Duration}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    assessment.RouterIdentity,
-                    assessment.OverallStatus,
-                    upgradeResult.Outcome,
-                    stopwatch.Elapsed,
-                    terminal);
+                using (DeviceLogging.BeginServiceSummary())
+                {
+                    logger.LogInformation(
+                        "Final job outcome: {JobOutcome} (assessment={AssessmentStatus}, upgrade={UpgradeOutcome}, duration={Duration})",
+                        terminal,
+                        assessment.OverallStatus,
+                        upgradeResult.Outcome,
+                        stopwatch.Elapsed);
+                }
                 completer.CompleteDispatchedJob(
                     workItem.EntryToken,
                     terminal,
@@ -401,14 +396,19 @@ internal sealed class RouterJobExecutor(
                 }
 
                 stopwatch.Stop();
-                logger.LogError(
-                    ex,
-                    "Router connection failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    nameof(ScheduledJobTerminalState.Failed));
+                logger.LogError(ex, "Router connection failed");
+                using (DeviceLogging.BeginServiceOnly())
+                {
+                    logger.LogError(
+                        ex,
+                        "Router connection failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        nameof(ScheduledJobTerminalState.Failed));
+                }
+
                 completer.CompleteDispatchedJob(
                     workItem.EntryToken,
                     ScheduledJobTerminalState.Failed,
@@ -418,14 +418,20 @@ internal sealed class RouterJobExecutor(
         }
         catch (Exception ex)
         {
-            logger.LogError(
-                ex,
-                "Unexpected execution exception. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp,
-                nameof(ScheduledJobTerminalState.Failed));
+            // Outer catch may run with or without an ambient DeviceLogScope.
+            logger.LogError(ex, "Unexpected execution exception");
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogError(
+                    ex,
+                    "Unexpected execution exception. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterName,
+                    job.RouterIp,
+                    nameof(ScheduledJobTerminalState.Failed));
+            }
+
             completer.CompleteDispatchedJob(
                 workItem.EntryToken,
                 ScheduledJobTerminalState.Failed,
@@ -434,45 +440,21 @@ internal sealed class RouterJobExecutor(
         }
     }
 
-    private void LogFinding(MikrotikScheduledJob job, AssessmentFinding finding)
+    private void LogFinding(AssessmentFinding finding)
     {
         const string template =
-            "Compatibility check result. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, FindingSeverity={FindingSeverity}, FindingCode={FindingCode}, FindingMessage={FindingMessage}";
+            "Compatibility check: {FindingSeverity} {FindingCode} — {FindingMessage}";
 
         switch (finding.Severity)
         {
             case AssessmentFindingSeverity.Blocker:
-                logger.LogError(
-                    template,
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    finding.Severity,
-                    finding.Code,
-                    finding.Message);
+                logger.LogError(template, finding.Severity, finding.Code, finding.Message);
                 break;
             case AssessmentFindingSeverity.Warning:
-                logger.LogWarning(
-                    template,
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    finding.Severity,
-                    finding.Code,
-                    finding.Message);
+                logger.LogWarning(template, finding.Severity, finding.Code, finding.Message);
                 break;
             default:
-                logger.LogInformation(
-                    template,
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterName,
-                    job.RouterIp,
-                    finding.Severity,
-                    finding.Code,
-                    finding.Message);
+                logger.LogInformation(template, finding.Severity, finding.Code, finding.Message);
                 break;
         }
     }
@@ -488,14 +470,19 @@ internal sealed class RouterJobExecutor(
         Exception? disconnectError = Disconnect(connection, job);
         if (disconnectError is not null)
         {
-            logger.LogError(
-                disconnectError,
-                "Disconnection failure. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp,
-                nameof(ScheduledJobTerminalState.Failed));
+            logger.LogError(disconnectError, "Disconnection failure");
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogError(
+                    disconnectError,
+                    "Disconnection failure. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterName,
+                    job.RouterIp,
+                    nameof(ScheduledJobTerminalState.Failed));
+            }
+
             completer.CompleteDispatchedJob(
                 workItem.EntryToken,
                 ScheduledJobTerminalState.Failed,
@@ -504,22 +491,17 @@ internal sealed class RouterJobExecutor(
             return;
         }
 
-        logger.LogInformation(
-            "Connection disconnected successfully. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
-            job.ImportId,
-            job.JobId,
-            job.RouterName,
-            job.RouterIp);
+        logger.LogInformation("Connection disconnected successfully");
 
         if (alreadyFailed)
         {
-            logger.LogInformation(
-                "Final job outcome. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp,
-                nameof(ScheduledJobTerminalState.Failed));
+            using (DeviceLogging.BeginServiceSummary())
+            {
+                logger.LogInformation(
+                    "Final job outcome: {JobOutcome}",
+                    nameof(ScheduledJobTerminalState.Failed));
+            }
+
             completer.CompleteDispatchedJob(
                 workItem.EntryToken,
                 ScheduledJobTerminalState.Failed,
@@ -527,16 +509,11 @@ internal sealed class RouterJobExecutor(
         }
     }
 
-    private Exception? Disconnect(ITikConnection connection, MikrotikScheduledJob job)
+    private Exception? Disconnect(ITikConnection connection, MikrotikScheduledJob _)
     {
         try
         {
-            logger.LogInformation(
-                "Connection disconnect started. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp);
+            logger.LogInformation("Connection disconnect started");
             connection.Dispose();
             return null;
         }
@@ -560,14 +537,19 @@ internal sealed class RouterJobExecutor(
         }
         catch (Exception ex)
         {
-            logger.LogError(
-                ex,
-                "Credential resolution failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-                job.ImportId,
-                job.JobId,
-                job.RouterName,
-                job.RouterIp,
-                nameof(ScheduledJobTerminalState.Failed));
+            logger.LogError(ex, "Credential resolution failed");
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogError(
+                    ex,
+                    "Credential resolution failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterName,
+                    job.RouterIp,
+                    nameof(ScheduledJobTerminalState.Failed));
+            }
+
             return null;
         }
     }
@@ -578,14 +560,19 @@ internal sealed class RouterJobExecutor(
         TimeSpan elapsed,
         MikrotikScheduledJob job)
     {
-        logger.LogWarning(
-            "Job cancelled. ImportId={ImportId}, JobId={JobId}, RowNumber={RowNumber}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
-            job.ImportId,
-            job.JobId,
-            job.RowNumber,
-            job.RouterName,
-            job.RouterIp,
-            nameof(ScheduledJobTerminalState.Cancelled));
+        logger.LogWarning("Job cancelled");
+        using (DeviceLogging.BeginServiceOnly())
+        {
+            logger.LogWarning(
+                "Job cancelled. ImportId={ImportId}, JobId={JobId}, RowNumber={RowNumber}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                job.ImportId,
+                job.JobId,
+                job.RowNumber,
+                job.RouterName,
+                job.RouterIp,
+                nameof(ScheduledJobTerminalState.Cancelled));
+        }
+
         completer.CompleteDispatchedJob(
             workItem.EntryToken,
             ScheduledJobTerminalState.Cancelled,
