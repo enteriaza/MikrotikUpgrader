@@ -40,6 +40,33 @@ public sealed class RouterOsV6UpgradeExecutorTests
     }
 
     [Fact]
+    public async Task RemoteCleanupFailure_PreventsFetchAndReboot()
+    {
+        TrackingOps ops = new();
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            backup: new FailingBackup(
+                "Remote cleanup failed after central verification: remove failed. Remaining remote files: a.rsc, a.backup"),
+            enabled: true);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.BackupFailed, result.Outcome);
+        Assert.Contains("Remote cleanup failed", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.False(ops.FetchCalled);
+        Assert.False(ops.RebootCalled);
+        Assert.False(result.RebootInitiated);
+    }
+
+    [Fact]
     public async Task SuccessfulBackup_AllowsPackageStagingFetch_WithoutRebootWhenFetchFailsMissingFile()
     {
         TrackingOps ops = new() { OmitFetchedFile = true };
@@ -122,7 +149,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         {
             Installed =
             [
-                new("routeros", "6.49.19", false),
+                new("routeros-mipsbe", "6.49.19", false),
                 new("tr069-client", "6.49.19", false),
             ],
         };
@@ -222,11 +249,296 @@ public sealed class RouterOsV6UpgradeExecutorTests
     public async Task ReconnectionTimeout_AfterReboot_ReportsTimedOut()
     {
         TrackingOps ops = new() { FetchReturnsMatchingSize = true };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
         RouterOsV6UpgradeExecutor executor = CreateExecutor(
             ops,
             new SucceedingBackup(),
             enabled: true,
-            connectionFactory: new ThrowingMikrotikConnectionFactory(new IOException("still down")));
+            connectionFactory: new ThrowingMikrotikConnectionFactory(new IOException("still down")),
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(15));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => !task.IsCompleted, TimeSpan.FromSeconds(1));
+        for (int i = 0; i < 25; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(15));
+            await Task.Yield();
+            if (task.IsCompleted)
+            {
+                break;
+            }
+        }
+
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.True(ops.RebootCalled);
+        Assert.True(result.RebootInitiated);
+    }
+
+    [Fact]
+    public async Task Reconnection_SucceedsWithinFiveMinutes()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        TimedReconnectFactory factory = new(time, succeedAfter: time.GetUtcNow() + TimeSpan.FromMinutes(2));
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: factory,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(15));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => factory.Attempts >= 1, TimeSpan.FromSeconds(5));
+        // Failed attempts then delay; advance past succeedAfter in steps so delays can complete.
+        for (int i = 0; i < 20 && !task.IsCompleted; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(15));
+            await Task.Yield();
+        }
+
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal("6.49.23", result.PostUpgradeVersion);
+        Assert.True(factory.SuccessCount >= 1);
+    }
+
+    [Fact]
+    public async Task Reconnection_AtFourMinutesFiftySeconds_SucceedsBeforeDeadline()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        TimedReconnectFactory factory = new(
+            time,
+            succeedAfter: time.GetUtcNow() + TimeSpan.FromMinutes(4) + TimeSpan.FromSeconds(50));
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: factory,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(10));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => factory.Attempts >= 1, TimeSpan.FromSeconds(5));
+        for (int i = 0; i < 40 && !task.IsCompleted; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(10));
+            await Task.Yield();
+        }
+
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Reconnection_RetryDoesNotExtendAbsoluteDeadline()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        CountingThrowFactory factory = new();
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: factory,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(30));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => factory.Attempts >= 1, TimeSpan.FromSeconds(5));
+        // Many retries — wall-clock of fake time must still stop at 5 minutes from reboot.
+        for (int i = 0; i < 40; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(30));
+            await Task.Yield();
+            if (task.IsCompleted)
+            {
+                break;
+            }
+        }
+
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
+        Assert.True(time.GetUtcNow() >= new DateTimeOffset(2026, 11, 10, 12, 5, 0, TimeSpan.Zero));
+        Assert.True(factory.Attempts >= 2);
+    }
+
+    [Fact]
+    public async Task Reconnection_ConnectionAttemptCannotOverrunRemainingDeadline()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        HangingReconnectFactory factory = new();
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: factory,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(15));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        await factory.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        time.Advance(TimeSpan.FromMinutes(5));
+        await factory.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Reconnection_CancellationStopsImmediately()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        using CancellationTokenSource cts = new();
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: new ThrowingMikrotikConnectionFactory(new IOException("still down")),
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromMinutes(1));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            cts.Token);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        // Allow the reconnect loop to enter its delay before cancelling.
+        await Task.Yield();
+        await cts.CancelAsync();
+        // Unblock Delay waiting on fake time.
+        time.Advance(TimeSpan.FromMinutes(1));
+        await Task.Yield();
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(UpgradeOutcome.UpgradeInterrupted, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.True(result.RebootInitiated);
+    }
+
+    [Fact]
+    public async Task Reconnection_TimeoutNeverProducesUpgradeSucceeded()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        CountingThrowFactory factory = new();
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: factory,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(20));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => factory.Attempts >= 1, TimeSpan.FromSeconds(5));
+        for (int i = 0; i < 20 && !task.IsCompleted; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(20));
+            await Task.Yield();
+        }
+
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+    }
+
+    [Fact]
+    public async Task PostUpgradeVerification_RunsAfterSuccessfulReconnect()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true, PostUpgradeVersion = "6.49.23" };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        ScriptedMikrotikConnectionFactory reconnect = new(_ => FakeMikrotikConnections.CreateFullyPopulated());
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: reconnect,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(1));
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(),
@@ -238,21 +550,113 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.True(ops.RebootCalled);
-        Assert.True(result.RebootInitiated);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal("6.49.23", result.PostUpgradeVersion);
     }
 
     [Fact]
     public async Task PostUpgradeVersionMismatch_IsReported()
     {
         TrackingOps ops = new() { FetchReturnsMatchingSize = true, PostUpgradeVersion = "6.49.19" };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
         ScriptedMikrotikConnectionFactory reconnect = new(_ => FakeMikrotikConnections.CreateFullyPopulated());
         RouterOsV6UpgradeExecutor executor = CreateExecutor(
             ops,
             new SucceedingBackup(),
             enabled: true,
-            connectionFactory: reconnect);
+            connectionFactory: reconnect,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(1),
+            postUpgradeVerifyTimeout: TimeSpan.FromSeconds(1));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        // Expire the (capped) verify poll window well inside the absolute reboot deadline.
+        time.Advance(TimeSpan.FromSeconds(2));
+        await Task.Yield();
+
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(UpgradeOutcome.UpgradeVersionMismatch, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
+        Assert.True(result.RebootInitiated);
+    }
+
+    [Fact]
+    public async Task PostRebootVerification_CannotContinuePastAbsoluteDeadline_AfterLateReconnect()
+    {
+        TrackingOps ops = new()
+        {
+            FetchReturnsMatchingSize = true,
+            HangPostRebootReadUntilCancelled = true,
+        };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        // Reconnect with 10s remaining so verification is forced onto the absolute deadline.
+        TimedReconnectFactory factory = new(
+            time,
+            succeedAfter: time.GetUtcNow() + TimeSpan.FromMinutes(4) + TimeSpan.FromSeconds(50));
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: factory,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(10));
+
+        Task<UpgradeExecutionResult> task = executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            CreateJob(),
+            CreateDevice(),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        await WaitForAsync(() => ops.RebootCalled, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => factory.Attempts >= 1, TimeSpan.FromSeconds(5));
+        for (int i = 0; i < 40 && !ops.PostRebootReadStarted.Task.IsCompleted; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(10));
+            await Task.Yield();
+        }
+
+        await ops.PostRebootReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // Absolute deadline is T+5:00; late reconnect must not allow verification to overrun it.
+        time.Advance(TimeSpan.FromSeconds(15));
+        await Task.Yield();
+
+        UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.True(result.RebootInitiated);
+        Assert.True(time.GetUtcNow() >= new DateTimeOffset(2026, 11, 10, 12, 5, 0, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public async Task PostRebootVerification_CompletingInsideDeadline_StillRunsPackageChecks()
+    {
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true, PostUpgradeVersion = "6.49.23" };
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
+        ScriptedMikrotikConnectionFactory reconnect = new(_ => FakeMikrotikConnections.CreateFullyPopulated());
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new SucceedingBackup(),
+            enabled: true,
+            connectionFactory: reconnect,
+            timeProvider: time,
+            rebootTimeout: TimeSpan.FromMinutes(5),
+            reconnectInterval: TimeSpan.FromSeconds(1));
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(),
@@ -264,8 +668,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeVersionMismatch, result.Outcome);
-        Assert.True(result.RebootInitiated);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.True(ops.PostRebootPackageListCount >= 1);
+        Assert.True(ops.PostRebootDeviceInfoCount >= 1);
     }
 
     private static RouterOsV6UpgradeExecutor CreateExecutor(
@@ -274,12 +679,23 @@ public sealed class RouterOsV6UpgradeExecutorTests
         bool enabled,
         string? firmwareRoot = null,
         string advertisedBaseUrl = "http://198.18.0.66:8080/firmware_files",
-        IMikrotikConnectionFactory? connectionFactory = null)
+        IMikrotikConnectionFactory? connectionFactory = null,
+        TimeProvider? timeProvider = null,
+        TimeSpan? rebootTimeout = null,
+        TimeSpan? reconnectInterval = null,
+        TimeSpan? postUpgradeVerifyTimeout = null)
     {
         string root = firmwareRoot ?? Directory.CreateTempSubdirectory("upg-fw-").FullName;
         if (firmwareRoot is null)
         {
             File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4]);
+        }
+
+        TimeSpan effectiveRebootTimeout = rebootTimeout ?? TimeSpan.FromMilliseconds(50);
+        TimeSpan effectiveVerifyTimeout = postUpgradeVerifyTimeout ?? effectiveRebootTimeout;
+        if (effectiveVerifyTimeout > effectiveRebootTimeout)
+        {
+            effectiveVerifyTimeout = effectiveRebootTimeout;
         }
 
         return new RouterOsV6UpgradeExecutor(
@@ -295,13 +711,91 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 TargetRouterOsVersion = "6.49.23",
                 AdvertisedBaseUrl = advertisedBaseUrl,
                 FetchTimeout = TimeSpan.FromSeconds(5),
-                ReconnectInterval = TimeSpan.FromMilliseconds(10),
-                RebootTimeout = TimeSpan.FromMilliseconds(50),
-                PostUpgradeVerifyTimeout = TimeSpan.FromMilliseconds(50),
+                ReconnectInterval = reconnectInterval ?? TimeSpan.FromMilliseconds(10),
+                RebootTimeout = effectiveRebootTimeout,
+                PostUpgradeVerifyTimeout = effectiveVerifyTimeout,
+                BackupFileReadyTimeout = TimeSpan.FromMilliseconds(100),
+                BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(20),
             }),
             Options.Create(new MikroTikOptions { Port = 8728 }),
-            TimeProvider.System,
+            timeProvider ?? TimeProvider.System,
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
+    }
+
+    private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(10);
+        }
+
+        throw new TimeoutException("Condition was not met before timeout.");
+    }
+
+    private sealed class TimedReconnectFactory(FakeTimeProvider time, DateTimeOffset succeedAfter)
+        : IMikrotikConnectionFactory
+    {
+        public int Attempts { get; private set; }
+
+        public int SuccessCount { get; private set; }
+
+        public Task<ITikConnection> CreateAsync(
+            MikrotikConnectionOptions connection,
+            CancellationToken cancellationToken)
+        {
+            Attempts++;
+            if (time.GetUtcNow() < succeedAfter)
+            {
+                throw new IOException("router still rebooting");
+            }
+
+            SuccessCount++;
+            return Task.FromResult<ITikConnection>(FakeMikrotikConnections.CreateFullyPopulated());
+        }
+    }
+
+    private sealed class CountingThrowFactory : IMikrotikConnectionFactory
+    {
+        public int Attempts { get; private set; }
+
+        public Task<ITikConnection> CreateAsync(
+            MikrotikConnectionOptions connection,
+            CancellationToken cancellationToken)
+        {
+            Attempts++;
+            throw new IOException("still down");
+        }
+    }
+
+    private sealed class HangingReconnectFactory : IMikrotikConnectionFactory
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<ITikConnection> CreateAsync(
+            MikrotikConnectionOptions connection,
+            CancellationToken cancellationToken)
+        {
+            Started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                Cancelled.TrySetResult();
+                throw;
+            }
+
+            throw new InvalidOperationException("unreachable");
+        }
     }
 
     private static MikrotikScheduledJob CreateJob() =>
@@ -354,29 +848,60 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         public string PostUpgradeVersion { get; init; } = "6.49.23";
 
+        public bool HangPostRebootReadUntilCancelled { get; init; }
+
+        public TaskCompletionSource PostRebootReadStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int PostRebootDeviceInfoCount { get; private set; }
+
+        public int PostRebootPackageListCount { get; private set; }
+
         public IReadOnlyList<InstalledPackageInfo>? Installed { get; init; }
 
-        public Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
+        public async Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
             string host,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(new MikrotikDeviceInfo
+            CancellationToken cancellationToken = default)
+        {
+            if (RebootCalled)
+            {
+                PostRebootDeviceInfoCount++;
+                if (HangPostRebootReadUntilCancelled)
+                {
+                    PostRebootReadStarted.TrySetResult();
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
+                }
+            }
+
+            return new MikrotikDeviceInfo
             {
                 Identity = "CORE-01",
                 Version = PostUpgradeVersion,
                 ArchitectureName = "mipsbe",
                 BoardName = "hEX PoE",
-            });
+            };
+        }
 
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(Installed ??
+            CancellationToken cancellationToken = default)
+        {
+            if (RebootCalled)
+            {
+                PostRebootPackageListCount++;
+            }
+
+            return Task.FromResult(Installed ??
             [
-                new("routeros", PostUpgradeVersion.StartsWith("6.49.23", StringComparison.Ordinal)
-                    ? "6.49.23"
-                    : "6.49.19", false),
+                new(
+                    "routeros-mipsbe",
+                    PostUpgradeVersion.StartsWith("6.49.23", StringComparison.Ordinal)
+                        ? "6.49.23"
+                        : "6.49.19",
+                    false),
             ]);
+        }
 
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,
@@ -415,6 +940,12 @@ public sealed class RouterOsV6UpgradeExecutorTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        public Task RemoveFileAsync(
+            ITikConnection connection,
+            string fileName,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
         public async Task FetchUrlToFileAsync(
             ITikConnection connection,
             string url,
@@ -436,7 +967,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         }
     }
 
-    private sealed class FailingBackup : IDeviceBackupService
+    private sealed class FailingBackup(string reason = "backup failed") : IDeviceBackupService
     {
         public Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
             ITikConnection connection,
@@ -448,7 +979,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
             Task.FromResult(new DeviceBackupResult
             {
                 Succeeded = false,
-                FailureReason = "backup failed",
+                FailureReason = reason,
+                RemoteCleanupFailed = reason.Contains("cleanup", StringComparison.OrdinalIgnoreCase),
             });
     }
 
@@ -461,6 +993,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
             string username,
             string password,
             CancellationToken cancellationToken) =>
-            Task.FromResult(new DeviceBackupResult { Succeeded = true });
+            Task.FromResult(new DeviceBackupResult
+            {
+                Succeeded = true,
+                RemoteCleanupSucceeded = true,
+            });
     }
 }

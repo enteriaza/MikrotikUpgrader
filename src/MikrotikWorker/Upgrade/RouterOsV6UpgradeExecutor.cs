@@ -1,4 +1,3 @@
-using System.Net;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
 using MikrotikWorker.Backup;
@@ -53,11 +52,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
         if (!options.Enabled)
         {
-            logger.LogInformation(
-                "Upgrade skipped because FirmwareUpgrade:Enabled is false. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
-                job.ImportId,
-                job.JobId,
-                job.RouterIp);
+            logger.LogInformation("Upgrade skipped because FirmwareUpgrade:Enabled is false");
             return new UpgradeExecutionResult { Outcome = UpgradeOutcome.SkippedUpgradeDisabled };
         }
 
@@ -92,24 +87,34 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
 
         logger.LogInformation(
-            "Upgrade policy decision. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RouterOsVersion={RouterOsVersion}, TargetRouterOsVersion={TargetRouterOsVersion}, Decision=Proceed",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp,
+            "Upgrade policy decision: proceed (RouterOS {RouterOsVersion} → {TargetRouterOsVersion})",
             deviceInfo.Version,
             target);
+        logger.LogInformation(
+            "RouterBOARD firmware before upgrade: model={RouterboardModel}, type={FirmwareType}, current={CurrentFirmware}, upgrade={UpgradeFirmware}, factory={FactoryFirmware}",
+            deviceInfo.RouterboardModel,
+            deviceInfo.RouterboardFirmwareType,
+            deviceInfo.RouterboardCurrentFirmware,
+            deviceInfo.RouterboardUpgradeFirmware,
+            deviceInfo.RouterboardFactoryFirmware);
 
         IReadOnlyList<InstalledPackageInfo> installed = await routerOperations
             .ListInstalledPackagesAsync(connection, cancellationToken)
             .ConfigureAwait(false);
 
+        PackageInventorySummary inventory = PackageInventoryReporting.Summarize(installed);
         logger.LogInformation(
-            "Installed package inventory retrieved. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, PackageCount={PackageCount}, Packages={Packages}",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp,
-            installed.Count,
-            string.Join(", ", installed.Select(p => $"{p.Name}/{p.Version}")));
+            "Installed package count: {IndependentCount}",
+            inventory.IndependentCount);
+        logger.LogInformation(
+            "Installed packages: {Packages}",
+            PackageInventoryReporting.FormatIndependentPackages(inventory.IndependentPackages));
+        logger.LogInformation(
+            "Bundled components: {BundledCount}",
+            inventory.BundledCount);
+        logger.LogDebug(
+            "Bundled component inventory: {BundledPackages}",
+            PackageInventoryReporting.FormatIndependentPackages(inventory.BundledComponents));
 
         UpgradePackageResolution resolution = packageResolver.Resolve(
             deviceInfo.ArchitectureName,
@@ -117,12 +122,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
             target);
         if (!resolution.Succeeded)
         {
-            logger.LogError(
-                "Package resolution failed. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, Reason={Reason}",
-                job.ImportId,
-                job.JobId,
-                job.RouterIp,
-                resolution.FailureReason);
+            logger.LogError("Package resolution failed: {Reason}", resolution.FailureReason);
             return new UpgradeExecutionResult
             {
                 Outcome = UpgradeOutcome.PackageResolutionFailed,
@@ -131,10 +131,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
 
         logger.LogInformation(
-            "Required package inventory resolved. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, SelectedPackages={SelectedPackages}",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp,
+            "Required packages resolved: {SelectedPackages}",
             string.Join(", ", resolution.Packages.Select(p => $"{p.CatalogPackage.FileName}:{p.CatalogPackage.SizeBytes}")));
 
         // Mandatory backup gate — no fetch/reboot before this succeeds.
@@ -143,12 +140,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
             .ConfigureAwait(false);
         if (!backup.Succeeded)
         {
-            logger.LogError(
-                "Backup prerequisite failed; firmware fetch will not start. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, Reason={Reason}",
-                job.ImportId,
-                job.JobId,
-                job.RouterIp,
-                backup.FailureReason);
+            logger.LogError("Backup prerequisite failed; firmware fetch will not start: {Reason}", backup.FailureReason);
             return new UpgradeExecutionResult
             {
                 Outcome = UpgradeOutcome.BackupFailed,
@@ -156,11 +148,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
             };
         }
 
-        logger.LogInformation(
-            "Backup prerequisite passed. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp);
+        logger.LogInformation("Backup prerequisite passed");
 
         if (!isWithinScheduleWindow())
         {
@@ -170,12 +158,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
         cancellationToken.ThrowIfCancellationRequested();
 
         string baseUrl = options.AdvertisedBaseUrl.TrimEnd('/');
-        logger.LogInformation(
-            "Firmware server URL selected. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, AdvertisedBaseUrl={AdvertisedBaseUrl}",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp,
-            baseUrl);
+        logger.LogInformation("Firmware server URL selected: {AdvertisedBaseUrl}", baseUrl);
 
         foreach (ResolvedUpgradePackage package in resolution.Packages)
         {
@@ -187,13 +170,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
             string url = $"{baseUrl}/{package.RelativeUrlPath}";
             string dst = package.CatalogPackage.FileName;
-            logger.LogInformation(
-                "Fetch command initiation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, PackageFile={PackageFile}, Url={Url}",
-                job.ImportId,
-                job.JobId,
-                job.RouterIp,
-                dst,
-                url);
+            logger.LogInformation("Fetching firmware package {PackageFile}", dst);
 
             try
             {
@@ -211,13 +188,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
             }
             catch (Exception ex)
             {
-                logger.LogError(
-                    ex,
-                    "Fetch failed. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, PackageFile={PackageFile}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterIp,
-                    dst);
+                logger.LogError(ex, "Fetch failed for {PackageFile}", dst);
                 return new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeFailed,
@@ -225,71 +196,53 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 };
             }
 
-            RouterFileInfo? fetched = await routerOperations
-                .FindFileAsync(connection, dst, cancellationToken)
+            // RouterOS can report an intermediate size briefly after /tool/fetch finishes.
+            RouterFileInfo? fetched = await WaitForFetchedPackageSizeAsync(
+                    connection,
+                    dst,
+                    package.CatalogPackage.SizeBytes,
+                    options.BackupFileReadyTimeout,
+                    options.BackupFileReadyPollInterval,
+                    cancellationToken)
                 .ConfigureAwait(false);
             if (fetched is null)
             {
+                RouterFileInfo? current = await routerOperations
+                    .FindFileAsync(connection, dst, cancellationToken)
+                    .ConfigureAwait(false);
                 return new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeFailed,
-                    Detail = $"Downloaded file '{dst}' is missing on the router.",
-                };
-            }
-
-            if (fetched.SizeBytes <= 0)
-            {
-                return new UpgradeExecutionResult
-                {
-                    Outcome = UpgradeOutcome.UpgradeFailed,
-                    Detail = $"Downloaded file '{dst}' is empty.",
-                };
-            }
-
-            if (fetched.SizeBytes != package.CatalogPackage.SizeBytes)
-            {
-                return new UpgradeExecutionResult
-                {
-                    Outcome = UpgradeOutcome.UpgradeFailed,
-                    Detail =
-                        $"Downloaded file '{dst}' size mismatch (router={fetched.SizeBytes}, expected={package.CatalogPackage.SizeBytes}).",
+                    Detail = current is null
+                        ? $"Downloaded file '{dst}' is missing on the router."
+                        : current.SizeBytes <= 0
+                            ? $"Downloaded file '{dst}' is empty."
+                            : $"Downloaded file '{dst}' size mismatch (router={current.SizeBytes}, expected={package.CatalogPackage.SizeBytes}).",
                 };
             }
 
             logger.LogInformation(
-                "Download verification succeeded. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, PackageFile={PackageFile}, SizeBytes={SizeBytes}",
-                job.ImportId,
-                job.JobId,
-                job.RouterIp,
+                "Staged package verified: {PackageFile} ({SizeBytes} bytes)",
                 dst,
                 fetched.SizeBytes);
         }
 
-        logger.LogInformation(
-            "Package staging completion. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, PackageCount={PackageCount}",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp,
-            resolution.Packages.Count);
+        logger.LogInformation("Package staging complete ({PackageCount} package(s))", resolution.Packages.Count);
 
         if (!isWithinScheduleWindow())
         {
             return PolicyBlock("Job left its scheduled window before reboot; installation aborted.");
         }
 
-        logger.LogInformation(
-            "Installation/reboot initiation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp);
-
+        logger.LogInformation("Initiating reboot for package installation");
         await routerOperations.RebootAsync(connection, cancellationToken).ConfigureAwait(false);
         bool rebootInitiated = true;
+        DateTimeOffset rebootInitiatedAt = timeProvider.GetUtcNow();
+        DateTimeOffset rebootDeadline = rebootInitiatedAt + options.RebootTimeout;
         logger.LogInformation(
-            "Device unavailable during reboot expected. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
-            job.ImportId,
-            job.JobId,
-            job.RouterIp);
+            "Reboot initiated; reconnection deadline {Deadline:yyyy-MM-dd HH:mm:ss} UTC ({Timeout})",
+            rebootDeadline.UtcDateTime,
+            options.RebootTimeout);
 
         MikrotikConnectionOptions reconnectOptions = new()
         {
@@ -299,28 +252,57 @@ internal sealed class RouterOsV6UpgradeExecutor(
             Port = mikroTikOptions.Value.Port,
         };
 
-        DateTimeOffset rebootDeadline = timeProvider.GetUtcNow() + options.RebootTimeout;
         ITikConnection? reconnected = null;
         try
         {
-            while (timeProvider.GetUtcNow() <= rebootDeadline)
+            int attempt = 0;
+            while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                DateTimeOffset now = timeProvider.GetUtcNow();
+                TimeSpan remaining = rebootDeadline - now;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    break;
+                }
+
+                attempt++;
+                TimeSpan elapsed = now - rebootInitiatedAt;
                 logger.LogInformation(
-                    "Reconnection attempt. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
-                    job.ImportId,
-                    job.JobId,
-                    job.RouterIp);
+                    "Reconnection attempt {Attempt} (elapsed {Elapsed}, remaining {Remaining})",
+                    attempt,
+                    FormatDuration(elapsed),
+                    FormatDuration(remaining));
+
+                using CancellationTokenSource attemptCts = new();
+                using ITimer attemptTimer = timeProvider.CreateTimer(
+                    static state =>
+                    {
+                        try
+                        {
+                            ((CancellationTokenSource)state!).Cancel();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // Attempt already finished and disposed the CTS.
+                        }
+                    },
+                    attemptCts,
+                    remaining,
+                    Timeout.InfiniteTimeSpan);
+                using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    attemptCts.Token);
+
                 try
                 {
                     reconnected = await connectionFactory
-                        .CreateAsync(reconnectOptions, cancellationToken)
+                        .CreateAsync(reconnectOptions, linkedCts.Token)
                         .ConfigureAwait(false);
                     logger.LogInformation(
-                        "Reconnection success. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
-                        job.ImportId,
-                        job.JobId,
-                        job.RouterIp);
+                        "Reconnected successfully after {Elapsed}",
+                        FormatDuration(timeProvider.GetUtcNow() - rebootInitiatedAt));
                     break;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -332,14 +314,46 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         RebootInitiated = rebootInitiated,
                     };
                 }
+                catch (OperationCanceledException) when (attemptCts.IsCancellationRequested)
+                {
+                    // Absolute deadline consumed by the connection attempt itself.
+                    break;
+                }
                 catch
                 {
-                    await Task.Delay(options.ReconnectInterval, cancellationToken).ConfigureAwait(false);
+                    now = timeProvider.GetUtcNow();
+                    remaining = rebootDeadline - now;
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        break;
+                    }
+
+                    TimeSpan delay = options.ReconnectInterval < remaining
+                        ? options.ReconnectInterval
+                        : remaining;
+                    try
+                    {
+                        await Task.Delay(delay, timeProvider, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        return new UpgradeExecutionResult
+                        {
+                            Outcome = UpgradeOutcome.UpgradeInterrupted,
+                            Detail = "Cancelled while waiting for reboot reconnect.",
+                            RebootInitiated = rebootInitiated,
+                        };
+                    }
                 }
             }
 
             if (reconnected is null)
             {
+                TimeSpan waited = timeProvider.GetUtcNow() - rebootInitiatedAt;
+                logger.LogError(
+                    "Reconnection timed out after {Elapsed} (limit {Timeout})",
+                    FormatDuration(waited),
+                    options.RebootTimeout);
                 return new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeTimedOut,
@@ -351,18 +365,67 @@ internal sealed class RouterOsV6UpgradeExecutor(
             using ITikConnection live = reconnected;
             reconnected = null;
 
-            DateTimeOffset verifyDeadline = timeProvider.GetUtcNow() + options.PostUpgradeVerifyTimeout;
-            MikrotikDeviceInfo postInfo;
-            IReadOnlyList<InstalledPackageInfo> postPackages;
-            do
+            // Absolute post-reboot ceiling remains rebootDeadline. PostUpgradeVerifyTimeout may only
+            // shorten the poll window; it must never extend past the five-minute reboot window.
+            DateTimeOffset verifyPollDeadline = timeProvider.GetUtcNow() + options.PostUpgradeVerifyTimeout;
+            if (verifyPollDeadline > rebootDeadline)
+            {
+                verifyPollDeadline = rebootDeadline;
+            }
+
+            MikrotikDeviceInfo? postInfo = null;
+            IReadOnlyList<InstalledPackageInfo>? postPackages = null;
+            while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                postInfo = await routerOperations
-                    .ReadDeviceInfoAsync(live, job.RouterIp.ToString(), cancellationToken)
-                    .ConfigureAwait(false);
-                postPackages = await routerOperations
-                    .ListInstalledPackagesAsync(live, cancellationToken)
-                    .ConfigureAwait(false);
+
+                TimeSpan remaining = rebootDeadline - timeProvider.GetUtcNow();
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                }
+
+                using CancellationTokenSource verifyCts = new();
+                using ITimer verifyTimer = timeProvider.CreateTimer(
+                    static state =>
+                    {
+                        try
+                        {
+                            ((CancellationTokenSource)state!).Cancel();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                        }
+                    },
+                    verifyCts,
+                    remaining,
+                    Timeout.InfiniteTimeSpan);
+                using CancellationTokenSource linkedVerifyCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    verifyCts.Token);
+
+                try
+                {
+                    postInfo = await routerOperations
+                        .ReadDeviceInfoAsync(live, job.RouterIp.ToString(), linkedVerifyCts.Token)
+                        .ConfigureAwait(false);
+                    postPackages = await routerOperations
+                        .ListInstalledPackagesAsync(live, linkedVerifyCts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return new UpgradeExecutionResult
+                    {
+                        Outcome = UpgradeOutcome.UpgradeInterrupted,
+                        Detail = "Cancelled during post-reboot verification.",
+                        RebootInitiated = rebootInitiated,
+                    };
+                }
+                catch (OperationCanceledException) when (verifyCts.IsCancellationRequested)
+                {
+                    return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                }
 
                 if (RouterOsVersion.TryParse(postInfo.Version, out RouterOsVersion postVersion)
                     && postVersion == target)
@@ -370,30 +433,78 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     break;
                 }
 
-                if (timeProvider.GetUtcNow() > verifyDeadline)
+                if (timeProvider.GetUtcNow() >= verifyPollDeadline
+                    || timeProvider.GetUtcNow() >= rebootDeadline)
                 {
                     break;
                 }
 
-                await Task.Delay(options.ReconnectInterval, cancellationToken).ConfigureAwait(false);
+                remaining = rebootDeadline - timeProvider.GetUtcNow();
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                }
+
+                TimeSpan delay = options.ReconnectInterval < remaining
+                    ? options.ReconnectInterval
+                    : remaining;
+                try
+                {
+                    await Task.Delay(delay, timeProvider, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return new UpgradeExecutionResult
+                    {
+                        Outcome = UpgradeOutcome.UpgradeInterrupted,
+                        Detail = "Cancelled during post-reboot verification.",
+                        RebootInitiated = rebootInitiated,
+                    };
+                }
             }
-            while (true);
 
-            logger.LogInformation(
-                "Post-upgrade RouterOS version. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RouterOsVersion={RouterOsVersion}",
-                job.ImportId,
-                job.JobId,
-                job.RouterIp,
-                postInfo.Version);
-            logger.LogInformation(
-                "Post-upgrade installed package inventory. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, Packages={Packages}",
-                job.ImportId,
-                job.JobId,
-                job.RouterIp,
-                string.Join(", ", postPackages.Select(p => $"{p.Name}/{p.Version}")));
+            if (postInfo is null || postPackages is null)
+            {
+                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+            }
 
-            if (!RouterOsVersion.TryParse(postInfo.Version, out RouterOsVersion verified)
-                || verified != target)
+            bool deadlineReached = timeProvider.GetUtcNow() >= rebootDeadline;
+            bool versionMatches = RouterOsVersion.TryParse(postInfo.Version, out RouterOsVersion verified)
+                && verified == target;
+
+            // If the absolute window elapsed before a matching version was observed, that is a timeout —
+            // not a version-mismatch classification.
+            if (deadlineReached && !versionMatches)
+            {
+                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+            }
+
+            logger.LogInformation("Post-upgrade RouterOS version: {RouterOsVersion}", postInfo.Version);
+
+            PackageInventorySummary postInventory = PackageInventoryReporting.Summarize(postPackages);
+            logger.LogInformation(
+                "Post-upgrade installed package count: {IndependentCount}",
+                postInventory.IndependentCount);
+            logger.LogInformation(
+                "Post-upgrade installed packages: {Packages}",
+                PackageInventoryReporting.FormatIndependentPackages(postInventory.IndependentPackages));
+            logger.LogInformation(
+                "Post-upgrade bundled components: {BundledCount}",
+                postInventory.BundledCount);
+            logger.LogInformation(
+                "RouterBOARD firmware after upgrade: model={RouterboardModel}, type={FirmwareType}, current={CurrentFirmware}, upgrade={UpgradeFirmware}, factory={FactoryFirmware}",
+                postInfo.RouterboardModel,
+                postInfo.RouterboardFirmwareType,
+                postInfo.RouterboardCurrentFirmware,
+                postInfo.RouterboardUpgradeFirmware,
+                postInfo.RouterboardFactoryFirmware);
+
+            if (timeProvider.GetUtcNow() > rebootDeadline)
+            {
+                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+            }
+
+            if (!versionMatches)
             {
                 return new UpgradeExecutionResult
                 {
@@ -439,6 +550,11 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 }
             }
 
+            if (timeProvider.GetUtcNow() > rebootDeadline)
+            {
+                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+            }
+
             return new UpgradeExecutionResult
             {
                 Outcome = UpgradeOutcome.UpgradeSucceeded,
@@ -461,13 +577,69 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
     }
 
+    private async Task<RouterFileInfo?> WaitForFetchedPackageSizeAsync(
+        ITikConnection connection,
+        string fileName,
+        long expectedSizeBytes,
+        TimeSpan timeout,
+        TimeSpan pollInterval,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset deadline = timeProvider.GetUtcNow() + timeout;
+        while (timeProvider.GetUtcNow() <= deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RouterFileInfo? file = await routerOperations
+                .FindFileAsync(connection, fileName, cancellationToken)
+                .ConfigureAwait(false);
+            if (file is not null && file.SizeBytes == expectedSizeBytes)
+            {
+                return file;
+            }
+
+            await Task.Delay(pollInterval, timeProvider, cancellationToken).ConfigureAwait(false);
+        }
+
+        return null;
+    }
+
     private UpgradeExecutionResult PolicyBlock(string detail)
     {
-        logger.LogWarning("Upgrade policy blocked device. Detail={Detail}", detail);
+        logger.LogWarning("Upgrade policy blocked device: {Detail}", detail);
         return new UpgradeExecutionResult
         {
             Outcome = UpgradeOutcome.PolicyBlocked,
             Detail = detail,
         };
+    }
+
+    private UpgradeExecutionResult TimedOutAfterReboot(
+        bool rebootInitiated,
+        DateTimeOffset rebootInitiatedAt,
+        TimeSpan rebootTimeout)
+    {
+        TimeSpan waited = timeProvider.GetUtcNow() - rebootInitiatedAt;
+        logger.LogError(
+            "Post-reboot upgrade window timed out after {Elapsed} (limit {Timeout})",
+            FormatDuration(waited),
+            rebootTimeout);
+        return new UpgradeExecutionResult
+        {
+            Outcome = UpgradeOutcome.UpgradeTimedOut,
+            Detail = $"Router did not complete post-reboot verification within {rebootTimeout}.",
+            RebootInitiated = rebootInitiated,
+        };
+    }
+
+    private static string FormatDuration(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero)
+        {
+            value = TimeSpan.Zero;
+        }
+
+        return value.TotalMinutes >= 1
+            ? $"{(int)value.TotalMinutes}m {value.Seconds:D2}s"
+            : $"{value.TotalSeconds:0.###}s";
     }
 }

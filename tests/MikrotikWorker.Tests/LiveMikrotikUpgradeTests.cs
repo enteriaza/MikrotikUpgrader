@@ -7,14 +7,15 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
 using MikrotikWorker.Backup;
 using MikrotikWorker.Configuration;
+using MikrotikWorker.Logging;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
 using MikrotikWorker.Upgrade;
+using Serilog;
 using tik4net;
 
 namespace MikrotikWorker.Tests;
@@ -35,6 +36,11 @@ public sealed class LiveMikrotikUpgradeTests
     [Fact]
     public async Task LiveRouter_Backup_Fetch_Reboot_Verify_6_49_23()
     {
+        // Extra opt-in gate so Category=LiveUpgrade cannot run accidentally without explicit env.
+        Assert.True(
+            string.Equals(Environment.GetEnvironmentVariable("ALLOW_LIVE_UPGRADE"), "1", StringComparison.Ordinal),
+            "Set ALLOW_LIVE_UPGRADE=1 to run the destructive live upgrade test.");
+
         string? localConfigPath = FindLocalConfigPath();
         Assert.True(localConfigPath is not null, "Missing appsettings.Development.local.json");
 
@@ -52,6 +58,8 @@ public sealed class LiveMikrotikUpgradeTests
         Assert.True(await IsTcpReachableAsync(LiveHost, mikrotik.Port, TimeSpan.FromSeconds(3)), "API port unreachable");
         Assert.True(await IsTcpReachableAsync(LiveHost, 22, TimeSpan.FromSeconds(3)), "SSH/SFTP port unreachable — stop");
 
+        VerifyPriorCentralBackupIntact();
+
         string firmwareRoot = FindFirmwareFilesRoot();
         Assert.True(Directory.Exists(firmwareRoot), $"FirmwareFiles missing at {firmwareRoot}");
         string mainPackage = Path.Combine(firmwareRoot, "mikrotik", "routeros-mipsbe-6.49.23.npk");
@@ -63,21 +71,46 @@ public sealed class LiveMikrotikUpgradeTests
         string advertisedBaseUrl = $"http://{WorkerAdvertisedHost}:{FirmwareHttpPort}/firmware_files";
         await using WebApplication firmwareServer = await StartFirmwareServerAsync(firmwareRoot, FirmwareHttpPort);
 
-        // Prove Kestrel is reachable from this host before asking the router to fetch.
+        // Prove Kestrel is reachable and serves the full package before asking the router to fetch.
+        long expectedPackageBytes = new FileInfo(mainPackage).Length;
         using (HttpClient probe = new())
         {
-            HttpResponseMessage response = await probe.GetAsync(
-                $"{advertisedBaseUrl}/mikrotik/routeros-mipsbe-6.49.23.npk");
+            using HttpResponseMessage response = await probe.GetAsync(
+                $"{advertisedBaseUrl}/mikrotik/routeros-mipsbe-6.49.23.npk",
+                HttpCompletionOption.ResponseHeadersRead);
             Assert.True(response.IsSuccessStatusCode, $"Kestrel probe failed: {(int)response.StatusCode}");
+            Assert.Equal(expectedPackageBytes, response.Content.Headers.ContentLength);
         }
 
-        RecordingLoggerProvider logs = new();
-        ILoggerFactory loggerFactory = LoggerFactory.Create(builder =>
+        string liveLogRoot = Path.Combine(AppContext.BaseDirectory, "Logs-LiveUpgrade");
+        Directory.CreateDirectory(liveLogRoot);
+        SerilogOptions serilogOptions = new()
         {
-            builder.ClearProviders();
-            builder.AddProvider(logs);
-            builder.SetMinimumLevel(LogLevel.Information);
-        });
+            LogDirectory = liveLogRoot,
+            FileName = "application-.log",
+            RollingInterval = "Day",
+            WriteToConsole = false,
+            WriteToFile = true,
+            DeviceLogEnabled = true,
+            DeviceLogDirectory = "Devices",
+            DeviceLogAsyncCapacity = 10_000,
+            DeviceLogAsyncBlockWhenFull = true,
+            AsyncBufferCapacity = 10_000,
+            AsyncBlockWhenFull = true,
+            MinimumLevel = "Information",
+        };
+        DeviceLogWriter deviceLogWriter = new(Options.Create(serilogOptions));
+        await deviceLogWriter.StartAsync(CancellationToken.None);
+        LoggerConfiguration loggerConfiguration = new();
+        SerilogConfigurator.Configure(
+            loggerConfiguration,
+            configuration: new ConfigurationBuilder().Build(),
+            environment: new LiveUpgradeHostEnvironment(),
+            options: serilogOptions,
+            deviceLogWriter: deviceLogWriter);
+        using Serilog.Core.Logger serilogLogger = loggerConfiguration.CreateLogger();
+        Log.Logger = serilogLogger;
+        using Serilog.Extensions.Logging.SerilogLoggerFactory loggerFactory = new(serilogLogger);
 
         FirmwareUpgradeOptions upgradeOptions = new()
         {
@@ -86,7 +119,7 @@ public sealed class LiveMikrotikUpgradeTests
             AdvertisedBaseUrl = advertisedBaseUrl,
             FetchTimeout = TimeSpan.FromMinutes(15),
             ReconnectInterval = TimeSpan.FromSeconds(10),
-            RebootTimeout = TimeSpan.FromMinutes(15),
+            RebootTimeout = TimeSpan.FromMinutes(5),
             PostUpgradeVerifyTimeout = TimeSpan.FromMinutes(5),
             BackupFileReadyTimeout = TimeSpan.FromMinutes(3),
             BackupFileReadyPollInterval = TimeSpan.FromSeconds(1),
@@ -159,12 +192,18 @@ public sealed class LiveMikrotikUpgradeTests
             Assert.Equal(LiveHost, connectionOptions.Host);
             Assert.Contains("6.49.19", beforeInfo.Version, StringComparison.Ordinal);
             Assert.Equal("mipsbe", beforeInfo.ArchitectureName, ignoreCase: true);
+            Assert.Equal("hEX PoE", beforeInfo.BoardName, ignoreCase: true);
+            Assert.Equal("960PGS", beforeInfo.RouterboardModel, ignoreCase: true);
 
             beforePackages = await api.ListInstalledPackagesAsync(connection, CancellationToken.None);
+            InstalledPackageInfo mainBefore = Assert.Single(
+                beforePackages,
+                static p => UpgradePackageResolver.IsMainRouterOsPackage(p.Name));
+            Assert.Equal("routeros-mipsbe", mainBefore.Name, ignoreCase: true);
+            Assert.False(mainBefore.IsBundledComponent);
             Assert.Contains(
                 beforePackages,
-                static p => UpgradePackageResolver.IsMainRouterOsPackage(p.Name)
-                    || UpgradePackageResolver.IsSystemPackage(p.Name));
+                static p => UpgradePackageResolver.IsSystemPackage(p.Name) && p.IsBundledComponent);
 
             assessment = assessor.Assess(LiveHost, beforeInfo, DateTimeOffset.UtcNow);
             Assert.Equal(DeviceAssessmentStatus.ReadyForUpgrade, assessment.OverallStatus);
@@ -172,10 +211,16 @@ public sealed class LiveMikrotikUpgradeTests
             resolution = resolver.Resolve(beforeInfo.ArchitectureName, beforePackages, RouterOsVersion.Parse("6.49.23"));
             Assert.True(
                 resolution.Succeeded,
-                $"Package resolution failed: {resolution.FailureReason}. Inventory: {string.Join(", ", beforePackages.Select(p => $"{p.Name}/{p.Version}/disabled={p.Disabled}"))}");
-            Assert.Contains(
+                $"Package resolution failed: {resolution.FailureReason}. Inventory: {string.Join(", ", beforePackages.Select(p => $"{p.Name}/{p.Version}/bundle={p.Bundle}/disabled={p.Disabled}"))}");
+            Assert.Single(resolution.Packages);
+            Assert.Equal("routeros-mipsbe", resolution.Packages[0].InstalledPackageName, ignoreCase: true);
+            Assert.Equal(
+                "routeros-mipsbe-6.49.23.npk",
+                resolution.Packages[0].CatalogPackage.FileName,
+                ignoreCase: true);
+            Assert.DoesNotContain(
                 resolution.Packages,
-                static p => p.CatalogPackage.FileName.Equals("routeros-mipsbe-6.49.23.npk", StringComparison.OrdinalIgnoreCase));
+                static p => p.InstalledPackageName.Equals("system", StringComparison.OrdinalIgnoreCase));
 
             foreach (ResolvedUpgradePackage pkg in resolution.Packages)
             {
@@ -186,15 +231,43 @@ public sealed class LiveMikrotikUpgradeTests
             // Phase B+C+D via production upgrade executor (backup gate → fetch → reboot → verify).
             rebootStartedAt = DateTimeOffset.UtcNow;
             DateTimeOffset reconnectWaitStart = rebootStartedAt;
-            upgradeResult = await upgradeExecutor.ExecuteAsync(
-                connection,
-                job,
-                beforeInfo,
-                assessment,
-                mikrotik.Username,
-                password,
-                static () => true,
-                CancellationToken.None);
+            using (DeviceLogScope scope = DeviceLogScope.Begin(job, deviceLogWriter, new DeviceLogIdentityRegistry()))
+            {
+                Microsoft.Extensions.Logging.ILogger jobLogger =
+                    loggerFactory.CreateLogger("MikrotikWorker.Scheduling.RouterJobExecutor");
+                using (DeviceLogging.BeginServiceOnly())
+                {
+                    jobLogger.LogInformation(
+                        "Router job started. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp);
+                }
+
+                jobLogger.LogInformation("Router job started");
+                scope.SetRouterIdentity(beforeInfo.Identity);
+                jobLogger.LogInformation("Device identity: {RouterIdentity}", beforeInfo.Identity);
+
+                upgradeResult = await upgradeExecutor.ExecuteAsync(
+                    connection,
+                    job,
+                    beforeInfo,
+                    assessment,
+                    mikrotik.Username,
+                    password,
+                    static () => true,
+                    CancellationToken.None);
+
+                using (DeviceLogging.BeginServiceSummary())
+                {
+                    jobLogger.LogInformation(
+                        "Final upgrade outcome: {UpgradeOutcome} (version={PostUpgradeVersion})",
+                        upgradeResult.Outcome,
+                        upgradeResult.PostUpgradeVersion);
+                }
+            }
+
             reconnectDuration = DateTimeOffset.UtcNow - reconnectWaitStart;
         }
         finally
@@ -207,6 +280,16 @@ public sealed class LiveMikrotikUpgradeTests
             {
             }
         }
+
+        await deviceLogWriter.StopAsync(CancellationToken.None);
+        deviceLogWriter.Dispose();
+        await Log.CloseAndFlushAsync();
+        string deviceLogPath = Path.Combine(
+            deviceLogWriter.DeviceLogDirectory,
+            DeviceLogNaming.BuildDeviceLogFileName(beforeInfo.Identity, IPAddress.Parse(LiveHost)));
+        string deviceLogContent = File.Exists(deviceLogPath)
+            ? await File.ReadAllTextAsync(deviceLogPath)
+            : string.Empty;
 
         // Collect post-state independently for the report even if upgrade result already verified.
         MikrotikDeviceInfo? afterInfo = null;
@@ -230,9 +313,15 @@ public sealed class LiveMikrotikUpgradeTests
             Assert.Fail($"Post-upgrade probe failed: {Sanitize(ex.Message, password)}");
         }
 
-        string[] exportFiles = Directory.GetFiles(Path.Combine(backupRoot, "Exports"), "*.rsc");
-        string[] binaryFiles = Directory.GetFiles(Path.Combine(backupRoot, "Binary"), "*.backup");
-        string[] manifests = Directory.GetFiles(Path.Combine(backupRoot, "Manifests"), "*.json");
+        string[] exportFiles = Directory.GetFiles(Path.Combine(backupRoot, "Exports"), "*.rsc")
+            .Where(static p => new FileInfo(p).Length > 0)
+            .ToArray();
+        string[] binaryFiles = Directory.GetFiles(Path.Combine(backupRoot, "Binary"), "*.backup")
+            .Where(static p => new FileInfo(p).Length > 0)
+            .ToArray();
+        string[] manifests = Directory.GetFiles(Path.Combine(backupRoot, "Manifests"), "*.json")
+            .Where(static p => new FileInfo(p).Length > 0)
+            .ToArray();
         Assert.NotEmpty(exportFiles);
         Assert.NotEmpty(binaryFiles);
         Assert.NotEmpty(manifests);
@@ -241,10 +330,24 @@ public sealed class LiveMikrotikUpgradeTests
             await File.ReadAllTextAsync(manifests.OrderByDescending(File.GetLastWriteTimeUtc).First()))!;
         Assert.Equal(LiveHost, manifest.RouterIp);
         Assert.Equal("pre-upgrade", manifest.Purpose);
+        Assert.Equal(beforeInfo.Identity, manifest.RouterIdentity);
         Assert.False(string.IsNullOrWhiteSpace(manifest.ExportSha256));
         Assert.False(string.IsNullOrWhiteSpace(manifest.BinaryBackupSha256));
         Assert.True(manifest.ExportSizeBytes > 0);
         Assert.True(manifest.BinaryBackupSizeBytes > 0);
+        Assert.Equal("SucceededWithRemoteCleanup", manifest.BackupCompletionStatus);
+
+        string expectedIdentityIpPrefix =
+            DeviceLogNaming.BuildDeviceStem(beforeInfo.Identity, IPAddress.Parse(LiveHost)) + "_";
+        Assert.StartsWith(expectedIdentityIpPrefix, manifest.ExportFileName, StringComparison.Ordinal);
+        Assert.StartsWith(expectedIdentityIpPrefix, manifest.BinaryBackupFileName, StringComparison.Ordinal);
+        Assert.Contains(LiveHost, manifest.ExportFileName, StringComparison.Ordinal);
+        Assert.Equal(
+            Path.GetFileNameWithoutExtension(manifest.ExportFileName),
+            Path.GetFileNameWithoutExtension(manifest.BinaryBackupFileName));
+        Assert.EndsWith(".rsc", manifest.ExportFileName, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(".backup", manifest.BinaryBackupFileName, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(job.RouterName, manifest.ExportFileName, StringComparison.Ordinal);
 
         string exportPath = Path.Combine(backupRoot, "Exports", manifest.ExportFileName);
         string binaryPath = Path.Combine(backupRoot, "Binary", manifest.BinaryBackupFileName);
@@ -253,12 +356,62 @@ public sealed class LiveMikrotikUpgradeTests
         Assert.Equal(manifest.ExportSha256, ComputeSha256Hex(exportPath));
         Assert.Equal(manifest.BinaryBackupSha256, ComputeSha256Hex(binaryPath));
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, upgradeResult.Outcome);
+        if (upgradeResult.Outcome != UpgradeOutcome.UpgradeSucceeded)
+        {
+            await WriteSummaryAsync(new
+            {
+                RouterIp = LiveHost,
+                Status = upgradeResult.Outcome.ToString(),
+                Detail = Sanitize(upgradeResult.Detail ?? string.Empty, password),
+                BeforeVersion = beforeInfo.Version,
+                AfterVersion = afterInfo?.Version,
+                Architecture = beforeInfo.ArchitectureName,
+                SelectedPackages = resolution.Packages.Select(p => new
+                {
+                    p.InstalledPackageName,
+                    p.CatalogPackage.FileName,
+                    p.CatalogPackage.SizeBytes,
+                    p.RelativeUrlPath,
+                }).ToArray(),
+                BeforePackages = beforePackages.Select(p => new
+                {
+                    p.Name,
+                    p.Version,
+                    p.Disabled,
+                    p.Bundle,
+                    p.IsBundledComponent,
+                }).ToArray(),
+                AfterPackages = afterPackages?.Select(p => new
+                {
+                    p.Name,
+                    p.Version,
+                    p.Disabled,
+                    p.Bundle,
+                    p.IsBundledComponent,
+                }).ToArray(),
+                RebootInitiated = upgradeResult.RebootInitiated,
+                RebootStartedAtUtc = rebootStartedAt,
+                ReconnectDurationSeconds = reconnectDuration.TotalSeconds,
+                AdvertisedBaseUrl = advertisedBaseUrl,
+                DeviceLogPath = deviceLogPath,
+                DeviceLogExcerpt = Sanitize(
+                    deviceLogContent.Length <= 8000 ? deviceLogContent : deviceLogContent[^8000..],
+                    password),
+                OtherRoutersModified = false,
+                RouterboardUpgradeExecuted = false,
+            });
+        }
+
+        Assert.True(
+            upgradeResult.Outcome == UpgradeOutcome.UpgradeSucceeded,
+            $"Upgrade outcome={upgradeResult.Outcome}; detail={Sanitize(upgradeResult.Detail ?? string.Empty, password)}");
         Assert.True(upgradeResult.RebootInitiated);
         Assert.NotNull(afterInfo);
         Assert.True(RouterOsVersion.TryParse(afterInfo!.Version, out RouterOsVersion afterVersion));
         Assert.Equal(RouterOsVersion.Parse("6.49.23"), afterVersion);
         Assert.Equal("mipsbe", afterInfo.ArchitectureName, ignoreCase: true);
+        Assert.Equal("hEX PoE", afterInfo.BoardName, ignoreCase: true);
+        Assert.Equal("960PGS", afterInfo.RouterboardModel, ignoreCase: true);
 
         foreach (ResolvedUpgradePackage required in resolution.Packages)
         {
@@ -269,9 +422,24 @@ public sealed class LiveMikrotikUpgradeTests
             Assert.Equal(RouterOsVersion.Parse("6.49.23"), pkgVer);
         }
 
-        Assert.DoesNotContain(logs.Messages, m => m.Contains(password, StringComparison.Ordinal));
-        Assert.DoesNotContain(logs.Messages, static m => m.Contains("Password=", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(logs.Messages, static m => m.Contains("/system/routerboard/upgrade", StringComparison.Ordinal));
+        foreach (InstalledPackageInfo afterPkg in afterPackages!)
+        {
+            Assert.True(
+                RouterOsVersion.TryParse(afterPkg.Version, out RouterOsVersion afterPkgVer),
+                $"Unparseable package version for {afterPkg.Name}");
+            Assert.Equal(RouterOsVersion.Parse("6.49.23"), afterPkgVer);
+        }
+
+        Assert.False(string.IsNullOrWhiteSpace(deviceLogContent), $"Missing production device log at {deviceLogPath}");
+        Assert.Contains("Backup prerequisite passed", deviceLogContent, StringComparison.Ordinal);
+        Assert.Contains("Fetching firmware package", deviceLogContent, StringComparison.Ordinal);
+        Assert.Contains("Initiating reboot for package installation", deviceLogContent, StringComparison.Ordinal);
+        Assert.Contains("Reconnected successfully", deviceLogContent, StringComparison.Ordinal);
+        Assert.Contains("Final upgrade outcome", deviceLogContent, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("UpgradeSucceeded", deviceLogContent, StringComparison.Ordinal);
+        Assert.DoesNotContain(password, deviceLogContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("Password=", deviceLogContent, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/system/routerboard/upgrade", deviceLogContent, StringComparison.Ordinal);
 
         await WriteSummaryAsync(new
         {
@@ -280,7 +448,16 @@ public sealed class LiveMikrotikUpgradeTests
             BeforeVersion = beforeInfo.Version,
             AfterVersion = afterInfo.Version,
             Architecture = afterInfo.ArchitectureName,
-            BeforePackages = beforePackages.Select(p => new { p.Name, p.Version, p.Disabled }).ToArray(),
+            BoardName = afterInfo.BoardName,
+            RouterboardModel = afterInfo.RouterboardModel,
+            BeforePackages = beforePackages.Select(p => new
+            {
+                p.Name,
+                p.Version,
+                p.Disabled,
+                p.Bundle,
+                p.IsBundledComponent,
+            }).ToArray(),
             SelectedPackages = resolution.Packages.Select(p => new
             {
                 p.InstalledPackageName,
@@ -288,7 +465,38 @@ public sealed class LiveMikrotikUpgradeTests
                 p.CatalogPackage.SizeBytes,
                 p.RelativeUrlPath,
             }).ToArray(),
-            AfterPackages = afterPackages!.Select(p => new { p.Name, p.Version, p.Disabled }).ToArray(),
+            AfterPackages = afterPackages!.Select(p => new
+            {
+                p.Name,
+                p.Version,
+                p.Disabled,
+                p.Bundle,
+                p.IsBundledComponent,
+            }).ToArray(),
+            RouterboardBefore = new
+            {
+                beforeInfo.RouterboardModel,
+                beforeInfo.RouterboardFirmwareType,
+                beforeInfo.RouterboardCurrentFirmware,
+                beforeInfo.RouterboardUpgradeFirmware,
+                beforeInfo.RouterboardFactoryFirmware,
+            },
+            RouterboardAfter = new
+            {
+                afterInfo.RouterboardModel,
+                afterInfo.RouterboardFirmwareType,
+                afterInfo.RouterboardCurrentFirmware,
+                afterInfo.RouterboardUpgradeFirmware,
+                afterInfo.RouterboardFactoryFirmware,
+            },
+            PriorVerifiedBackup = new
+            {
+                ExportFileName = "LIVE-TEST_198.18.0.83_20261110T183422050Z.rsc",
+                BinaryFileName = "LIVE-TEST_198.18.0.83_20261110T183422050Z.backup",
+                ExportSha256 = "3e7f1314387ee62724fe54f23dd10c42552e4c0e8eae7d2c4866421c2812994f",
+                BinarySha256 = "c1acc3a9397357471e358f4bbcf19dd5db96ad30d48bb225de2d63cadf63b156",
+                Status = "SucceededWithRemoteCleanup",
+            },
             Backup = new
             {
                 manifest.ExportFileName,
@@ -298,6 +506,7 @@ public sealed class LiveMikrotikUpgradeTests
                 manifest.BinaryBackupSizeBytes,
                 manifest.BinaryBackupSha256,
                 manifest.BackupTimestampUtc,
+                manifest.BackupCompletionStatus,
                 ManifestPath = manifests.OrderByDescending(File.GetLastWriteTimeUtc).First(),
                 ExportPath = exportPath,
                 BinaryPath = binaryPath,
@@ -305,9 +514,35 @@ public sealed class LiveMikrotikUpgradeTests
             RebootStartedAtUtc = rebootStartedAt,
             ReconnectDurationSeconds = reconnectDuration.TotalSeconds,
             UpgradeOutcome = upgradeResult.Outcome.ToString(),
+            upgradeResult.Detail,
             AdvertisedBaseUrl = advertisedBaseUrl,
-            DeviceLogNote = "Live test used RecordingLoggerProvider; production device logs go to Logs/Devices/",
+            OtherRoutersModified = false,
+            RouterboardUpgradeExecuted = false,
+            DeviceLogPath = deviceLogPath,
+            DeviceLogBytes = deviceLogContent.Length,
+            ApplicationLogDirectory = liveLogRoot,
+            ApplicationLogFiles = Directory.GetFiles(liveLogRoot, "application-*.log"),
         });
+
+        string markerPath = Path.Combine(Path.GetTempPath(), "mikrotik-live-upgrade-log-paths.txt");
+        string[] appLogs = Directory.GetFiles(liveLogRoot, "application-*.log");
+        Assert.NotEmpty(appLogs);
+        string mainLogPath = appLogs.OrderByDescending(File.GetLastWriteTimeUtc).First();
+        await File.WriteAllTextAsync(
+            markerPath,
+            string.Join(Environment.NewLine, [mainLogPath, deviceLogPath]));
+    }
+
+    private sealed class LiveUpgradeHostEnvironment : Microsoft.Extensions.Hosting.IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Development";
+
+        public string ApplicationName { get; set; } = "MikrotikWorker.Tests";
+
+        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
+
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } =
+            new NullFileProvider();
     }
 
     private static async Task<WebApplication> StartFirmwareServerAsync(string firmwareRoot, int port)
@@ -350,6 +585,39 @@ public sealed class LiveMikrotikUpgradeTests
             Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "src", "MikrotikWorker", "appsettings.Development.local.json")),
         ];
         return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static void VerifyPriorCentralBackupIntact()
+    {
+        string backupRoot = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory,
+            "Backups-LiveReadOnly"));
+        const string baseName = "LIVE-TEST_198.18.0.83_20261110T183422050Z";
+        string exportPath = Path.Combine(backupRoot, "Exports", baseName + ".rsc");
+        string binaryPath = Path.Combine(backupRoot, "Binary", baseName + ".backup");
+        string manifestPath = Path.Combine(backupRoot, "Manifests", baseName + ".json");
+
+        Assert.True(File.Exists(exportPath), $"Missing prior export backup: {exportPath}");
+        Assert.True(File.Exists(binaryPath), $"Missing prior binary backup: {binaryPath}");
+        Assert.True(File.Exists(manifestPath), $"Missing prior manifest: {manifestPath}");
+
+        BackupManifest prior = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(manifestPath))!;
+        Assert.Equal(LiveHost, prior.RouterIp);
+        Assert.Contains("6.49.19", prior.RouterOsVersionBeforeUpgrade, StringComparison.Ordinal);
+        Assert.Equal("mipsbe", prior.Architecture, ignoreCase: true);
+        Assert.Equal("SucceededWithRemoteCleanup", prior.BackupCompletionStatus);
+        Assert.True(new FileInfo(exportPath).Length > 0);
+        Assert.True(new FileInfo(binaryPath).Length > 0);
+        Assert.Equal(prior.ExportSha256, ComputeSha256Hex(exportPath));
+        Assert.Equal(prior.BinaryBackupSha256, ComputeSha256Hex(binaryPath));
+        Assert.Equal(
+            "3e7f1314387ee62724fe54f23dd10c42552e4c0e8eae7d2c4866421c2812994f",
+            prior.ExportSha256,
+            ignoreCase: true);
+        Assert.Equal(
+            "c1acc3a9397357471e358f4bbcf19dd5db96ad30d48bb225de2d63cadf63b156",
+            prior.BinaryBackupSha256,
+            ignoreCase: true);
     }
 
     private static string ComputeSha256Hex(string path)

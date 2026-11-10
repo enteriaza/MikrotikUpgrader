@@ -116,9 +116,10 @@ public sealed class SharedRouterCredentialTests
             CancellationToken.None);
         host.Scheduler.SetAcceptedPath(importId, host.AcceptedCsv);
 
-        await WaitForAsync(() => host.Scheduler.PendingCount == 0, TimeSpan.FromSeconds(5));
+        // PendingCount hits 0 when the job is dispatched; IsTracked clears only after completion.
+        await WaitForAsync(() => !host.Scheduler.IsTracked(importId), TimeSpan.FromSeconds(5));
         Assert.Empty(factory.Connections);
-        Assert.False(host.Scheduler.IsTracked(importId));
+        Assert.Equal(0, host.Scheduler.PendingCount);
     }
 
     [Fact]
@@ -215,7 +216,7 @@ public sealed class SharedRouterCredentialTests
             static m => m.Contains("Credential resolution successful", StringComparison.Ordinal));
         Assert.Contains(
             logs.Messages,
-            static m => m.Contains("Connection succeeded", StringComparison.Ordinal));
+            static m => m.Contains("Connected successfully", StringComparison.Ordinal));
         Assert.DoesNotContain(
             logs.Messages,
             static m => m.Contains(SharedPassword, StringComparison.Ordinal));

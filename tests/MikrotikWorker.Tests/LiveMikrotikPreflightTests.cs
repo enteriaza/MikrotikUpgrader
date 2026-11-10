@@ -67,8 +67,9 @@ public sealed class LiveMikrotikPreflightTests
         MikrotikDeviceInfo info;
         try
         {
-            info = await client.GetDeviceInfoAsync(connection, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(20));
+            using CancellationTokenSource opCts = new(TimeSpan.FromSeconds(20));
+            info = await client.GetDeviceInfoAsync(connection, opCts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(20), opCts.Token);
         }
         catch (Exception ex)
         {
@@ -112,8 +113,14 @@ public sealed class LiveMikrotikPreflightTests
 
         Assert.Equal(MikrotikPreflightStatus.Succeeded, result.Status);
         Assert.False(string.IsNullOrWhiteSpace(result.RouterIdentity));
-        Assert.False(string.IsNullOrWhiteSpace(result.RouterOsVersion));
-        Assert.False(string.IsNullOrWhiteSpace(result.Architecture));
+        // Deliberate pre-upgrade baseline for the next authorised live run.
+        Assert.Contains("6.49.19", result.RouterOsVersion, StringComparison.Ordinal);
+        Assert.Equal("mipsbe", result.Architecture, ignoreCase: true);
+        Assert.Equal("hEX PoE", result.BoardName, ignoreCase: true);
+        Assert.Equal("960PGS", result.RouterboardModel, ignoreCase: true);
+        Assert.Equal("7.23.8", result.RouterboardCurrentFirmware);
+        Assert.Equal("6.49.19", result.RouterboardUpgradeFirmware);
+        Assert.Equal("3.41", result.RouterboardFactoryFirmware);
         Assert.DoesNotContain(logs.Messages, m => m.Contains(password, StringComparison.Ordinal));
         Assert.DoesNotContain(
             logs.Messages,

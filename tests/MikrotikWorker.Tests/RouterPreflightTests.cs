@@ -27,14 +27,12 @@ public sealed class RouterPreflightTests
 
         Assert.False(harness.Scheduler.IsTracked(harness.LastImportId));
         Assert.Contains(logs.Messages, static m => m.Contains("Connection attempt started", StringComparison.Ordinal));
-        Assert.Contains(logs.Messages, static m => m.Contains("Connection succeeded", StringComparison.Ordinal));
-        Assert.Contains(
-            logs.Messages,
-            static m => m.Contains("RouterOS and hardware information retrieved", StringComparison.Ordinal));
+        Assert.Contains(logs.Messages, static m => m.Contains("Connected successfully", StringComparison.Ordinal));
+        Assert.Contains(logs.Messages, static m => m.Contains("RouterOS version:", StringComparison.Ordinal));
         Assert.Contains(logs.Messages, static m => m.Contains("Compatibility assessment started", StringComparison.Ordinal));
         Assert.Contains(
             logs.Messages,
-            static m => m.Contains("Overall assessment result", StringComparison.Ordinal)
+            static m => m.Contains("Assessment result:", StringComparison.Ordinal)
                 && m.Contains("ReadyForUpgrade", StringComparison.Ordinal));
         Assert.Contains(logs.Messages, static m => m.Contains("Connection disconnect started", StringComparison.Ordinal));
         Assert.Contains(logs.Messages, static m => m.Contains("Connection disconnected successfully", StringComparison.Ordinal));
