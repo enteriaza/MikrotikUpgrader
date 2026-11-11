@@ -63,6 +63,7 @@ Required columns (case-insensitive, any order):
 | `datestop` | When jobs must stop starting |
 | `routername` | Router identity/name |
 | `routerip` | IPv4 or IPv6 address (not a hostname) |
+| `executionmode` | Optional per-job stage cap. Omit for production default `FullUpgrade`. |
 
 Example:
 
@@ -70,6 +71,31 @@ Example:
 datestart,datestop,routername,routerip
 01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1
 01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-02,192.168.1.2
+```
+
+#### Execution mode (`executionmode`)
+
+Per-job stage cap, independent of device-identity ACE/BR policy:
+
+| Value | Behaviour |
+|---|---|
+| `FullUpgrade` | Production default: v6 stepping when required, then RouterOS 7 when identity policy allows |
+| `V6SteppingOnly` | Complete (or skip) v6 stepping verification, then stop with `UpgradeSucceededV6Only`. Never enters the RouterOS 7 stage |
+
+Rules:
+
+- Column is optional. **Absence defaults to `FullUpgrade`** — existing CSVs keep current behaviour.
+- Header and values are case-insensitive; whitespace is trimmed.
+- Empty or unknown values are rejected (do not omit the value if the column is present).
+- Mode is captured immutably when the job is accepted; there is no global “v6-only” setting.
+- **Identity policy does not override the stage cap.** A `V6SteppingOnly` job never proceeds to v7 even when the identity is Unknown/AP/DCL (v7-eligible under `FullUpgrade`).
+- **Deliberately select `V6SteppingOnly` only for controlled lab/stepping work.** Do not make it the fleet default.
+
+Lab-only example (no credentials):
+
+```csv
+datestart,datestop,routername,routerip,executionmode
+01/12/2026 08:00:00,02/12/2026 18:00:00,Mikrotik,198.18.240.11,V6SteppingOnly
 ```
 
 Excel CSV exports depend on regional settings. Configure the application culture to match the exported date representation.
@@ -274,13 +300,15 @@ Enable with `FirmwareUpgrade:Enabled=true` and set `AdvertisedBaseUrl` to an HTT
 
 **Live proof (single test router, earlier milestone):** `198.18.0.83` was upgraded 6.49.19 → 6.49.23 using only `routeros-mipsbe-6.49.23.npk` (verified immediately post-reconnect). Evidence is retained under local `OperationalEvidence/` (gitignored).
 
-High-level sequence for an eligible device older than 6.49.23:
+High-level sequence for an eligible device older than 6.49.23 (`FullUpgrade`):
 
 1. Inventory installed packages (`/system/package/print`, including `bundle`)
 2. **Mandatory pre-upgrade backup** for the v6 stepping stage (blocking)
 3. Resolve/fetch/stage **6.49.23** packages only; reboot; verify exact 6.49.23
 4. Classify identity; stop with `UpgradeSucceededV6Only` for ACE/BR
 5. For eligible devices: backup again (captures verified 6.49.23 or current newer-v6 / older-v7 state), resolve packages for the **job’s immutable v7 snapshot**, fetch/stage, reboot, verify exact target + package inventory
+
+For `V6SteppingOnly`, steps 1–3 run when v6 stepping is required; after successful v6 verification the executor logs `UpgradeStageCapReached: V6SteppingOnly` and returns `UpgradeSucceededV6Only` with `CompletedStage=v6-stepping`. If the device is already at/above 6.49.23, the same outcome is returned with `CompletedStage=none` (no upgrade performed). Never starts second-stage backup, v7 snapshot/resolution, fetch, or reboot. A RouterOS 7 device in this mode is a deliberate no-op (`SkippedStageNotApplicable`, `CompletedStage=none`).
 
 Devices already on 6.49.23 or newer RouterOS 6 skip steps 2–3 and never receive 6.49.23 packages. Devices already on RouterOS 7 never receive RouterOS 6 packages.
 

@@ -296,8 +296,10 @@ internal sealed class RouterJobExecutor(
                 using (DeviceLogging.BeginServiceSummary())
                 {
                     logger.LogInformation(
-                        "Final upgrade outcome: {UpgradeOutcome} (version={PostUpgradeVersion}, detail={UpgradeDetail}, enabled={FirmwareUpgradeEnabled})",
+                        "Final upgrade outcome: {UpgradeOutcome} (executionMode={ExecutionMode}, completedStage={CompletedStage}, version={PostUpgradeVersion}, detail={UpgradeDetail}, enabled={FirmwareUpgradeEnabled})",
                         upgradeResult.Outcome,
+                        upgradeResult.ExecutionMode,
+                        upgradeResult.CompletedStage,
                         upgradeResult.PostUpgradeVersion,
                         upgradeResult.Detail,
                         upgradeOptions.Value.Enabled);
@@ -306,10 +308,11 @@ internal sealed class RouterJobExecutor(
                 using (DeviceLogging.BeginServiceOnly())
                 {
                     logger.LogInformation(
-                        "Upgrade outcome correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, UpgradeOutcome={UpgradeOutcome}",
+                        "Upgrade outcome correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, ExecutionMode={ExecutionMode}, UpgradeOutcome={UpgradeOutcome}",
                         job.ImportId,
                         job.JobId,
                         job.RouterIp,
+                        job.ExecutionMode,
                         upgradeResult.Outcome);
                 }
 
@@ -590,6 +593,7 @@ internal sealed class RouterJobExecutor(
             UpgradeOutcome.UpgradeSucceeded => (ScheduledJobTerminalState.Succeeded, true),
             UpgradeOutcome.UpgradeSucceededV6Only => (ScheduledJobTerminalState.Succeeded, true),
             UpgradeOutcome.SkippedNewerThanTarget => (ScheduledJobTerminalState.Succeeded, true),
+            UpgradeOutcome.SkippedStageNotApplicable => (ScheduledJobTerminalState.Succeeded, true),
             UpgradeOutcome.UpgradeInterrupted => (ScheduledJobTerminalState.Cancelled, false),
             _ => (ScheduledJobTerminalState.Failed, false),
         };

@@ -2,6 +2,7 @@ using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
 using MikrotikWorker.Backup;
 using MikrotikWorker.Configuration;
+using MikrotikWorker.Logging;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
 using tik4net;
@@ -50,59 +51,61 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
         FirmwareUpgradeOptions options = upgradeOptions.Value;
         RouterOsVersion stepping = RouterOsUpgradeVersions.V6Stepping;
+        UpgradeExecutionMode executionMode = job.ExecutionMode;
 
         if (!options.Enabled)
         {
             logger.LogInformation("Upgrade skipped because FirmwareUpgrade:Enabled is false");
-            return new UpgradeExecutionResult { Outcome = UpgradeOutcome.SkippedUpgradeDisabled };
+            return WithMode(
+                new UpgradeExecutionResult { Outcome = UpgradeOutcome.SkippedUpgradeDisabled },
+                executionMode);
         }
 
         if (!RouterOsVersion.TryParse(deviceInfo.Version, out RouterOsVersion currentVersion))
         {
-            return PolicyBlock($"RouterOS version '{deviceInfo.Version}' could not be parsed.");
+            return PolicyBlock($"RouterOS version '{deviceInfo.Version}' could not be parsed.", executionMode);
         }
 
         if (assessment.OverallStatus == DeviceAssessmentStatus.Blocked)
         {
-            return PolicyBlock($"Device assessment status '{assessment.OverallStatus}' is not eligible for automated upgrade.");
+            return PolicyBlock(
+                $"Device assessment status '{assessment.OverallStatus}' is not eligible for automated upgrade.",
+                executionMode);
         }
 
         if (!isWithinScheduleWindow())
         {
-            return PolicyBlock("Job is outside its scheduled execution window.");
+            return PolicyBlock("Job is outside its scheduled execution window.", executionMode);
+        }
+
+        logger.LogInformation("Upgrade execution mode: {ExecutionMode}", executionMode);
+        using (DeviceLogging.BeginServiceOnly())
+        {
+            logger.LogInformation(
+                "Upgrade execution mode correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RouterName={RouterName}, ExecutionMode={ExecutionMode}",
+                job.ImportId,
+                job.JobId,
+                job.RouterIp,
+                job.RouterName,
+                executionMode);
         }
 
         logger.LogInformation(
             "Initial RouterOS version: {RouterOsVersion}",
             deviceInfo.Version);
 
-        // Immutable for this job — later file changes must not alter an in-flight upgrade.
-        RouterOsV7TargetSnapshot? v7Snapshot = v7TargetProvider.CaptureSnapshot();
-        if (v7Snapshot is not null)
-        {
-            logger.LogInformation(
-                "Validated RouterOS 7 target snapshot for job: {Target} (captured {CapturedAt:o})",
-                v7Snapshot.VersionText,
-                v7Snapshot.CapturedAtUtc);
-        }
-        else
-        {
-            logger.LogWarning(
-                "No validated RouterOS 7 target is available from {Path}",
-                v7TargetProvider.VersionFilePath);
-        }
-
         bool needsV6Stepping = currentVersion.IsV6 && currentVersion < stepping;
         logger.LogInformation(
             needsV6Stepping
                 ? "v6 stepping required: {Current} < {Stepping}"
-                : "v6 stepping skipped: {Current} is not an older RouterOS 6 release than {Stepping}",
+                : "v6 stepping unnecessary: {Current} is not an older RouterOS 6 release than {Stepping}",
             currentVersion,
             stepping);
 
         ITikConnection? live = null;
         bool disposeLive = false;
         bool rebootInitiated = false;
+        bool v6SteppingVerified = false;
         try
         {
             MikrotikDeviceInfo workingDevice = deviceInfo;
@@ -130,7 +133,15 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
                 if (!IsStageSuccess(stage1.Execution.Outcome))
                 {
-                    return stage1.Execution;
+                    logger.LogWarning(
+                        "v6 stepping failed or did not verify (Outcome={Outcome}); CompletedStage remains {CompletedStage}",
+                        stage1.Execution.Outcome,
+                        UpgradeCompletedStages.None);
+                    return WithMode(
+                        stage1.Execution,
+                        executionMode,
+                        completedStage: UpgradeCompletedStages.None,
+                        postArchitecture: stage1.PostDeviceInfo?.ArchitectureName ?? deviceInfo.ArchitectureName);
                 }
 
                 rebootInitiated = stage1.Execution.RebootInitiated;
@@ -141,6 +152,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 live = stage1.LiveConnection
                     ?? throw new InvalidOperationException("v6 stepping verification did not leave a live connection.");
                 disposeLive = true;
+                v6SteppingVerified = true;
 
                 logger.LogInformation(
                     "v6 stepping verification succeeded (observed {ObservedVersion})",
@@ -164,7 +176,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
             }
             else
             {
-                return PolicyBlock($"Unsupported RouterOS major version '{currentVersion}'.");
+                return PolicyBlock($"Unsupported RouterOS major version '{currentVersion}'.", executionMode);
             }
 
             DeviceIdentityClassification classification = await ClassifyIdentityAsync(
@@ -174,6 +186,22 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     cancellationToken)
                 .ConfigureAwait(false);
             LogClassification(classification);
+
+            string completedAfterV6 = v6SteppingVerified
+                ? UpgradeCompletedStages.V6Stepping
+                : UpgradeCompletedStages.None;
+
+            // Stage cap is independent of identity policy and must be checked in the executor
+            // before any second-stage (RouterOS 7) activity — including v7 target snapshot capture.
+            if (executionMode == UpgradeExecutionMode.V6SteppingOnly)
+            {
+                return CompleteV6SteppingOnly(
+                    job,
+                    workingDevice,
+                    classification,
+                    rebootInitiated,
+                    v6SteppingVerified);
+            }
 
             if (!classification.ShouldUpgradeToV7)
             {
@@ -186,8 +214,27 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     Outcome = UpgradeOutcome.UpgradeSucceededV6Only,
                     Detail = classification.PolicyReason,
                     PostUpgradeVersion = workingDevice.Version,
+                    PostUpgradeArchitecture = workingDevice.ArchitectureName,
                     RebootInitiated = rebootInitiated,
+                    ExecutionMode = executionMode,
+                    CompletedStage = completedAfterV6,
                 };
+            }
+
+            // Immutable for this job — capture only when the RouterOS 7 stage may run.
+            RouterOsV7TargetSnapshot? v7Snapshot = v7TargetProvider.CaptureSnapshot();
+            if (v7Snapshot is not null)
+            {
+                logger.LogInformation(
+                    "Validated RouterOS 7 target snapshot for job: {Target} (captured {CapturedAt:o})",
+                    v7Snapshot.VersionText,
+                    v7Snapshot.CapturedAtUtc);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "No validated RouterOS 7 target is available from {Path}",
+                    v7TargetProvider.VersionFilePath);
             }
 
             if (v7Snapshot is null)
@@ -197,13 +244,18 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     Outcome = UpgradeOutcome.TargetUnavailable,
                     Detail = $"RouterOS 7 target file is unavailable or invalid ({v7TargetProvider.VersionFilePath}).",
                     PostUpgradeVersion = workingDevice.Version,
+                    PostUpgradeArchitecture = workingDevice.ArchitectureName,
                     RebootInitiated = rebootInitiated,
+                    ExecutionMode = executionMode,
+                    CompletedStage = completedAfterV6,
                 };
             }
 
             if (!RouterOsVersion.TryParse(workingDevice.Version, out RouterOsVersion workingVersion))
             {
-                return PolicyBlock($"Post-step RouterOS version '{workingDevice.Version}' could not be parsed.");
+                return PolicyBlock(
+                    $"Post-step RouterOS version '{workingDevice.Version}' could not be parsed.",
+                    executionMode);
             }
 
             int cmpToV7 = workingVersion.CompareTo(v7Snapshot.Version);
@@ -216,7 +268,11 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 {
                     Outcome = UpgradeOutcome.SkippedAlreadyAtTarget,
                     PostUpgradeVersion = workingDevice.Version,
+                    PostUpgradeArchitecture = workingDevice.ArchitectureName,
                     RebootInitiated = rebootInitiated,
+                    ExecutionMode = executionMode,
+                    // Already at v7 target — no stage was performed this job; do not claim routeros7 completion.
+                    CompletedStage = UpgradeCompletedStages.None,
                 };
             }
 
@@ -231,7 +287,10 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     Outcome = UpgradeOutcome.SkippedNewerThanTarget,
                     Detail = $"Current RouterOS {workingVersion} is newer than target {v7Snapshot.VersionText}; automatic downgrade is not performed.",
                     PostUpgradeVersion = workingDevice.Version,
+                    PostUpgradeArchitecture = workingDevice.ArchitectureName,
                     RebootInitiated = rebootInitiated,
+                    ExecutionMode = executionMode,
+                    CompletedStage = UpgradeCompletedStages.None,
                 };
             }
 
@@ -299,13 +358,21 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     stage2.Execution.PostUpgradeVersion);
             }
 
-            return new UpgradeExecutionResult
-            {
-                Outcome = stage2.Execution.Outcome,
-                Detail = stage2.Execution.Detail,
-                PostUpgradeVersion = stage2.Execution.PostUpgradeVersion,
-                RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
-            };
+            bool stage2Verified = stage2.Execution.Outcome == UpgradeOutcome.UpgradeSucceeded;
+            return WithMode(
+                new UpgradeExecutionResult
+                {
+                    Outcome = stage2.Execution.Outcome,
+                    Detail = stage2.Execution.Detail,
+                    PostUpgradeVersion = stage2.Execution.PostUpgradeVersion ?? workingDevice.Version,
+                    PostUpgradeArchitecture =
+                        stage2.PostDeviceInfo?.ArchitectureName ?? workingDevice.ArchitectureName,
+                    RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
+                },
+                executionMode,
+                completedStage: stage2Verified
+                    ? UpgradeCompletedStages.RouterOs7
+                    : completedAfterV6);
         }
         finally
         {
@@ -321,6 +388,117 @@ internal sealed class RouterOsV6UpgradeExecutor(
             }
         }
     }
+
+    /// <summary>
+    /// Structural v7 boundary for <see cref="UpgradeExecutionMode.V6SteppingOnly"/>.
+    /// Must return before second-stage backup, v7 package resolution, fetch, or reboot.
+    /// </summary>
+    private UpgradeExecutionResult CompleteV6SteppingOnly(
+        MikrotikScheduledJob job,
+        MikrotikDeviceInfo workingDevice,
+        DeviceIdentityClassification classification,
+        bool rebootInitiated,
+        bool v6SteppingVerified)
+    {
+        if (!RouterOsVersion.TryParse(workingDevice.Version, out RouterOsVersion workingVersion))
+        {
+            return PolicyBlock(
+                $"Post-step RouterOS version '{workingDevice.Version}' could not be parsed.",
+                UpgradeExecutionMode.V6SteppingOnly);
+        }
+
+        if (workingVersion.IsV7OrLater)
+        {
+            logger.LogInformation(
+                "UpgradeStageCapReached: V6SteppingOnly — v6 stage not applicable to RouterOS 7 device; no upgrade or downgrade. Identity={Identity}, Version={Version}",
+                string.IsNullOrWhiteSpace(classification.Identity) ? "(unavailable)" : classification.Identity,
+                workingDevice.Version);
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogInformation(
+                    "UpgradeStageCapReached correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, ExecutionMode={ExecutionMode}, Version={Version}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterIp,
+                    UpgradeExecutionMode.V6SteppingOnly,
+                    workingDevice.Version);
+            }
+
+            return new UpgradeExecutionResult
+            {
+                Outcome = UpgradeOutcome.SkippedStageNotApplicable,
+                Detail =
+                    "Execution mode V6SteppingOnly is not applicable to RouterOS 7 devices; no upgrade or downgrade was performed.",
+                PostUpgradeVersion = workingDevice.Version,
+                PostUpgradeArchitecture = workingDevice.ArchitectureName,
+                RebootInitiated = rebootInitiated,
+                ExecutionMode = UpgradeExecutionMode.V6SteppingOnly,
+                CompletedStage = UpgradeCompletedStages.None,
+            };
+        }
+
+        string completedStage = v6SteppingVerified
+            ? UpgradeCompletedStages.V6Stepping
+            : UpgradeCompletedStages.None;
+
+        if (v6SteppingVerified)
+        {
+            logger.LogInformation(
+                "UpgradeStageCapReached: V6SteppingOnly after verified v6 stepping. Identity={Identity}, DeviceType={DeviceType}, Version={Version}. RouterOS 7 stage will not run.",
+                string.IsNullOrWhiteSpace(classification.Identity) ? "(unavailable)" : classification.Identity,
+                classification.DeviceType,
+                workingDevice.Version);
+        }
+        else
+        {
+            logger.LogInformation(
+                "UpgradeStageCapReached: V6SteppingOnly with v6 stepping unnecessary (already at/above stepping release). Identity={Identity}, DeviceType={DeviceType}, Version={Version}. RouterOS 7 stage will not run.",
+                string.IsNullOrWhiteSpace(classification.Identity) ? "(unavailable)" : classification.Identity,
+                classification.DeviceType,
+                workingDevice.Version);
+        }
+
+        using (DeviceLogging.BeginServiceOnly())
+        {
+            logger.LogInformation(
+                "UpgradeStageCapReached correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, ExecutionMode={ExecutionMode}, Version={Version}, CompletedStage={CompletedStage}",
+                job.ImportId,
+                job.JobId,
+                job.RouterIp,
+                UpgradeExecutionMode.V6SteppingOnly,
+                workingDevice.Version,
+                completedStage);
+        }
+
+        return new UpgradeExecutionResult
+        {
+            Outcome = UpgradeOutcome.UpgradeSucceededV6Only,
+            Detail = v6SteppingVerified
+                ? "Execution mode V6SteppingOnly: v6 stepping verified. RouterOS 7 was intentionally not attempted."
+                : "Execution mode V6SteppingOnly: device already at or above the v6 stepping release; no v6 upgrade performed. RouterOS 7 was intentionally not attempted.",
+            PostUpgradeVersion = workingDevice.Version,
+            PostUpgradeArchitecture = workingDevice.ArchitectureName,
+            RebootInitiated = rebootInitiated,
+            ExecutionMode = UpgradeExecutionMode.V6SteppingOnly,
+            CompletedStage = completedStage,
+        };
+    }
+
+    private static UpgradeExecutionResult WithMode(
+        UpgradeExecutionResult result,
+        UpgradeExecutionMode executionMode,
+        string? completedStage = null,
+        string? postArchitecture = null) =>
+        new()
+        {
+            Outcome = result.Outcome,
+            Detail = result.Detail,
+            PostUpgradeVersion = result.PostUpgradeVersion,
+            PostUpgradeArchitecture = postArchitecture ?? result.PostUpgradeArchitecture,
+            RebootInitiated = result.RebootInitiated,
+            ExecutionMode = executionMode,
+            CompletedStage = completedStage ?? result.CompletedStage,
+        };
 
     private async Task<DeviceIdentityClassification> ClassifyIdentityAsync(
         ITikConnection connection,
@@ -931,13 +1109,16 @@ internal sealed class RouterOsV6UpgradeExecutor(
         return null;
     }
 
-    private UpgradeExecutionResult PolicyBlock(string detail)
+    private UpgradeExecutionResult PolicyBlock(
+        string detail,
+        UpgradeExecutionMode executionMode = UpgradeExecutionMode.FullUpgrade)
     {
         logger.LogWarning("Upgrade policy blocked device: {Detail}", detail);
         return new UpgradeExecutionResult
         {
             Outcome = UpgradeOutcome.PolicyBlocked,
             Detail = detail,
+            ExecutionMode = executionMode,
         };
     }
 

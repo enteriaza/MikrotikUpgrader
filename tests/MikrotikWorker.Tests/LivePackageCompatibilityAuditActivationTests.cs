@@ -1,9 +1,18 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Tests;
 
+/// <summary>
+/// Dual-gate activation tests. These must never open a live router connection.
+/// Ambient <c>appsettings.Development.local.json</c> in the test output may enable live audit;
+/// tests that assert the disabled gate force <c>Enabled=false</c> after local config via
+/// <see cref="LivePackageCompatibilityAuditRunner.RunLiveAuditAsync(string[], Action{HostApplicationBuilder}?, CancellationToken)"/>.
+/// </summary>
+[Trait("Category", "LiveAuditGate")]
 public sealed class LivePackageCompatibilityAuditActivationTests
 {
     [Fact]
@@ -46,12 +55,46 @@ public sealed class LivePackageCompatibilityAuditActivationTests
     [Fact]
     public async Task RunLiveAudit_WithCliButDisabledConfig_FailsBeforeConnect()
     {
+        // Root cause of prior flake: Host.CreateApplicationBuilder loads
+        // appsettings.Development.local.json from the test output (copied from MikrotikWorker),
+        // which may set LivePackageCompatibilityAudit:Enabled=true and allow the runner to
+        // proceed past the gate (and potentially attempt connections). Force Enabled=false
+        // after local files so this assertion is environment-independent and connection-free.
         string csv = Path.Combine(Path.GetTempPath(), $"live-audit-disabled-{Guid.NewGuid():N}.csv");
         await File.WriteAllTextAsync(csv, "routerip\n10.0.0.1\n");
         try
         {
             int code = await LivePackageCompatibilityAuditRunner.RunLiveAuditAsync(
-                ["--audit-package-compatibility-live", "--input", csv]);
+                ["--audit-package-compatibility-live", "--input", csv],
+                ForceLiveAuditDisabled);
+            Assert.Equal(2, code);
+        }
+        finally
+        {
+            File.Delete(csv);
+        }
+    }
+
+    [Fact]
+    public async Task RunLiveAudit_AmbientLocalEnable_IsOverridableToDisabledWithoutConnecting()
+    {
+        string csv = Path.Combine(Path.GetTempPath(), $"live-audit-override-{Guid.NewGuid():N}.csv");
+        await File.WriteAllTextAsync(csv, "routerip\n10.0.0.1\n");
+        try
+        {
+            int code = await LivePackageCompatibilityAuditRunner.RunLiveAuditAsync(
+                ["--audit-package-compatibility-live", "--input", csv],
+                builder =>
+                {
+                    // Prove later sources win over Development.local.json without enabling a live run.
+                    builder.Configuration.AddInMemoryCollection(
+                        new Dictionary<string, string?>
+                        {
+                            ["LivePackageCompatibilityAudit:Enabled"] = "false",
+                            ["Mikrotik:Username"] = "must-not-connect",
+                            ["Mikrotik:Password"] = "must-not-connect",
+                        });
+                });
             Assert.Equal(2, code);
         }
         finally
@@ -106,4 +149,11 @@ public sealed class LivePackageCompatibilityAuditActivationTests
     {
         Assert.False(new FirmwareUpgradeOptions().Enabled);
     }
+
+    private static void ForceLiveAuditDisabled(HostApplicationBuilder builder) =>
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["LivePackageCompatibilityAudit:Enabled"] = "false",
+            });
 }

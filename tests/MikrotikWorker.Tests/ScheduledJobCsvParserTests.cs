@@ -2,8 +2,7 @@ using System.Globalization;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
-
-namespace MikrotikWorker.Tests;
+using MikrotikWorker.Upgrade;
 
 public sealed class ScheduledJobCsvParserTests
 {
@@ -119,6 +118,122 @@ public sealed class ScheduledJobCsvParserTests
         {
             CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
             Assert.True(result.IsAccepted);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task MissingExecutionModeColumn_DefaultsToFullUpgrade()
+    {
+        string path = await WriteTempCsvAsync(
+            """
+            datestart,datestop,routername,routerip
+            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.True(result.IsAccepted);
+
+            List<MikrotikScheduledJob> jobs = [];
+            await foreach (MikrotikScheduledJob job in CreateParser().EnumerateJobsAsync(path, Guid.NewGuid(), CancellationToken.None))
+            {
+                jobs.Add(job);
+            }
+
+            MikrotikScheduledJob single = Assert.Single(jobs);
+            Assert.Equal(UpgradeExecutionMode.FullUpgrade, single.ExecutionMode);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData("FullUpgrade", UpgradeExecutionMode.FullUpgrade)]
+    [InlineData("fullupgrade", UpgradeExecutionMode.FullUpgrade)]
+    [InlineData(" FullUpgrade ", UpgradeExecutionMode.FullUpgrade)]
+    [InlineData("V6SteppingOnly", UpgradeExecutionMode.V6SteppingOnly)]
+    [InlineData("v6steppingonly", UpgradeExecutionMode.V6SteppingOnly)]
+    [InlineData(" V6SteppingOnly ", UpgradeExecutionMode.V6SteppingOnly)]
+    public async Task ExplicitExecutionMode_IsAccepted(string raw, UpgradeExecutionMode expected)
+    {
+        string path = await WriteTempCsvAsync(
+            $"""
+            datestart,datestop,routername,routerip,executionmode
+            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1,{raw}
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.True(result.IsAccepted, string.Join("; ", result.Errors));
+
+            List<MikrotikScheduledJob> jobs = [];
+            await foreach (MikrotikScheduledJob job in CreateParser().EnumerateJobsAsync(path, Guid.NewGuid(), CancellationToken.None))
+            {
+                jobs.Add(job);
+            }
+
+            Assert.Equal(expected, Assert.Single(jobs).ExecutionMode);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ExecutionModeHeader_IsCaseInsensitive()
+    {
+        string path = await WriteTempCsvAsync(
+            """
+            datestart,datestop,routername,routerip,EXECUTIONMODE
+            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1,V6SteppingOnly
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.True(result.IsAccepted);
+
+            List<MikrotikScheduledJob> jobs = [];
+            await foreach (MikrotikScheduledJob job in CreateParser().EnumerateJobsAsync(path, Guid.NewGuid(), CancellationToken.None))
+            {
+                jobs.Add(job);
+            }
+
+            Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, Assert.Single(jobs).ExecutionMode);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("PartialUpgrade")]
+    [InlineData("v6")]
+    public async Task InvalidOrEmptyExecutionMode_IsRejected(string raw)
+    {
+        string path = await WriteTempCsvAsync(
+            $"""
+            datestart,datestop,routername,routerip,executionmode
+            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1,{raw}
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.False(result.IsAccepted);
+            Assert.Contains(result.Errors, static e => e.ColumnName == "executionmode");
         }
         finally
         {

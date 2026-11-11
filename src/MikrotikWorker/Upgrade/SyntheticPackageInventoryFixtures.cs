@@ -27,6 +27,7 @@ internal static class SyntheticPackageInventoryFixtures
         X86ArchlessMain(),
         PowerPcAlias(),
         AmbiguousDuplicateMainCandidates(),
+        LabV6SteppingOnlyMikrotik1981824011(),
     ];
 
     public static PackageCompatibilityAuditDevice MainOnlyMipsbeOlderV6() =>
@@ -183,6 +184,33 @@ internal static class SyntheticPackageInventoryFixtures
             "6.49.10",
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
+
+    /// <summary>
+    /// Synthetic lab mirror of 198.18.240.11 (identity Mikrotik, 6.49.19 mipsbe, main-only with
+    /// ten bundled components). Not a live router observation. Use CSV
+    /// <c>executionmode=V6SteppingOnly</c> for controlled stepping — identity remains Unknown/v7-eligible
+    /// under FullUpgrade.
+    /// </summary>
+    public static PackageCompatibilityAuditDevice LabV6SteppingOnlyMikrotik1981824011() =>
+        Device(
+            "lab-v6-stepping-only-198.18.240.11",
+            "Mikrotik",
+            "198.18.240.11",
+            "6.49.19",
+            "mipsbe",
+            [
+                Indep("routeros-mipsbe", "6.49.19"),
+                Bundled("system", "6.49.19", "routeros-mipsbe"),
+                Bundled("wireless", "6.49.19", "routeros-mipsbe"),
+                Bundled("hotspot", "6.49.19", "routeros-mipsbe"),
+                Bundled("dhcp", "6.49.19", "routeros-mipsbe"),
+                Bundled("routing", "6.49.19", "routeros-mipsbe"),
+                Bundled("mpls", "6.49.19", "routeros-mipsbe"),
+                Bundled("ppp", "6.49.19", "routeros-mipsbe"),
+                Bundled("security", "6.49.19", "routeros-mipsbe"),
+                Bundled("advanced-tools", "6.49.19", "routeros-mipsbe"),
+                Bundled("ipv6", "6.49.19", "routeros-mipsbe"),
+            ]);
 
     private static PackageCompatibilityAuditDevice Device(
         string fixtureName,

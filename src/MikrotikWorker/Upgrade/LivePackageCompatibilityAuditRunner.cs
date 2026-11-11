@@ -42,8 +42,19 @@ internal static class LivePackageCompatibilityAuditRunner
         return null;
     }
 
+    public static Task<int> RunLiveAuditAsync(
+        string[] args,
+        CancellationToken cancellationToken = default) =>
+        RunLiveAuditAsync(args, configureHost: null, cancellationToken);
+
+    /// <param name="configureHost">
+    /// Optional test/host customization applied after default appsettings (including optional
+    /// <c>*.local.json</c>). Later configuration sources win — use this to force
+    /// <c>LivePackageCompatibilityAudit:Enabled=false</c> without depending on ambient local files.
+    /// </param>
     public static async Task<int> RunLiveAuditAsync(
         string[] args,
+        Action<HostApplicationBuilder>? configureHost,
         CancellationToken cancellationToken = default)
     {
         if (!IsLiveAuditRequested(args))
@@ -72,6 +83,7 @@ internal static class LivePackageCompatibilityAuditRunner
         outputDir = Path.GetFullPath(outputDir);
 
         HostApplicationBuilder builder = LivePackageCompatibilityAuditHost.CreateBuilder(args);
+        configureHost?.Invoke(builder);
         using IHost host = builder.Build();
         IServiceProvider services = host.Services;
 

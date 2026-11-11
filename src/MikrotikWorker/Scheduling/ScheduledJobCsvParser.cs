@@ -5,6 +5,7 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
+using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Scheduling;
 
@@ -162,6 +163,7 @@ internal sealed class ScheduledJobCsvParser(
                 RouterIp = row.RouterIp,
                 DateStartUtc = row.DateStartUtc,
                 DateStopUtc = row.DateStopUtc,
+                ExecutionMode = row.ExecutionMode,
             };
         }
     }
@@ -233,12 +235,47 @@ internal sealed class ScheduledJobCsvParser(
         string dateStopRaw = GetRequiredField(csv, headers, "datestop", fileName, rowNumber);
         string routerName = GetRequiredField(csv, headers, "routername", fileName, rowNumber);
         string routerIpRaw = GetRequiredField(csv, headers, "routerip", fileName, rowNumber);
+        UpgradeExecutionMode executionMode = ReadExecutionMode(csv, headers, fileName, rowNumber);
 
         DateTime dateStartUtc = dateTimeParser.ParseToUtc(dateStartRaw, fileName, rowNumber, "datestart");
         DateTime dateStopUtc = dateTimeParser.ParseToUtc(dateStopRaw, fileName, rowNumber, "datestop");
         IPAddress routerIp = ParseIpAddress(routerIpRaw, fileName, rowNumber);
 
-        return new ParsedCsvRow(routerName, routerIp, dateStartUtc, dateStopUtc);
+        return new ParsedCsvRow(routerName, routerIp, dateStartUtc, dateStopUtc, executionMode);
+    }
+
+    private static UpgradeExecutionMode ReadExecutionMode(
+        CsvReader csv,
+        Dictionary<string, int> headers,
+        string fileName,
+        int rowNumber)
+    {
+        if (!headers.TryGetValue("executionmode", out int index))
+        {
+            // Column absent → production default. Do not invent v6-only behaviour.
+            return UpgradeExecutionMode.FullUpgrade;
+        }
+
+        string? raw = csv.GetField(index);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            throw new CsvScheduleException(
+                fileName,
+                rowNumber,
+                "executionmode",
+                "Value is empty. Omit the column for FullUpgrade, or supply FullUpgrade / V6SteppingOnly.");
+        }
+
+        if (!UpgradeExecutionModeParser.TryParse(raw, out UpgradeExecutionMode mode))
+        {
+            throw new CsvScheduleException(
+                fileName,
+                rowNumber,
+                "executionmode",
+                $"Value '{raw.Trim()}' is not a supported execution mode. Use FullUpgrade or V6SteppingOnly.");
+        }
+
+        return mode;
     }
 
     private static string GetRequiredField(
@@ -382,7 +419,8 @@ internal sealed class ScheduledJobCsvParser(
         string RouterName,
         IPAddress RouterIp,
         DateTime DateStartUtc,
-        DateTime DateStopUtc);
+        DateTime DateStopUtc,
+        UpgradeExecutionMode ExecutionMode);
 
     private sealed class ErrorAccumulator(int maxRetained)
     {

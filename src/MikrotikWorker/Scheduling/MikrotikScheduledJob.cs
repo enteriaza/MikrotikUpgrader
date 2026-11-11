@@ -1,4 +1,5 @@
 using System.Net;
+using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Scheduling;
 
@@ -20,6 +21,12 @@ public sealed class MikrotikScheduledJob
     public required DateTime DateStartUtc { get; init; }
 
     public required DateTime DateStopUtc { get; init; }
+
+    /// <summary>
+    /// Immutable per-job stage cap captured at CSV import. Defaults to <see cref="UpgradeExecutionMode.FullUpgrade"/>
+    /// when the optional <c>executionmode</c> column is absent.
+    /// </summary>
+    public UpgradeExecutionMode ExecutionMode { get; init; } = UpgradeExecutionMode.FullUpgrade;
 
     /// <summary>
     /// Stable identifier for structured logging (import + row).
