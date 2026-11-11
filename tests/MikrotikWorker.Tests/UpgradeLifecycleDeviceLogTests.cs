@@ -66,7 +66,6 @@ public sealed class UpgradeLifecycleDeviceLogTests
         FirmwareUpgradeOptions upgradeOptions = new()
         {
             Enabled = true,
-            TargetRouterOsVersion = "6.49.23",
             AdvertisedBaseUrl = "http://198.18.0.66:8080/firmware_files",
             FetchTimeout = TimeSpan.FromSeconds(5),
             ReconnectInterval = TimeSpan.FromMilliseconds(5),
@@ -92,6 +91,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
                 new StaticFirmwarePackageCatalog(firmwareRoot),
                 Options.Create(new FirmwareFilesOptions { Path = firmwareRoot })),
             backup,
+            new FixedRouterOsV7TargetProvider(null),
             Options.Create(upgradeOptions),
             Options.Create(new MikroTikOptions { Port = 8728 }),
             time,
@@ -110,14 +110,14 @@ public sealed class UpgradeLifecycleDeviceLogTests
 
         MikrotikDeviceInfo before = new()
         {
-            Identity = "MikroTik",
-            Version = "6.49.19 (long-term)",
+            Identity = "ACE01.POP001.001.core",
+            Version = "6.49.10 (long-term)",
             ArchitectureName = "mipsbe",
             BoardName = "hEX PoE",
             RouterboardModel = "960PGS",
             RouterboardFirmwareType = "qca9550L",
             RouterboardCurrentFirmware = "7.23.8",
-            RouterboardUpgradeFirmware = "6.49.19",
+            RouterboardUpgradeFirmware = "6.49.23",
             RouterboardFactoryFirmware = "3.41",
         };
 
@@ -174,7 +174,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
             }
         }
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.True(ops.RebootCalled);
         Assert.True(ops.FetchCalled);
 
@@ -190,7 +190,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
 
         string[] requiredFragments =
         [
-            "Device: MikroTik",
+            "Device: ACE01.POP001.001.core",
             "Address: 198.18.0.83",
             "CSV name: LIVE-TEST",
             "Import ID:",
@@ -205,18 +205,18 @@ public sealed class UpgradeLifecycleDeviceLogTests
             "Export verified",
             "Binary backup verified",
             "Remote backup cleanup succeeded",
-            "Backup prerequisite passed",
+            "v6-stepping backup prerequisite passed",
             "Fetching firmware package",
             "Staged package verified",
             "Package staging complete",
-            "Initiating reboot",
+            "Initiating v6-stepping reboot",
             "Reconnection attempt",
             "Reconnected successfully",
             "Post-upgrade RouterOS version",
-            "RouterBOARD firmware before upgrade",
+            "RouterBOARD firmware before v6-stepping",
             "RouterBOARD firmware after upgrade",
             "Final upgrade outcome",
-            "UpgradeSucceeded",
+            "UpgradeSucceededV6Only",
         ];
 
         foreach (string fragment in requiredFragments)
@@ -230,7 +230,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
         Assert.DoesNotContain("RouterIp=", deviceLog, StringComparison.Ordinal);
         Assert.DoesNotContain("RouterName=", deviceLog, StringComparison.Ordinal);
         Assert.DoesNotContain("PackageCount=", deviceLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("system/6.49.19, ipv6", deviceLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("system/6.49.23, ipv6", deviceLog, StringComparison.Ordinal);
         Assert.Contains("Installed package count: 1", deviceLog, StringComparison.Ordinal);
         Assert.Contains("Installed packages: routeros-mipsbe/", deviceLog, StringComparison.Ordinal);
         Assert.Contains("Bundled components: 10", deviceLog, StringComparison.Ordinal);
@@ -244,18 +244,18 @@ public sealed class UpgradeLifecycleDeviceLogTests
         Assert.Contains("Router job started", appLog, StringComparison.Ordinal);
         Assert.Contains("ImportId=", appLog, StringComparison.Ordinal);
         Assert.Contains("Final upgrade outcome", appLog, StringComparison.Ordinal);
-        Assert.Contains("UpgradeSucceeded", appLog, StringComparison.Ordinal);
+        Assert.Contains("UpgradeSucceededV6Only", appLog, StringComparison.Ordinal);
         // Device-detail lines must not flood the service log.
         Assert.DoesNotContain("Creating RouterOS export", appLog, StringComparison.Ordinal);
         Assert.DoesNotContain("Staged package verified", appLog, StringComparison.Ordinal);
         Assert.DoesNotContain("Installed package count:", appLog, StringComparison.Ordinal);
         Assert.DoesNotContain("PackageCount=11", appLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("system/6.49.19, ipv6", appLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("system/6.49.23, ipv6", appLog, StringComparison.Ordinal);
         Assert.DoesNotContain("super-secret-password", appLog, StringComparison.Ordinal);
         Assert.Equal(0, deviceLogWriter.WriteFailureCount);
 
         string stamp = time.GetUtcNow().UtcDateTime.ToString("yyyyMMdd_HHmmss_fff");
-        string expectedStem = $"MikroTik_198.18.0.83_{stamp}";
+        string expectedStem = $"ACE01.POP001.001.core_198.18.0.83_{stamp}";
         Assert.True(File.Exists(Path.Combine(backupRoot, "Exports", expectedStem + ".rsc")));
         Assert.True(File.Exists(Path.Combine(backupRoot, "Binary", expectedStem + ".backup")));
         Assert.True(File.Exists(Path.Combine(backupRoot, "Manifests", expectedStem + ".json")));
@@ -288,7 +288,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
 
     private sealed class TrackingOps : IMikrotikRouterOperations
     {
-        private string _version = "6.49.19";
+        private string _version = "6.49.10";
         private readonly Dictionary<string, long> _files = new(StringComparer.OrdinalIgnoreCase);
 
         public bool FetchCalled { get; private set; }
@@ -303,14 +303,14 @@ public sealed class UpgradeLifecycleDeviceLogTests
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new MikrotikDeviceInfo
             {
-                Identity = "MikroTik",
-                Version = _version == "6.49.23" ? "6.49.23 (stable)" : "6.49.19 (long-term)",
+                Identity = "ACE01.POP001.001.core",
+                Version = _version == "6.49.23" ? "6.49.23 (long-term)" : "6.49.10 (long-term)",
                 ArchitectureName = "mipsbe",
                 BoardName = "hEX PoE",
                 RouterboardModel = "960PGS",
                 RouterboardFirmwareType = "qca9550L",
                 RouterboardCurrentFirmware = "7.23.8",
-                RouterboardUpgradeFirmware = _version == "6.49.23" ? "6.49.23" : "6.49.19",
+                RouterboardUpgradeFirmware = _version == "6.49.23" ? "6.49.23" : "6.49.10",
                 RouterboardFactoryFirmware = "3.41",
             });
 

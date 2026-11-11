@@ -1,6 +1,7 @@
 using System.Reflection;
 using MikrotikWorker;
 using MikrotikWorker.Logging;
+using MikrotikWorker.Upgrade;
 using Serilog;
 
 Log.Logger = SerilogConfigurator.CreateBootstrapLogger();
@@ -12,6 +13,26 @@ try
         "MikrotikWorker starting. Version={ApplicationVersion}, BaseDirectory={BaseDirectory}",
         version,
         AppContext.BaseDirectory);
+
+    if (LivePackageCompatibilityAuditRunner.IsLiveAuditRequested(args))
+    {
+        Log.Information("Running live read-only package compatibility fleet audit");
+        int exitCode = await LivePackageCompatibilityAuditRunner
+            .RunLiveAuditAsync(args)
+            .ConfigureAwait(false);
+        Environment.ExitCode = exitCode;
+        return;
+    }
+
+    if (PackageCompatibilityAuditRunner.IsFixtureAuditRequested(args))
+    {
+        Log.Information("Running non-live package compatibility fixture audit");
+        int exitCode = await PackageCompatibilityAuditRunner
+            .RunFixtureAuditAsync(args)
+            .ConfigureAwait(false);
+        Environment.ExitCode = exitCode;
+        return;
+    }
 
     WebApplicationBuilder builder = MikrotikWorkerHost.CreateApplicationBuilder(args);
     MikrotikWorkerHost.ConfigureSerilog(builder);

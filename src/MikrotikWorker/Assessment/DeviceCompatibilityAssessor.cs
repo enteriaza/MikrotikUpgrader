@@ -1,6 +1,5 @@
-using Microsoft.Extensions.Options;
-using MikrotikWorker.Configuration;
 using MikrotikWorker.MikroTik;
+using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Assessment;
 
@@ -14,7 +13,7 @@ internal interface IDeviceCompatibilityAssessor
 
 internal sealed class DeviceCompatibilityAssessor(
     IFirmwarePackageCatalog packageCatalog,
-    IOptions<FirmwareAssessmentOptions> assessmentOptions) : IDeviceCompatibilityAssessor
+    IRouterOsV7TargetProvider v7TargetProvider) : IDeviceCompatibilityAssessor
 {
     public DeviceCompatibilityAssessment Assess(
         string routerIp,
@@ -24,7 +23,8 @@ internal sealed class DeviceCompatibilityAssessor(
         ArgumentException.ThrowIfNullOrWhiteSpace(routerIp);
         ArgumentNullException.ThrowIfNull(deviceInfo);
 
-        RouterOsVersion target = RouterOsVersion.Parse(assessmentOptions.Value.TargetRouterOsVersion);
+        RouterOsVersion stepping = RouterOsUpgradeVersions.V6Stepping;
+        RouterOsV7TargetSnapshot? v7Snapshot = v7TargetProvider.TryGetCurrent();
         List<AssessmentFinding> findings = [];
 
         RouterOsVersion? deviceVersion = null;
@@ -40,18 +40,23 @@ internal sealed class DeviceCompatibilityAssessor(
         else
         {
             deviceVersion = parsedDevice;
-            classification = Classify(parsedDevice, target);
+            classification = ClassifyAgainstStepping(parsedDevice, stepping);
         }
 
-        UpgradePathStatus upgradePath = AssessUpgradePath(classification, findings);
-        PackageMatchResult package = MatchPackage(deviceInfo.ArchitectureName, target, findings);
+        UpgradePathStatus upgradePath = AssessUpgradePath(classification, deviceVersion, v7Snapshot, findings);
+        RouterOsVersion packageTarget = ResolvePackageTarget(classification, deviceVersion, stepping, v7Snapshot);
+        PackageMatchResult package = MatchPackage(deviceInfo.ArchitectureName, packageTarget, findings);
         RouterboardFirmwareStatus routerboard = AssessRouterboard(deviceInfo, findings);
 
         DeviceAssessmentStatus overall = DetermineOverall(
             classification,
             upgradePath,
             package.Status,
+            v7Snapshot,
             findings);
+
+        string reportedTarget = v7Snapshot?.VersionText
+            ?? (packageTarget.IsV6 ? packageTarget.ToString() : RouterOsUpgradeVersions.V6SteppingVersionText);
 
         return new DeviceCompatibilityAssessment
         {
@@ -68,7 +73,7 @@ internal sealed class DeviceCompatibilityAssessor(
             RouterboardCurrentFirmware = deviceInfo.RouterboardCurrentFirmware,
             RouterboardUpgradeFirmware = deviceInfo.RouterboardUpgradeFirmware,
             RouterboardFactoryFirmware = deviceInfo.RouterboardFactoryFirmware,
-            TargetRouterOsVersion = target.ToString(),
+            TargetRouterOsVersion = reportedTarget,
             MatchingPackageFileName = package.FileName,
             PackageArchitecture = package.Architecture,
             PackageVersion = package.Version?.ToString(),
@@ -81,7 +86,9 @@ internal sealed class DeviceCompatibilityAssessor(
         };
     }
 
-    private static RouterOsVersionClassification Classify(RouterOsVersion device, RouterOsVersion target)
+    private static RouterOsVersionClassification ClassifyAgainstStepping(
+        RouterOsVersion device,
+        RouterOsVersion stepping)
     {
         if (device.IsV7OrLater)
         {
@@ -93,7 +100,7 @@ internal sealed class DeviceCompatibilityAssessor(
             return RouterOsVersionClassification.Unknown;
         }
 
-        int cmp = device.CompareTo(target);
+        int cmp = device.CompareTo(stepping);
         if (cmp < 0)
         {
             return RouterOsVersionClassification.OlderThanTargetV6;
@@ -109,6 +116,8 @@ internal sealed class DeviceCompatibilityAssessor(
 
     private static UpgradePathStatus AssessUpgradePath(
         RouterOsVersionClassification classification,
+        RouterOsVersion? deviceVersion,
+        RouterOsV7TargetSnapshot? v7Snapshot,
         List<AssessmentFinding> findings)
     {
         switch (classification)
@@ -116,30 +125,52 @@ internal sealed class DeviceCompatibilityAssessor(
             case RouterOsVersionClassification.OlderThanTargetV6:
                 findings.Add(new(
                     AssessmentFindingSeverity.Info,
-                    "path.eligible_v6_to_target",
-                    "Device reports an older RouterOS v6 release and is eligible for automated upgrade to the configured v6 target."));
+                    "path.eligible_v6_stepping_then_v7",
+                    $"Device reports RouterOS v6 older than fixed stepping {RouterOsUpgradeVersions.V6SteppingVersionText}; stepping upgrade then RouterOS 7 is required when eligible."));
                 return UpgradePathStatus.EligibleSubjectToManualPathVerification;
 
             case RouterOsVersionClassification.AtTargetV6:
-                findings.Add(new(
-                    AssessmentFindingSeverity.Info,
-                    "path.already_at_target",
-                    "Device already reports the configured RouterOS v6 target version."));
-                return UpgradePathStatus.AlreadyAtTarget;
-
             case RouterOsVersionClassification.NewerThanTargetV6:
                 findings.Add(new(
-                    AssessmentFindingSeverity.Warning,
-                    "path.newer_v6",
-                    "Device reports a RouterOS v6 version newer than the configured target. Automatic downgrade is not performed."));
-                return UpgradePathStatus.NewerV6RequiresReview;
+                    AssessmentFindingSeverity.Info,
+                    "path.skip_v6_stepping",
+                    $"Device already runs RouterOS {deviceVersion} (≥ {RouterOsUpgradeVersions.V6SteppingVersionText}); v6 stepping is skipped and the device proceeds directly to RouterOS 7 when eligible."));
+                return UpgradePathStatus.SkipV6SteppingProceedToV7;
 
             case RouterOsVersionClassification.RouterOsV7OrLater:
+                if (v7Snapshot is null)
+                {
+                    findings.Add(new(
+                        AssessmentFindingSeverity.Blocker,
+                        "path.v7_target_unavailable",
+                        "Device runs RouterOS 7 but no validated FirmwareFiles/mikrotik/version target is available."));
+                    return UpgradePathStatus.Blocked;
+                }
+
+                int cmp = deviceVersion!.Value.CompareTo(v7Snapshot.Version);
+                if (cmp < 0)
+                {
+                    findings.Add(new(
+                        AssessmentFindingSeverity.Info,
+                        "path.eligible_direct_v7",
+                        $"Device runs RouterOS {deviceVersion} which is older than target {v7Snapshot.VersionText}; direct RouterOS 7 upgrade is eligible."));
+                    return UpgradePathStatus.EligibleDirectV7Upgrade;
+                }
+
+                if (cmp == 0)
+                {
+                    findings.Add(new(
+                        AssessmentFindingSeverity.Info,
+                        "path.already_at_v7_target",
+                        $"Device already reports RouterOS 7 target {v7Snapshot.VersionText}."));
+                    return UpgradePathStatus.AlreadyAtV7Target;
+                }
+
                 findings.Add(new(
-                    AssessmentFindingSeverity.Blocker,
-                    "path.v7_out_of_scope",
-                    "RouterOS v7 (and later) is out of scope for the current upgrade policy. No v7 upgrade is proposed."));
-                return UpgradePathStatus.OutOfScopeV7;
+                    AssessmentFindingSeverity.Info,
+                    "path.newer_than_v7_target",
+                    $"Device runs RouterOS {deviceVersion} which is newer than target {v7Snapshot.VersionText}; automatic downgrade is not performed."));
+                return UpgradePathStatus.NewerThanV7Target;
 
             default:
                 findings.Add(new(
@@ -148,6 +179,26 @@ internal sealed class DeviceCompatibilityAssessor(
                     "Upgrade path cannot be assessed because the RouterOS version is unknown or unparseable."));
                 return UpgradePathStatus.UnknownRequiresManualReview;
         }
+    }
+
+    private static RouterOsVersion ResolvePackageTarget(
+        RouterOsVersionClassification classification,
+        RouterOsVersion? deviceVersion,
+        RouterOsVersion stepping,
+        RouterOsV7TargetSnapshot? v7Snapshot)
+    {
+        if (classification == RouterOsVersionClassification.OlderThanTargetV6)
+        {
+            return stepping;
+        }
+
+        if (v7Snapshot is not null)
+        {
+            return v7Snapshot.Version;
+        }
+
+        // No v7 target yet — keep assessing against stepping packages for diagnostics.
+        return stepping;
     }
 
     private PackageMatchResult MatchPackage(
@@ -175,7 +226,6 @@ internal sealed class DeviceCompatibilityAssessor(
             return new(PackageCompatibilityStatus.Missing, null, null, null);
         }
 
-        // Policy packages only: main routeros packages with same major as the configured target.
         List<FirmwarePackageInfo> policyPackages = all
             .Where(p => p.PackageName.Equals("routeros", StringComparison.Ordinal)
                 && p.Version.Major == target.Major)
@@ -186,7 +236,7 @@ internal sealed class DeviceCompatibilityAssessor(
             findings.Add(new(
                 AssessmentFindingSeverity.Blocker,
                 "package.catalog_empty",
-                $"No RouterOS v{target.Major} packages were found under FirmwareFiles (v7 packages are ignored under the current policy)."));
+                $"No RouterOS v{target.Major} packages were found under FirmwareFiles for target {target}."));
             return new(PackageCompatibilityStatus.Missing, null, null, null);
         }
 
@@ -290,7 +340,7 @@ internal sealed class DeviceCompatibilityAssessor(
                 findings.Add(new(
                     AssessmentFindingSeverity.Info,
                     "routerboard.upgrade_available",
-                    $"RouterBOARD firmware upgrade appears available (current {current}, upgrade {upgrade}). Do not run /system/routerboard/upgrade in this milestone. Recommended future sequence: complete RouterOS package upgrade planning first, then RouterBOARD firmware, then reboot — actual execution is out of scope."));
+                    $"RouterBOARD firmware upgrade appears available (current {current}, upgrade {upgrade}). Do not run /system/routerboard/upgrade."));
                 return RouterboardFirmwareStatus.UpgradeAvailable;
             }
 
@@ -312,30 +362,54 @@ internal sealed class DeviceCompatibilityAssessor(
         RouterOsVersionClassification classification,
         UpgradePathStatus upgradePath,
         PackageCompatibilityStatus packageStatus,
+        RouterOsV7TargetSnapshot? v7Snapshot,
         List<AssessmentFinding> findings)
     {
         bool hasBlocker = findings.Any(static f => f.Severity == AssessmentFindingSeverity.Blocker);
 
-        return classification switch
+        if (classification == RouterOsVersionClassification.Unknown)
         {
-            RouterOsVersionClassification.RouterOsV7OrLater => DeviceAssessmentStatus.Unsupported,
-            RouterOsVersionClassification.Unknown => DeviceAssessmentStatus.Blocked,
-            RouterOsVersionClassification.AtTargetV6 => DeviceAssessmentStatus.AlreadyAtTarget,
-            RouterOsVersionClassification.NewerThanTargetV6 => DeviceAssessmentStatus.ManualReviewRequired,
-            // Older v6 + matching main package is ready for the automated 6.49.23 upgrade stage.
-            RouterOsVersionClassification.OlderThanTargetV6 when packageStatus == PackageCompatibilityStatus.Compatible
-                && upgradePath == UpgradePathStatus.EligibleSubjectToManualPathVerification
-                && !hasBlocker
-                => DeviceAssessmentStatus.ReadyForUpgrade,
-            RouterOsVersionClassification.OlderThanTargetV6 when hasBlocker
-                || packageStatus is PackageCompatibilityStatus.Missing
-                    or PackageCompatibilityStatus.ArchitectureMismatch
-                    or PackageCompatibilityStatus.VersionMismatch
-                    or PackageCompatibilityStatus.Ambiguous
-                    or PackageCompatibilityStatus.Unidentifiable
-                => DeviceAssessmentStatus.Blocked,
-            _ => DeviceAssessmentStatus.ManualReviewRequired,
-        };
+            return DeviceAssessmentStatus.Blocked;
+        }
+
+        if (upgradePath is UpgradePathStatus.AlreadyAtV7Target or UpgradePathStatus.NewerThanV7Target)
+        {
+            return DeviceAssessmentStatus.AlreadyAtTarget;
+        }
+
+        if (upgradePath == UpgradePathStatus.Blocked || hasBlocker)
+        {
+            return DeviceAssessmentStatus.Blocked;
+        }
+
+        bool needsPackages = upgradePath is UpgradePathStatus.EligibleSubjectToManualPathVerification
+            or UpgradePathStatus.SkipV6SteppingProceedToV7
+            or UpgradePathStatus.EligibleDirectV7Upgrade;
+
+        if (needsPackages)
+        {
+            if (upgradePath is UpgradePathStatus.SkipV6SteppingProceedToV7 or UpgradePathStatus.EligibleDirectV7Upgrade
+                && v7Snapshot is null)
+            {
+                return DeviceAssessmentStatus.Blocked;
+            }
+
+            if (packageStatus == PackageCompatibilityStatus.Compatible)
+            {
+                return DeviceAssessmentStatus.ReadyForUpgrade;
+            }
+
+            if (packageStatus is PackageCompatibilityStatus.Missing
+                or PackageCompatibilityStatus.ArchitectureMismatch
+                or PackageCompatibilityStatus.VersionMismatch
+                or PackageCompatibilityStatus.Ambiguous
+                or PackageCompatibilityStatus.Unidentifiable)
+            {
+                return DeviceAssessmentStatus.Blocked;
+            }
+        }
+
+        return DeviceAssessmentStatus.Blocked;
     }
 
     private static string? NullIfWhiteSpace(string? value) =>

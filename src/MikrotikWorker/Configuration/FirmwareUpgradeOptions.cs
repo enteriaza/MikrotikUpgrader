@@ -1,7 +1,9 @@
 namespace MikrotikWorker.Configuration;
 
 /// <summary>
-/// Automated RouterOS v6 → target upgrade settings.
+/// Automated RouterOS upgrade settings (timeouts, firmware URL, backups).
+/// Stage targets are not configured here: v6 stepping is a code constant and the v7 target
+/// comes from <c>FirmwareFiles/mikrotik/version</c>.
 /// </summary>
 public sealed class FirmwareUpgradeOptions
 {
@@ -11,11 +13,6 @@ public sealed class FirmwareUpgradeOptions
     /// When false, jobs perform assessment only and never fetch/install/reboot.
     /// </summary>
     public bool Enabled { get; set; }
-
-    /// <summary>
-    /// Target RouterOS v6 release. Default <c>6.49.23</c>.
-    /// </summary>
-    public string TargetRouterOsVersion { get; set; } = "6.49.23";
 
     /// <summary>
     /// HTTP base URL reachable from routers, including the <c>/firmware_files</c> prefix.

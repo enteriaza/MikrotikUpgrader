@@ -96,28 +96,28 @@ public sealed class RouterOsV6UpgradeExecutorTests
     }
 
     [Fact]
-    public async Task V7Device_IsNeverModified()
+    public async Task V7Device_AtTarget_IsNeverModified()
     {
-        TrackingOps ops = new();
+        TrackingOps ops = new() { Identity = "AP01.POP001.001.access" };
         RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, new SucceedingBackup(), enabled: true);
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
-            FakeMikrotikConnections.CreateFullyPopulated(),
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"),
             CreateJob(),
             new MikrotikDeviceInfo
             {
-                Identity = "CORE-01",
+                Identity = "AP01.POP001.001.access",
                 Version = "7.23.8",
                 ArchitectureName = "mipsbe",
                 BoardName = "hEX PoE",
             },
-            CreateAssessment(DeviceAssessmentStatus.Unsupported, RouterOsVersionClassification.RouterOsV7OrLater),
+            CreateAssessment(DeviceAssessmentStatus.AlreadyAtTarget, RouterOsVersionClassification.RouterOsV7OrLater),
             "admin",
             "secret",
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.PolicyBlocked, result.Outcome);
+        Assert.Equal(UpgradeOutcome.SkippedAlreadyAtTarget, result.Outcome);
         Assert.False(ops.FetchCalled);
         Assert.False(ops.RebootCalled);
     }
@@ -149,8 +149,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
         {
             Installed =
             [
-                new("routeros-mipsbe", "6.49.19", false),
-                new("tr069-client", "6.49.19", false),
+                new("routeros-mipsbe", "6.49.23", false),
+                new("tr069-client", "6.49.23", false),
             ],
         };
         string root = Directory.CreateTempSubdirectory("upg-missing-opt-").FullName;
@@ -283,7 +283,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.True(ops.RebootCalled);
         Assert.True(result.RebootInitiated);
     }
@@ -324,7 +324,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.Equal("6.49.23", result.PostUpgradeVersion);
         Assert.True(factory.SuccessCount >= 1);
     }
@@ -366,7 +366,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
     }
 
     [Fact]
@@ -445,7 +445,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
     }
 
     [Fact]
@@ -483,7 +483,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(UpgradeOutcome.UpgradeInterrupted, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.True(result.RebootInitiated);
     }
 
@@ -522,7 +522,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
     }
 
     [Fact]
@@ -550,14 +550,14 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.Equal("6.49.23", result.PostUpgradeVersion);
     }
 
     [Fact]
     public async Task PostUpgradeVersionMismatch_IsReported()
     {
-        TrackingOps ops = new() { FetchReturnsMatchingSize = true, PostUpgradeVersion = "6.49.19" };
+        TrackingOps ops = new() { FetchReturnsMatchingSize = true, PostUpgradeVersion = "6.48.1" };
         FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
         ScriptedMikrotikConnectionFactory reconnect = new(_ => FakeMikrotikConnections.CreateFullyPopulated());
         RouterOsV6UpgradeExecutor executor = CreateExecutor(
@@ -638,7 +638,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.True(result.RebootInitiated);
         Assert.True(time.GetUtcNow() >= new DateTimeOffset(2026, 11, 10, 12, 5, 0, TimeSpan.Zero));
     }
@@ -668,7 +668,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.True(ops.PostRebootPackageListCount >= 1);
         Assert.True(ops.PostRebootDeviceInfoCount >= 1);
     }
@@ -698,6 +698,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
             effectiveVerifyTimeout = effectiveRebootTimeout;
         }
 
+        // These stage-oriented unit tests exercise the shared stage machinery with an ACE identity
+        // so the RouterOS 7 transition is intentionally skipped after a successful v6 stepping path.
         return new RouterOsV6UpgradeExecutor(
             ops,
             connectionFactory ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect in this test")),
@@ -705,10 +707,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 new StaticFirmwarePackageCatalog(root),
                 Options.Create(new FirmwareFilesOptions { Path = root })),
             backup,
+            new FixedRouterOsV7TargetProvider("7.23.8"),
             Options.Create(new FirmwareUpgradeOptions
             {
                 Enabled = enabled,
-                TargetRouterOsVersion = "6.49.23",
                 AdvertisedBaseUrl = advertisedBaseUrl,
                 FetchTimeout = TimeSpan.FromSeconds(5),
                 ReconnectInterval = reconnectInterval ?? TimeSpan.FromMilliseconds(10),
@@ -813,8 +815,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
     private static MikrotikDeviceInfo CreateDevice() =>
         new()
         {
-            Identity = "CORE-01",
-            Version = "6.49.19",
+            // ACE identity forces v7 skip so stage-unit tests remain focused on a single stage.
+            Identity = "ACE01.POP001.001.core",
+            Version = "6.49.10",
             ArchitectureName = "mipsbe",
             BoardName = "hEX PoE",
         };
@@ -827,7 +830,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
             RouterIp = "10.0.0.50",
             OverallStatus = status,
             RouterOsVersionClassification = classification,
-            TargetRouterOsVersion = "6.49.23",
+            TargetRouterOsVersion = "7.23.8",
             PackageCompatibility = PackageCompatibilityStatus.Compatible,
             UpgradePath = UpgradePathStatus.EligibleSubjectToManualPathVerification,
             RouterboardAssessment = RouterboardFirmwareStatus.Unavailable,
@@ -847,6 +850,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         public TimeSpan FetchDelay { get; init; }
 
         public string PostUpgradeVersion { get; init; } = "6.49.23";
+
+        /// <summary>
+        /// Defaults to ACE so stage-unit tests skip the RouterOS 7 transition after v6 stepping.
+        /// </summary>
+        public string Identity { get; init; } = "ACE01.POP001.001.core";
 
         public bool HangPostRebootReadUntilCancelled { get; init; }
 
@@ -876,7 +884,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
             return new MikrotikDeviceInfo
             {
-                Identity = "CORE-01",
+                Identity = Identity,
                 Version = PostUpgradeVersion,
                 ArchitectureName = "mipsbe",
                 BoardName = "hEX PoE",
@@ -898,7 +906,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
                     "routeros-mipsbe",
                     PostUpgradeVersion.StartsWith("6.49.23", StringComparison.Ordinal)
                         ? "6.49.23"
-                        : "6.49.19",
+                        : "6.49.23",
                     false),
             ]);
         }

@@ -25,5 +25,13 @@ internal static class MikrotikConnectionOptionsValidator
                 connection.Port,
                 "MikroTik connection port must be between 1 and 65535 when specified.");
         }
+
+        if (connection.ConnectTimeout is { } timeout && timeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(connection),
+                timeout,
+                "MikroTik connection timeout must be greater than zero when specified.");
+        }
     }
 }

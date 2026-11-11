@@ -26,6 +26,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
     IMikrotikConnectionFactory connectionFactory,
     IUpgradePackageResolver packageResolver,
     IDeviceBackupService backupService,
+    IRouterOsV7TargetProvider v7TargetProvider,
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     IOptions<MikroTikOptions> mikroTikOptions,
     TimeProvider timeProvider,
@@ -48,7 +49,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
         ArgumentNullException.ThrowIfNull(isWithinScheduleWindow);
 
         FirmwareUpgradeOptions options = upgradeOptions.Value;
-        RouterOsVersion target = RouterOsVersion.Parse(options.TargetRouterOsVersion);
+        RouterOsVersion stepping = RouterOsUpgradeVersions.V6Stepping;
 
         if (!options.Enabled)
         {
@@ -56,27 +57,12 @@ internal sealed class RouterOsV6UpgradeExecutor(
             return new UpgradeExecutionResult { Outcome = UpgradeOutcome.SkippedUpgradeDisabled };
         }
 
-        if (assessment.OverallStatus == DeviceAssessmentStatus.AlreadyAtTarget)
+        if (!RouterOsVersion.TryParse(deviceInfo.Version, out RouterOsVersion currentVersion))
         {
-            return new UpgradeExecutionResult { Outcome = UpgradeOutcome.SkippedAlreadyAtTarget };
+            return PolicyBlock($"RouterOS version '{deviceInfo.Version}' could not be parsed.");
         }
 
-        if (assessment.OverallStatus == DeviceAssessmentStatus.Unsupported
-            || assessment.RouterOsVersionClassification == RouterOsVersionClassification.RouterOsV7OrLater)
-        {
-            return PolicyBlock("RouterOS v7 devices are outside the v6 upgrade milestone.");
-        }
-
-        if (assessment.RouterOsVersionClassification == RouterOsVersionClassification.NewerThanTargetV6)
-        {
-            return new UpgradeExecutionResult
-            {
-                Outcome = UpgradeOutcome.ManualReviewRequired,
-                Detail = "Device RouterOS v6 version is newer than the configured target; automatic downgrade is not performed.",
-            };
-        }
-
-        if (assessment.OverallStatus != DeviceAssessmentStatus.ReadyForUpgrade)
+        if (assessment.OverallStatus == DeviceAssessmentStatus.Blocked)
         {
             return PolicyBlock($"Device assessment status '{assessment.OverallStatus}' is not eligible for automated upgrade.");
         }
@@ -87,20 +73,334 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
 
         logger.LogInformation(
-            "Upgrade policy decision: proceed (RouterOS {RouterOsVersion} → {TargetRouterOsVersion})",
+            "Initial RouterOS version: {RouterOsVersion}",
+            deviceInfo.Version);
+
+        // Immutable for this job — later file changes must not alter an in-flight upgrade.
+        RouterOsV7TargetSnapshot? v7Snapshot = v7TargetProvider.CaptureSnapshot();
+        if (v7Snapshot is not null)
+        {
+            logger.LogInformation(
+                "Validated RouterOS 7 target snapshot for job: {Target} (captured {CapturedAt:o})",
+                v7Snapshot.VersionText,
+                v7Snapshot.CapturedAtUtc);
+        }
+        else
+        {
+            logger.LogWarning(
+                "No validated RouterOS 7 target is available from {Path}",
+                v7TargetProvider.VersionFilePath);
+        }
+
+        bool needsV6Stepping = currentVersion.IsV6 && currentVersion < stepping;
+        logger.LogInformation(
+            needsV6Stepping
+                ? "v6 stepping required: {Current} < {Stepping}"
+                : "v6 stepping skipped: {Current} is not an older RouterOS 6 release than {Stepping}",
+            currentVersion,
+            stepping);
+
+        ITikConnection? live = null;
+        bool disposeLive = false;
+        bool rebootInitiated = false;
+        try
+        {
+            MikrotikDeviceInfo workingDevice = deviceInfo;
+            IReadOnlyList<InstalledPackageInfo>? workingPackages = null;
+            live = connection;
+
+            if (needsV6Stepping)
+            {
+                logger.LogInformation(
+                    "v6 stepping upgrade starting (RouterOS {RouterOsVersion} → {Stepping})",
+                    deviceInfo.Version,
+                    stepping);
+
+                StageExecutionResult stage1 = await ExecuteStageAsync(
+                        connection,
+                        job,
+                        deviceInfo,
+                        stepping,
+                        username,
+                        password,
+                        isWithinScheduleWindow,
+                        stageLabel: "v6-stepping",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (!IsStageSuccess(stage1.Execution.Outcome))
+                {
+                    return stage1.Execution;
+                }
+
+                rebootInitiated = stage1.Execution.RebootInitiated;
+                workingDevice = stage1.PostDeviceInfo
+                    ?? throw new InvalidOperationException("v6 stepping verification did not produce device info.");
+                workingPackages = stage1.PostPackages
+                    ?? throw new InvalidOperationException("v6 stepping verification did not produce package inventory.");
+                live = stage1.LiveConnection
+                    ?? throw new InvalidOperationException("v6 stepping verification did not leave a live connection.");
+                disposeLive = true;
+
+                logger.LogInformation(
+                    "v6 stepping verification succeeded (observed {ObservedVersion})",
+                    stage1.Execution.PostUpgradeVersion);
+            }
+            else if (currentVersion.IsV6)
+            {
+                logger.LogInformation(
+                    "Skipping v6 stepping because device already runs RouterOS {RouterOsVersion} (≥ {Stepping})",
+                    currentVersion,
+                    stepping);
+                workingPackages = await routerOperations
+                    .ListInstalledPackagesAsync(live, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else if (currentVersion.IsV7OrLater)
+            {
+                workingPackages = await routerOperations
+                    .ListInstalledPackagesAsync(live, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                return PolicyBlock($"Unsupported RouterOS major version '{currentVersion}'.");
+            }
+
+            DeviceIdentityClassification classification = await ClassifyIdentityAsync(
+                    live,
+                    job,
+                    workingDevice,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            LogClassification(classification);
+
+            if (!classification.ShouldUpgradeToV7)
+            {
+                logger.LogInformation(
+                    "RouterOS 7 upgrade skipped intentionally. DeviceType={DeviceType}, Reason={Reason}",
+                    classification.DeviceType,
+                    classification.PolicyReason);
+                return new UpgradeExecutionResult
+                {
+                    Outcome = UpgradeOutcome.UpgradeSucceededV6Only,
+                    Detail = classification.PolicyReason,
+                    PostUpgradeVersion = workingDevice.Version,
+                    RebootInitiated = rebootInitiated,
+                };
+            }
+
+            if (v7Snapshot is null)
+            {
+                return new UpgradeExecutionResult
+                {
+                    Outcome = UpgradeOutcome.TargetUnavailable,
+                    Detail = $"RouterOS 7 target file is unavailable or invalid ({v7TargetProvider.VersionFilePath}).",
+                    PostUpgradeVersion = workingDevice.Version,
+                    RebootInitiated = rebootInitiated,
+                };
+            }
+
+            if (!RouterOsVersion.TryParse(workingDevice.Version, out RouterOsVersion workingVersion))
+            {
+                return PolicyBlock($"Post-step RouterOS version '{workingDevice.Version}' could not be parsed.");
+            }
+
+            int cmpToV7 = workingVersion.CompareTo(v7Snapshot.Version);
+            if (cmpToV7 == 0)
+            {
+                logger.LogInformation(
+                    "Device already at RouterOS 7 target {Target}; no upgrade required",
+                    v7Snapshot.VersionText);
+                return new UpgradeExecutionResult
+                {
+                    Outcome = UpgradeOutcome.SkippedAlreadyAtTarget,
+                    PostUpgradeVersion = workingDevice.Version,
+                    RebootInitiated = rebootInitiated,
+                };
+            }
+
+            if (cmpToV7 > 0)
+            {
+                logger.LogInformation(
+                    "Device RouterOS {Current} is newer than target {Target}; downgrade is not performed",
+                    workingVersion,
+                    v7Snapshot.VersionText);
+                return new UpgradeExecutionResult
+                {
+                    Outcome = UpgradeOutcome.SkippedNewerThanTarget,
+                    Detail = $"Current RouterOS {workingVersion} is newer than target {v7Snapshot.VersionText}; automatic downgrade is not performed.",
+                    PostUpgradeVersion = workingDevice.Version,
+                    RebootInitiated = rebootInitiated,
+                };
+            }
+
+            // Never install v6 packages on a RouterOS 7 device; never mix majors in one stage.
+            if (workingVersion.IsV7OrLater && v7Snapshot.Version.IsV7OrLater)
+            {
+                logger.LogInformation(
+                    "Direct RouterOS 7 upgrade starting (RouterOS {Current} → {Target}). DeviceType={DeviceType}",
+                    workingVersion,
+                    v7Snapshot.VersionText,
+                    classification.DeviceType);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "RouterOS 7 transition starting (RouterOS {Current} → {Target}). DeviceType={DeviceType}",
+                    workingVersion,
+                    v7Snapshot.VersionText,
+                    classification.DeviceType);
+            }
+
+            StageExecutionResult stage2 = await ExecuteStageAsync(
+                    live,
+                    job,
+                    workingDevice,
+                    v7Snapshot.Version,
+                    username,
+                    password,
+                    isWithinScheduleWindow,
+                    stageLabel: "routeros7",
+                    cancellationToken,
+                    installedOverride: workingPackages)
+                .ConfigureAwait(false);
+
+            if (disposeLive)
+            {
+                try
+                {
+                    live.Dispose();
+                }
+                catch
+                {
+                }
+
+                disposeLive = false;
+                live = null;
+            }
+
+            if (stage2.LiveConnection is not null)
+            {
+                try
+                {
+                    stage2.LiveConnection.Dispose();
+                }
+                catch
+                {
+                }
+            }
+
+            if (stage2.Execution.Outcome == UpgradeOutcome.UpgradeSucceeded)
+            {
+                logger.LogInformation(
+                    "Final RouterOS 7 verification succeeded (target {Target}, observed {ObservedVersion})",
+                    v7Snapshot.VersionText,
+                    stage2.Execution.PostUpgradeVersion);
+            }
+
+            return new UpgradeExecutionResult
+            {
+                Outcome = stage2.Execution.Outcome,
+                Detail = stage2.Execution.Detail,
+                PostUpgradeVersion = stage2.Execution.PostUpgradeVersion,
+                RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
+            };
+        }
+        finally
+        {
+            if (disposeLive && live is not null && !ReferenceEquals(live, connection))
+            {
+                try
+                {
+                    live.Dispose();
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    private async Task<DeviceIdentityClassification> ClassifyIdentityAsync(
+        ITikConnection connection,
+        MikrotikScheduledJob job,
+        MikrotikDeviceInfo fallbackDevice,
+        CancellationToken cancellationToken)
+    {
+        string? identity = fallbackDevice.Identity;
+        try
+        {
+            MikrotikDeviceInfo latest = await routerOperations
+                .ReadDeviceInfoAsync(connection, job.RouterIp.ToString(), cancellationToken)
+                .ConfigureAwait(false);
+            identity = latest.Identity;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Keep the last verified identity when a fresh read fails. Only a missing/empty
+            // identity becomes Unknown — never abort or force ManualReviewRequired.
+            logger.LogWarning(
+                ex,
+                "Identity re-read failed after first-stage verification; using previously observed identity if available");
+        }
+
+        if (string.IsNullOrWhiteSpace(identity))
+        {
+            logger.LogInformation("Device identity unavailable or empty; classifying as Unknown");
+            identity = null;
+        }
+
+        return DeviceIdentityClassifier.Classify(identity);
+    }
+
+    private void LogClassification(DeviceIdentityClassification classification)
+    {
+        logger.LogInformation(
+            "Device identity classification: Identity={Identity}, DeviceType={DeviceType}, MatchedStandardFormat={MatchedStandardFormat}, ShouldUpgradeToV7={ShouldUpgradeToV7}",
+            string.IsNullOrWhiteSpace(classification.Identity) ? "(unavailable)" : classification.Identity,
+            classification.DeviceType,
+            classification.MatchedStandardFormat,
+            classification.ShouldUpgradeToV7);
+        logger.LogInformation("Second-stage eligibility: {Reason}", classification.PolicyReason);
+    }
+
+    private async Task<StageExecutionResult> ExecuteStageAsync(
+        ITikConnection connection,
+        MikrotikScheduledJob job,
+        MikrotikDeviceInfo deviceInfo,
+        RouterOsVersion target,
+        string username,
+        string password,
+        Func<bool> isWithinScheduleWindow,
+        string stageLabel,
+        CancellationToken cancellationToken,
+        IReadOnlyList<InstalledPackageInfo>? installedOverride = null)
+    {
+        FirmwareUpgradeOptions options = upgradeOptions.Value;
+
+        logger.LogInformation(
+            "Upgrade policy decision: proceed ({Stage} RouterOS {RouterOsVersion} → {TargetRouterOsVersion})",
+            stageLabel,
             deviceInfo.Version,
             target);
         logger.LogInformation(
-            "RouterBOARD firmware before upgrade: model={RouterboardModel}, type={FirmwareType}, current={CurrentFirmware}, upgrade={UpgradeFirmware}, factory={FactoryFirmware}",
+            "RouterBOARD firmware before {Stage}: model={RouterboardModel}, type={FirmwareType}, current={CurrentFirmware}, upgrade={UpgradeFirmware}, factory={FactoryFirmware}",
+            stageLabel,
             deviceInfo.RouterboardModel,
             deviceInfo.RouterboardFirmwareType,
             deviceInfo.RouterboardCurrentFirmware,
             deviceInfo.RouterboardUpgradeFirmware,
             deviceInfo.RouterboardFactoryFirmware);
 
-        IReadOnlyList<InstalledPackageInfo> installed = await routerOperations
-            .ListInstalledPackagesAsync(connection, cancellationToken)
-            .ConfigureAwait(false);
+        IReadOnlyList<InstalledPackageInfo> installed = installedOverride
+            ?? await routerOperations
+                .ListInstalledPackagesAsync(connection, cancellationToken)
+                .ConfigureAwait(false);
 
         PackageInventorySummary inventory = PackageInventoryReporting.Summarize(installed);
         logger.LogInformation(
@@ -122,37 +422,44 @@ internal sealed class RouterOsV6UpgradeExecutor(
             target);
         if (!resolution.Succeeded)
         {
-            logger.LogError("Package resolution failed: {Reason}", resolution.FailureReason);
-            return new UpgradeExecutionResult
+            logger.LogError(
+                "{Stage} package resolution failed: {Reason}",
+                stageLabel,
+                resolution.FailureReason);
+            return StageExecutionResult.Failed(new UpgradeExecutionResult
             {
                 Outcome = UpgradeOutcome.PackageResolutionFailed,
                 Detail = resolution.FailureReason,
-            };
+            });
         }
 
         logger.LogInformation(
             "Required packages resolved: {SelectedPackages}",
             string.Join(", ", resolution.Packages.Select(p => $"{p.CatalogPackage.FileName}:{p.CatalogPackage.SizeBytes}")));
 
-        // Mandatory backup gate — no fetch/reboot before this succeeds.
+        logger.LogInformation("{Stage} backup prerequisite starting", stageLabel);
         DeviceBackupResult backup = await backupService
             .CreatePreUpgradeBackupAsync(connection, job, deviceInfo, username, password, cancellationToken)
             .ConfigureAwait(false);
         if (!backup.Succeeded)
         {
-            logger.LogError("Backup prerequisite failed; firmware fetch will not start: {Reason}", backup.FailureReason);
-            return new UpgradeExecutionResult
+            logger.LogError(
+                "{Stage} backup prerequisite failed; firmware fetch will not start: {Reason}",
+                stageLabel,
+                backup.FailureReason);
+            return StageExecutionResult.Failed(new UpgradeExecutionResult
             {
                 Outcome = UpgradeOutcome.BackupFailed,
                 Detail = backup.FailureReason,
-            };
+            });
         }
 
-        logger.LogInformation("Backup prerequisite passed");
+        logger.LogInformation("{Stage} backup prerequisite passed", stageLabel);
 
         if (!isWithinScheduleWindow())
         {
-            return PolicyBlock("Job left its scheduled window after backup; firmware fetch aborted.");
+            return StageExecutionResult.Failed(PolicyBlock(
+                $"Job left its scheduled window after {stageLabel} backup; firmware fetch aborted."));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -165,7 +472,8 @@ internal sealed class RouterOsV6UpgradeExecutor(
             cancellationToken.ThrowIfCancellationRequested();
             if (!isWithinScheduleWindow())
             {
-                return PolicyBlock("Job left its scheduled window during package download.");
+                return StageExecutionResult.Failed(PolicyBlock(
+                    $"Job left its scheduled window during {stageLabel} package download."));
             }
 
             string url = $"{baseUrl}/{package.RelativeUrlPath}";
@@ -180,23 +488,22 @@ internal sealed class RouterOsV6UpgradeExecutor(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                return new UpgradeExecutionResult
+                return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeInterrupted,
-                    Detail = "Cancelled during package download.",
-                };
+                    Detail = $"Cancelled during {stageLabel} package download.",
+                });
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Fetch failed for {PackageFile}", dst);
-                return new UpgradeExecutionResult
+                return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeFailed,
                     Detail = $"Fetch failed for '{dst}': {ex.Message}",
-                };
+                });
             }
 
-            // RouterOS can report an intermediate size briefly after /tool/fetch finishes.
             RouterFileInfo? fetched = await WaitForFetchedPackageSizeAsync(
                     connection,
                     dst,
@@ -210,7 +517,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 RouterFileInfo? current = await routerOperations
                     .FindFileAsync(connection, dst, cancellationToken)
                     .ConfigureAwait(false);
-                return new UpgradeExecutionResult
+                return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeFailed,
                     Detail = current is null
@@ -218,7 +525,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         : current.SizeBytes <= 0
                             ? $"Downloaded file '{dst}' is empty."
                             : $"Downloaded file '{dst}' size mismatch (router={current.SizeBytes}, expected={package.CatalogPackage.SizeBytes}).",
-                };
+                });
             }
 
             logger.LogInformation(
@@ -231,10 +538,11 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
         if (!isWithinScheduleWindow())
         {
-            return PolicyBlock("Job left its scheduled window before reboot; installation aborted.");
+            return StageExecutionResult.Failed(PolicyBlock(
+                $"Job left its scheduled window before {stageLabel} reboot; installation aborted."));
         }
 
-        logger.LogInformation("Initiating reboot for package installation");
+        logger.LogInformation("Initiating {Stage} reboot for package installation", stageLabel);
         await routerOperations.RebootAsync(connection, cancellationToken).ConfigureAwait(false);
         bool rebootInitiated = true;
         DateTimeOffset rebootInitiatedAt = timeProvider.GetUtcNow();
@@ -285,7 +593,6 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         }
                         catch (ObjectDisposedException)
                         {
-                            // Attempt already finished and disposed the CTS.
                         }
                     },
                     attemptCts,
@@ -307,16 +614,15 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    return new UpgradeExecutionResult
+                    return StageExecutionResult.Failed(new UpgradeExecutionResult
                     {
                         Outcome = UpgradeOutcome.UpgradeInterrupted,
-                        Detail = "Cancelled while waiting for reboot reconnect.",
+                        Detail = $"Cancelled while waiting for {stageLabel} reboot reconnect.",
                         RebootInitiated = rebootInitiated,
-                    };
+                    });
                 }
                 catch (OperationCanceledException) when (attemptCts.IsCancellationRequested)
                 {
-                    // Absolute deadline consumed by the connection attempt itself.
                     break;
                 }
                 catch
@@ -337,12 +643,12 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
-                        return new UpgradeExecutionResult
+                        return StageExecutionResult.Failed(new UpgradeExecutionResult
                         {
                             Outcome = UpgradeOutcome.UpgradeInterrupted,
-                            Detail = "Cancelled while waiting for reboot reconnect.",
+                            Detail = $"Cancelled while waiting for {stageLabel} reboot reconnect.",
                             RebootInitiated = rebootInitiated,
-                        };
+                        });
                     }
                 }
             }
@@ -354,19 +660,17 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     "Reconnection timed out after {Elapsed} (limit {Timeout})",
                     FormatDuration(waited),
                     options.RebootTimeout);
-                return new UpgradeExecutionResult
+                return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeTimedOut,
                     Detail = $"Router did not become reachable within {options.RebootTimeout}.",
                     RebootInitiated = rebootInitiated,
-                };
+                });
             }
 
-            using ITikConnection live = reconnected;
+            ITikConnection live = reconnected;
             reconnected = null;
 
-            // Absolute post-reboot ceiling remains rebootDeadline. PostUpgradeVerifyTimeout may only
-            // shorten the poll window; it must never extend past the five-minute reboot window.
             DateTimeOffset verifyPollDeadline = timeProvider.GetUtcNow() + options.PostUpgradeVerifyTimeout;
             if (verifyPollDeadline > rebootDeadline)
             {
@@ -382,7 +686,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 TimeSpan remaining = rebootDeadline - timeProvider.GetUtcNow();
                 if (remaining <= TimeSpan.Zero)
                 {
-                    return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                    live.Dispose();
+                    return StageExecutionResult.Failed(
+                        TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout));
                 }
 
                 using CancellationTokenSource verifyCts = new();
@@ -415,16 +721,19 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    return new UpgradeExecutionResult
+                    live.Dispose();
+                    return StageExecutionResult.Failed(new UpgradeExecutionResult
                     {
                         Outcome = UpgradeOutcome.UpgradeInterrupted,
-                        Detail = "Cancelled during post-reboot verification.",
+                        Detail = $"Cancelled during {stageLabel} post-reboot verification.",
                         RebootInitiated = rebootInitiated,
-                    };
+                    });
                 }
                 catch (OperationCanceledException) when (verifyCts.IsCancellationRequested)
                 {
-                    return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                    live.Dispose();
+                    return StageExecutionResult.Failed(
+                        TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout));
                 }
 
                 if (RouterOsVersion.TryParse(postInfo.Version, out RouterOsVersion postVersion)
@@ -442,7 +751,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 remaining = rebootDeadline - timeProvider.GetUtcNow();
                 if (remaining <= TimeSpan.Zero)
                 {
-                    return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                    live.Dispose();
+                    return StageExecutionResult.Failed(
+                        TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout));
                 }
 
                 TimeSpan delay = options.ReconnectInterval < remaining
@@ -454,29 +765,32 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    return new UpgradeExecutionResult
+                    live.Dispose();
+                    return StageExecutionResult.Failed(new UpgradeExecutionResult
                     {
                         Outcome = UpgradeOutcome.UpgradeInterrupted,
-                        Detail = "Cancelled during post-reboot verification.",
+                        Detail = $"Cancelled during {stageLabel} post-reboot verification.",
                         RebootInitiated = rebootInitiated,
-                    };
+                    });
                 }
             }
 
             if (postInfo is null || postPackages is null)
             {
-                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                live.Dispose();
+                return StageExecutionResult.Failed(
+                    TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout));
             }
 
             bool deadlineReached = timeProvider.GetUtcNow() >= rebootDeadline;
             bool versionMatches = RouterOsVersion.TryParse(postInfo.Version, out RouterOsVersion verified)
                 && verified == target;
 
-            // If the absolute window elapsed before a matching version was observed, that is a timeout —
-            // not a version-mismatch classification.
             if (deadlineReached && !versionMatches)
             {
-                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                live.Dispose();
+                return StageExecutionResult.Failed(
+                    TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout));
             }
 
             logger.LogInformation("Post-upgrade RouterOS version: {RouterOsVersion}", postInfo.Version);
@@ -501,18 +815,21 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
             if (timeProvider.GetUtcNow() > rebootDeadline)
             {
-                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                live.Dispose();
+                return StageExecutionResult.Failed(
+                    TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout));
             }
 
             if (!versionMatches)
             {
-                return new UpgradeExecutionResult
+                live.Dispose();
+                return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeVersionMismatch,
                     Detail = $"Expected RouterOS {target}, observed '{postInfo.Version}'.",
                     PostUpgradeVersion = postInfo.Version,
                     RebootInitiated = rebootInitiated,
-                };
+                });
             }
 
             string? expectedArch = FirmwarePackageFileNameParser.NormalizeArchitecture(
@@ -522,13 +839,14 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 : FirmwarePackageFileNameParser.NormalizeArchitecture(postInfo.ArchitectureName);
             if (!string.Equals(expectedArch, actualArch, StringComparison.Ordinal))
             {
-                return new UpgradeExecutionResult
+                live.Dispose();
+                return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.UpgradeFailed,
                     Detail = $"Architecture changed after upgrade (before={expectedArch}, after={actualArch}).",
                     PostUpgradeVersion = postInfo.Version,
                     RebootInitiated = rebootInitiated,
-                };
+                });
             }
 
             foreach (ResolvedUpgradePackage required in resolution.Packages)
@@ -539,37 +857,47 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     || !RouterOsVersion.TryParse(found.Version, out RouterOsVersion pkgVersion)
                     || pkgVersion != target)
                 {
-                    return new UpgradeExecutionResult
+                    live.Dispose();
+                    return StageExecutionResult.Failed(new UpgradeExecutionResult
                     {
                         Outcome = UpgradeOutcome.UpgradePackageMismatch,
                         Detail =
                             $"Installed package '{required.InstalledPackageName}' was missing or not at {target} after upgrade.",
                         PostUpgradeVersion = postInfo.Version,
                         RebootInitiated = rebootInitiated,
-                    };
+                    });
                 }
             }
 
             if (timeProvider.GetUtcNow() > rebootDeadline)
             {
-                return TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout);
+                live.Dispose();
+                return StageExecutionResult.Failed(
+                    TimedOutAfterReboot(rebootInitiated, rebootInitiatedAt, options.RebootTimeout));
             }
 
-            return new UpgradeExecutionResult
+            return new StageExecutionResult
             {
-                Outcome = UpgradeOutcome.UpgradeSucceeded,
-                PostUpgradeVersion = postInfo.Version,
-                RebootInitiated = rebootInitiated,
+                Execution = new UpgradeExecutionResult
+                {
+                    Outcome = UpgradeOutcome.UpgradeSucceeded,
+                    PostUpgradeVersion = postInfo.Version,
+                    RebootInitiated = rebootInitiated,
+                },
+                LiveConnection = live,
+                PostDeviceInfo = postInfo,
+                PostPackages = postPackages,
             };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return new UpgradeExecutionResult
+            reconnected?.Dispose();
+            return StageExecutionResult.Failed(new UpgradeExecutionResult
             {
                 Outcome = UpgradeOutcome.UpgradeInterrupted,
-                Detail = "Cancelled after reboot was initiated.",
+                Detail = $"Cancelled after {stageLabel} reboot was initiated.",
                 RebootInitiated = rebootInitiated,
-            };
+            });
         }
         finally
         {
@@ -631,6 +959,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
         };
     }
 
+    private static bool IsStageSuccess(UpgradeOutcome outcome) =>
+        outcome is UpgradeOutcome.UpgradeSucceeded or UpgradeOutcome.SkippedAlreadyAtTarget;
+
     private static string FormatDuration(TimeSpan value)
     {
         if (value < TimeSpan.Zero)
@@ -641,5 +972,19 @@ internal sealed class RouterOsV6UpgradeExecutor(
         return value.TotalMinutes >= 1
             ? $"{(int)value.TotalMinutes}m {value.Seconds:D2}s"
             : $"{value.TotalSeconds:0.###}s";
+    }
+
+    private sealed class StageExecutionResult
+    {
+        public required UpgradeExecutionResult Execution { get; init; }
+
+        public ITikConnection? LiveConnection { get; init; }
+
+        public MikrotikDeviceInfo? PostDeviceInfo { get; init; }
+
+        public IReadOnlyList<InstalledPackageInfo>? PostPackages { get; init; }
+
+        public static StageExecutionResult Failed(UpgradeExecutionResult execution) =>
+            new() { Execution = execution };
     }
 }

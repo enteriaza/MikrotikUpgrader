@@ -10,17 +10,17 @@ public sealed class PackageInventoryReportingTests
     {
         InstalledPackageInfo[] inventory =
         [
-            Indep("routeros-mipsbe", "6.49.19"),
-            Bundled("system", "6.49.19", "routeros-mipsbe"),
-            Bundled("ipv6", "6.49.19", "routeros-mipsbe"),
-            Bundled("wireless", "6.49.19", "routeros-mipsbe"),
-            Bundled("hotspot", "6.49.19", "routeros-mipsbe"),
-            Bundled("mpls", "6.49.19", "routeros-mipsbe"),
-            Bundled("routing", "6.49.19", "routeros-mipsbe"),
-            Bundled("ppp", "6.49.19", "routeros-mipsbe"),
-            Bundled("dhcp", "6.49.19", "routeros-mipsbe"),
-            Bundled("security", "6.49.19", "routeros-mipsbe"),
-            Bundled("advanced-tools", "6.49.19", "routeros-mipsbe"),
+            Indep("routeros-mipsbe", "6.49.23"),
+            Bundled("system", "6.49.23", "routeros-mipsbe"),
+            Bundled("ipv6", "6.49.23", "routeros-mipsbe"),
+            Bundled("wireless", "6.49.23", "routeros-mipsbe"),
+            Bundled("hotspot", "6.49.23", "routeros-mipsbe"),
+            Bundled("mpls", "6.49.23", "routeros-mipsbe"),
+            Bundled("routing", "6.49.23", "routeros-mipsbe"),
+            Bundled("ppp", "6.49.23", "routeros-mipsbe"),
+            Bundled("dhcp", "6.49.23", "routeros-mipsbe"),
+            Bundled("security", "6.49.23", "routeros-mipsbe"),
+            Bundled("advanced-tools", "6.49.23", "routeros-mipsbe"),
         ];
 
         PackageInventorySummary summary = PackageInventoryReporting.Summarize(inventory);
@@ -28,7 +28,7 @@ public sealed class PackageInventoryReportingTests
         Assert.Equal(11, inventory.Length);
         Assert.Equal(1, summary.IndependentCount);
         Assert.Equal(10, summary.BundledCount);
-        Assert.Equal("routeros-mipsbe/6.49.19", PackageInventoryReporting.FormatIndependentPackages(summary.IndependentPackages));
+        Assert.Equal("routeros-mipsbe/6.49.23", PackageInventoryReporting.FormatIndependentPackages(summary.IndependentPackages));
         Assert.DoesNotContain(summary.IndependentPackages, static p => p.Name == "system");
         Assert.DoesNotContain(summary.IndependentPackages, static p => p.Name == "wireless");
     }
@@ -38,9 +38,9 @@ public sealed class PackageInventoryReportingTests
     {
         InstalledPackageInfo[] inventory =
         [
-            Indep("routeros-mipsbe", "6.49.19"),
-            Bundled("system", "6.49.19", "routeros-mipsbe"),
-            Indep("user-manager", "6.49.19"),
+            Indep("routeros-mipsbe", "6.49.23"),
+            Bundled("system", "6.49.23", "routeros-mipsbe"),
+            Indep("user-manager", "6.49.23"),
         ];
 
         PackageInventorySummary summary = PackageInventoryReporting.Summarize(inventory);

@@ -306,7 +306,7 @@ public sealed class BackupAllocationLifecycleTests
         new()
         {
             Identity = "MikroTik",
-            Version = "6.49.19",
+            Version = "6.49.23",
             ArchitectureName = "mipsbe",
             BoardName = "hEX PoE",
             RouterboardModel = "960PGS",
@@ -327,7 +327,7 @@ public sealed class BackupAllocationLifecycleTests
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([new("routeros-mipsbe", "6.49.19", false)]);
+            Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([new("routeros-mipsbe", "6.49.23", false)]);
 
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,

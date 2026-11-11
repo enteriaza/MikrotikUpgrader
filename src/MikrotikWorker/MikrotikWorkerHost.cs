@@ -109,25 +109,34 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<IValidateOptions<SerilogOptions>, SerilogOptionsValidator>();
 
         builder.Services
-            .AddOptions<FirmwareAssessmentOptions>()
-            .BindConfiguration(FirmwareAssessmentOptions.SectionName)
-            .ValidateOnStart();
-        builder.Services.AddSingleton<IValidateOptions<FirmwareAssessmentOptions>, FirmwareAssessmentOptionsValidator>();
-
-        builder.Services
             .AddOptions<FirmwareUpgradeOptions>()
             .BindConfiguration(FirmwareUpgradeOptions.SectionName)
             .ValidateOnStart();
         builder.Services.AddSingleton<IValidateOptions<FirmwareUpgradeOptions>, FirmwareUpgradeOptionsValidator>();
 
+        builder.Services
+            .AddOptions<LivePackageCompatibilityAuditOptions>()
+            .BindConfiguration(LivePackageCompatibilityAuditOptions.SectionName)
+            .ValidateOnStart();
+        builder.Services.AddSingleton<
+            IValidateOptions<LivePackageCompatibilityAuditOptions>,
+            LivePackageCompatibilityAuditOptionsValidator>();
+
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<DeviceLogIdentityRegistry>();
         builder.Services.AddSingleton<DeviceLogWriter>();
         builder.Services.AddHostedService(static sp => sp.GetRequiredService<DeviceLogWriter>());
+        builder.Services.AddSingleton<RouterOsV7TargetProvider>();
+        builder.Services.AddSingleton<IRouterOsV7TargetProvider>(static sp => sp.GetRequiredService<RouterOsV7TargetProvider>());
+        builder.Services.AddHostedService(static sp => sp.GetRequiredService<RouterOsV7TargetProvider>());
         builder.Services.AddHostedService<ServiceLifecycleLoggingHostedService>();
         builder.Services.AddSingleton<IFirmwarePackageCatalog, FirmwarePackageCatalog>();
         builder.Services.AddSingleton<IDeviceCompatibilityAssessor, DeviceCompatibilityAssessor>();
         builder.Services.AddSingleton<IUpgradePackageResolver, UpgradePackageResolver>();
+        builder.Services.AddSingleton<IPackageCompatibilityAuditor, PackageCompatibilityAuditor>();
+        builder.Services.AddSingleton<ICatalogueCoverageReporter, CatalogueCoverageReporter>();
+        builder.Services.AddSingleton<IReadOnlyMikrotikInventoryCollector, ReadOnlyMikrotikInventoryCollector>();
+        builder.Services.AddSingleton<ILivePackageCompatibilityFleetAuditor, LivePackageCompatibilityFleetAuditor>();
         builder.Services.AddSingleton<IMikrotikFileTransferClient, MikrotikScpFileTransferClient>();
         builder.Services.AddSingleton<IDeviceBackupService, DeviceBackupService>();
         builder.Services.AddSingleton<IRouterOsV6UpgradeExecutor, RouterOsV6UpgradeExecutor>();

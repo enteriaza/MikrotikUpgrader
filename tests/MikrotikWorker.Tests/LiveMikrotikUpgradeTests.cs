@@ -115,7 +115,6 @@ public sealed class LiveMikrotikUpgradeTests
         FirmwareUpgradeOptions upgradeOptions = new()
         {
             Enabled = true,
-            TargetRouterOsVersion = "6.49.23",
             AdvertisedBaseUrl = advertisedBaseUrl,
             FetchTimeout = TimeSpan.FromMinutes(15),
             ReconnectInterval = TimeSpan.FromSeconds(10),
@@ -147,12 +146,13 @@ public sealed class LiveMikrotikUpgradeTests
             Options.Create(new FirmwareFilesOptions { Path = firmwareRoot }));
         DeviceCompatibilityAssessor assessor = new(
             catalog,
-            Options.Create(new FirmwareAssessmentOptions { TargetRouterOsVersion = "6.49.23" }));
+            new FixedRouterOsV7TargetProvider("7.23.8"));
         RouterOsV6UpgradeExecutor upgradeExecutor = new(
             api,
             connectionFactory,
             resolver,
             backupService,
+            new FixedRouterOsV7TargetProvider("7.23.8"),
             Options.Create(upgradeOptions),
             Options.Create(mikrotik),
             TimeProvider.System,

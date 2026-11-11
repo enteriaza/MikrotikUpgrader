@@ -14,6 +14,18 @@ internal sealed class UpgradePackageResolution
 
     public string? FailureReason { get; init; }
 
+    public PackageResolutionFailureKind FailureKind { get; init; }
+
+    /// <summary>
+    /// Installed package name that could not be resolved (when applicable).
+    /// </summary>
+    public string? FailedInstalledPackageName { get; init; }
+
+    /// <summary>
+    /// Ambiguous catalogue filenames (when <see cref="FailureKind"/> is AmbiguousPackage).
+    /// </summary>
+    public IReadOnlyList<string> AmbiguousCandidates { get; init; } = [];
+
     public IReadOnlyList<ResolvedUpgradePackage> Packages { get; init; } = [];
 }
 
@@ -37,12 +49,16 @@ internal sealed class UpgradePackageResolver(
     {
         if (string.IsNullOrWhiteSpace(deviceArchitecture))
         {
-            return Fail("Device architecture is missing; package selection is blocked.");
+            return Fail(
+                PackageResolutionFailureKind.ArchitectureMissing,
+                "Device architecture is missing; package selection is blocked.");
         }
 
         if (installedPackages.Count == 0)
         {
-            return Fail("Installed package inventory is empty.");
+            return Fail(
+                PackageResolutionFailureKind.InventoryEmpty,
+                "Installed package inventory is empty.");
         }
 
         string normalizedArch = FirmwarePackageFileNameParser.NormalizeArchitecture(deviceArchitecture);
@@ -54,7 +70,9 @@ internal sealed class UpgradePackageResolver(
 
         if (policyCatalog.Count == 0)
         {
-            return Fail($"No packages for target {targetVersion} were found in FirmwareFiles.");
+            return Fail(
+                PackageResolutionFailureKind.NoPackagesForTarget,
+                $"No packages for target {targetVersion} were found in FirmwareFiles.");
         }
 
         // Only independently installed packages need their own .npk.
@@ -65,7 +83,9 @@ internal sealed class UpgradePackageResolver(
 
         if (independentlyInstalled.Count == 0)
         {
-            return Fail("No independently installed packages were found (expected a main routeros-* package).");
+            return Fail(
+                PackageResolutionFailureKind.NoIndependentPackages,
+                "No independently installed packages were found (expected a main routeros-* package).");
         }
 
         List<InstalledPackageInfo> mainPackages = independentlyInstalled
@@ -75,13 +95,16 @@ internal sealed class UpgradePackageResolver(
         if (mainPackages.Count == 0)
         {
             return Fail(
+                PackageResolutionFailureKind.MissingMainPackage,
                 "No main combined RouterOS package was found. Expected an unbundled 'routeros' or 'routeros-{arch}' entry.");
         }
 
         if (mainPackages.Count > 1)
         {
             return Fail(
-                $"Multiple main RouterOS packages are installed: {string.Join(", ", mainPackages.Select(p => p.Name))}.");
+                PackageResolutionFailureKind.MultipleMainPackages,
+                $"Multiple main RouterOS packages are installed: {string.Join(", ", mainPackages.Select(p => p.Name))}.",
+                ambiguousCandidates: mainPackages.Select(static p => p.Name).ToArray());
         }
 
         List<ResolvedUpgradePackage> selected = [];
@@ -96,13 +119,18 @@ internal sealed class UpgradePackageResolver(
             if (matches.Count == 0)
             {
                 return Fail(
-                    $"No target package found for independently installed package '{installed.Name}' (catalog name '{catalogName}', architecture '{normalizedArch}', version {targetVersion}).");
+                    PackageResolutionFailureKind.MissingPackage,
+                    $"No target package found for independently installed package '{installed.Name}' (catalog name '{catalogName}', architecture '{normalizedArch}', version {targetVersion}).",
+                    failedInstalledPackageName: installed.Name);
             }
 
             if (matches.Count > 1)
             {
                 return Fail(
-                    $"Ambiguous target packages for '{installed.Name}': {string.Join(", ", matches.Select(m => m.FileName))}.");
+                    PackageResolutionFailureKind.AmbiguousPackage,
+                    $"Ambiguous target packages for '{installed.Name}': {string.Join(", ", matches.Select(m => m.FileName))}.",
+                    failedInstalledPackageName: installed.Name,
+                    ambiguousCandidates: matches.Select(static m => m.FileName).ToArray());
             }
 
             FirmwarePackageInfo match = matches[0];
@@ -115,6 +143,7 @@ internal sealed class UpgradePackageResolver(
         return new UpgradePackageResolution
         {
             Succeeded = true,
+            FailureKind = PackageResolutionFailureKind.None,
             Packages = selected,
         };
     }
@@ -163,7 +192,7 @@ internal sealed class UpgradePackageResolver(
     internal static bool IsSystemPackage(string installedName) =>
         installedName.Trim().Equals("system", StringComparison.OrdinalIgnoreCase);
 
-    private static bool ArchitectureAcceptable(string deviceArch, string? packageArch)
+    internal static bool ArchitectureAcceptable(string deviceArch, string? packageArch)
     {
         if (string.IsNullOrWhiteSpace(packageArch))
         {
@@ -173,6 +202,17 @@ internal sealed class UpgradePackageResolver(
         return FirmwarePackageFileNameParser.ArchitecturesMatch(deviceArch, packageArch);
     }
 
-    private static UpgradePackageResolution Fail(string reason) =>
-        new() { Succeeded = false, FailureReason = reason };
+    private static UpgradePackageResolution Fail(
+        PackageResolutionFailureKind kind,
+        string reason,
+        string? failedInstalledPackageName = null,
+        IReadOnlyList<string>? ambiguousCandidates = null) =>
+        new()
+        {
+            Succeeded = false,
+            FailureKind = kind,
+            FailureReason = reason,
+            FailedInstalledPackageName = failedInstalledPackageName,
+            AmbiguousCandidates = ambiguousCandidates ?? [],
+        };
 }

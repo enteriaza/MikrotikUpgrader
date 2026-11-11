@@ -309,7 +309,7 @@ public sealed class DeviceBackupServiceTests
         MikrotikDeviceInfo device = new()
         {
             Identity = "MikroTik",
-            Version = "6.49.19",
+            Version = "6.49.23",
             ArchitectureName = "mipsbe",
             BoardName = "hEX PoE",
             RouterboardModel = "960PGS",
@@ -434,7 +434,7 @@ public sealed class DeviceBackupServiceTests
         new()
         {
             Identity = "CORE-01",
-            Version = "6.49.19",
+            Version = "6.49.23",
             ArchitectureName = "mipsbe",
             BoardName = "hEX PoE",
             RouterboardModel = "960PGS",
@@ -471,7 +471,7 @@ public sealed class DeviceBackupServiceTests
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([new("routeros-mipsbe", "6.49.19", false)]);
+            Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([new("routeros-mipsbe", "6.49.23", false)]);
 
         public async Task ExportConfigurationToFileAsync(
             ITikConnection connection,

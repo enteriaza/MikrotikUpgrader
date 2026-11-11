@@ -1,6 +1,5 @@
 using System.Net;
 using Microsoft.Extensions.Options;
-using MikrotikWorker.Assessment;
 
 namespace MikrotikWorker.Configuration;
 
@@ -11,13 +10,6 @@ internal sealed class FirmwareUpgradeOptionsValidator : IValidateOptions<Firmwar
         ArgumentNullException.ThrowIfNull(options);
 
         List<string> errors = [];
-
-        if (!RouterOsVersion.TryParse(options.TargetRouterOsVersion, out RouterOsVersion target)
-            || target.IsV7OrLater
-            || !target.IsV6)
-        {
-            errors.Add("FirmwareUpgrade:TargetRouterOsVersion must be a RouterOS v6 release.");
-        }
 
         if (options.FetchTimeout <= TimeSpan.Zero)
         {

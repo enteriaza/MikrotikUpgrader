@@ -16,4 +16,10 @@ public sealed class MikrotikConnectionOptions
     public required string Username { get; init; }
 
     public required string Password { get; init; }
+
+    /// <summary>
+    /// Optional connect/login timeout for this connection.
+    /// When null, the global <c>Mikrotik:ConnectionTimeout</c> is used.
+    /// </summary>
+    public TimeSpan? ConnectTimeout { get; init; }
 }

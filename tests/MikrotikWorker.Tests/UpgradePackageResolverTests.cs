@@ -12,17 +12,17 @@ public sealed class UpgradePackageResolverTests
     /// </summary>
     private static InstalledPackageInfo[] LiveCombinedInventory() =>
     [
-        Indep("routeros-mipsbe", "6.49.19"),
-        Bundled("system", "6.49.19", "routeros-mipsbe"),
-        Bundled("ipv6", "6.49.19", "routeros-mipsbe", disabled: true),
-        Bundled("wireless", "6.49.19", "routeros-mipsbe"),
-        Bundled("hotspot", "6.49.19", "routeros-mipsbe"),
-        Bundled("mpls", "6.49.19", "routeros-mipsbe"),
-        Bundled("routing", "6.49.19", "routeros-mipsbe"),
-        Bundled("ppp", "6.49.19", "routeros-mipsbe"),
-        Bundled("dhcp", "6.49.19", "routeros-mipsbe"),
-        Bundled("security", "6.49.19", "routeros-mipsbe"),
-        Bundled("advanced-tools", "6.49.19", "routeros-mipsbe"),
+        Indep("routeros-mipsbe", "6.49.23"),
+        Bundled("system", "6.49.23", "routeros-mipsbe"),
+        Bundled("ipv6", "6.49.23", "routeros-mipsbe", disabled: true),
+        Bundled("wireless", "6.49.23", "routeros-mipsbe"),
+        Bundled("hotspot", "6.49.23", "routeros-mipsbe"),
+        Bundled("mpls", "6.49.23", "routeros-mipsbe"),
+        Bundled("routing", "6.49.23", "routeros-mipsbe"),
+        Bundled("ppp", "6.49.23", "routeros-mipsbe"),
+        Bundled("dhcp", "6.49.23", "routeros-mipsbe"),
+        Bundled("security", "6.49.23", "routeros-mipsbe"),
+        Bundled("advanced-tools", "6.49.23", "routeros-mipsbe"),
     ];
 
     [Fact]
@@ -63,7 +63,7 @@ public sealed class UpgradePackageResolverTests
     {
         UpgradePackageResolution result = Resolve(
             "mipsbe",
-            [Indep("routeros-mipsbe", "6.49.19")],
+            [Indep("routeros-mipsbe", "6.49.23")],
             "routeros-mipsbe-6.49.23.npk",
             "wireless-6.49.23-mipsbe.npk");
 
@@ -78,7 +78,7 @@ public sealed class UpgradePackageResolverTests
         InstalledPackageInfo[] inventory =
         [
             .. LiveCombinedInventory(),
-            Indep("user-manager", "6.49.19"),
+            Indep("user-manager", "6.49.23"),
         ];
 
         UpgradePackageResolution result = Resolve(
@@ -101,7 +101,7 @@ public sealed class UpgradePackageResolverTests
         InstalledPackageInfo[] inventory =
         [
             .. LiveCombinedInventory(),
-            Indep("tr069-client", "6.49.19"),
+            Indep("tr069-client", "6.49.23"),
         ];
 
         UpgradePackageResolution result = Resolve(
@@ -121,8 +121,8 @@ public sealed class UpgradePackageResolverTests
         InstalledPackageInfo[] inventory =
         [
             .. LiveCombinedInventory(),
-            Indep("user-manager", "6.49.19"),
-            Indep("tr069-client", "6.49.19"),
+            Indep("user-manager", "6.49.23"),
+            Indep("tr069-client", "6.49.23"),
         ];
 
         UpgradePackageResolution result = Resolve(
@@ -142,7 +142,7 @@ public sealed class UpgradePackageResolverTests
         InstalledPackageInfo[] inventory =
         [
             .. LiveCombinedInventory(),
-            Indep("user-manager", "6.49.19"),
+            Indep("user-manager", "6.49.23"),
         ];
 
         UpgradePackageResolution result = Resolve(
@@ -170,7 +170,7 @@ public sealed class UpgradePackageResolverTests
 
         UpgradePackageResolution result = resolver.Resolve(
             "mipsbe",
-            [Indep("routeros-mipsbe", "6.49.19"), Indep("user-manager", "6.49.19")],
+            [Indep("routeros-mipsbe", "6.49.23"), Indep("user-manager", "6.49.23")],
             RouterOsVersion.Parse("6.49.23"));
 
         Assert.False(result.Succeeded);
@@ -182,8 +182,8 @@ public sealed class UpgradePackageResolverTests
     {
         Assert.True(UpgradePackageResolver.IsMainRouterOsPackage("routeros-mipsbe"));
         Assert.Equal("routeros", UpgradePackageResolver.NormalizeInstalledPackageName("routeros-mipsbe", "mipsbe"));
-        Assert.True(new InstalledPackageInfo("system", "6.49.19", false, "routeros-mipsbe").IsBundledComponent);
-        Assert.False(new InstalledPackageInfo("routeros-mipsbe", "6.49.19", false).IsBundledComponent);
+        Assert.True(new InstalledPackageInfo("system", "6.49.23", false, "routeros-mipsbe").IsBundledComponent);
+        Assert.False(new InstalledPackageInfo("routeros-mipsbe", "6.49.23", false).IsBundledComponent);
     }
 
     private static InstalledPackageInfo Indep(string name, string version) =>

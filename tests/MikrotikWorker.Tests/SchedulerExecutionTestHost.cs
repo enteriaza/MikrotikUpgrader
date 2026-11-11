@@ -70,7 +70,7 @@ internal static class SchedulerExecutionTestHost
         IDeviceCompatibilityAssessor assessor = compatibilityAssessor
             ?? new DeviceCompatibilityAssessor(
                 new StaticFirmwarePackageCatalog(packagesRoot),
-                Options.Create(new FirmwareAssessmentOptions { TargetRouterOsVersion = "6.49.23" }));
+                new FixedRouterOsV7TargetProvider("7.23.8"));
 
         IRouterOsV6UpgradeExecutor upgrades = upgradeExecutor
             ?? new DisabledUpgradeExecutor();
@@ -82,7 +82,7 @@ internal static class SchedulerExecutionTestHost
             assessor,
             upgrades,
             Options.Create(mikroTik),
-            Options.Create(new FirmwareAssessmentOptions { TargetRouterOsVersion = "6.49.23" }),
+            new FixedRouterOsV7TargetProvider("7.23.8"),
             Options.Create(new FirmwareUpgradeOptions { Enabled = false }),
             time,
             executorLogger ?? NullLogger<RouterJobExecutor>.Instance);
@@ -98,6 +98,8 @@ internal static class SchedulerExecutionTestHost
         Directory.CreateDirectory(Path.Combine(root, "mikrotik"));
         File.WriteAllBytes(Path.Combine(root, "mikrotik", "routeros-mipsbe-6.49.23.npk"), [0x01]);
         File.WriteAllBytes(Path.Combine(root, "mikrotik", "routeros-arm-6.49.23.npk"), [0x01]);
+        File.WriteAllBytes(Path.Combine(root, "mikrotik", "routeros-7.23.8-mipsbe.npk"), [0x01]);
+        File.WriteAllBytes(Path.Combine(root, "mikrotik", "routeros-7.23.8-arm.npk"), [0x01]);
         return root;
     }
 

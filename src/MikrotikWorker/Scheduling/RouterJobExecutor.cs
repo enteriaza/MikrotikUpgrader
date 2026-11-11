@@ -19,7 +19,7 @@ internal sealed class RouterJobExecutor(
     IDeviceCompatibilityAssessor compatibilityAssessor,
     IRouterOsV6UpgradeExecutor upgradeExecutor,
     IOptions<MikroTikOptions> mikroTikOptions,
-    IOptions<FirmwareAssessmentOptions> assessmentOptions,
+    IRouterOsV7TargetProvider v7TargetProvider,
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     TimeProvider timeProvider,
     ILogger<RouterJobExecutor> logger,
@@ -245,9 +245,11 @@ internal sealed class RouterJobExecutor(
                     return;
                 }
 
+                RouterOsV7TargetSnapshot? v7Target = v7TargetProvider.TryGetCurrent();
                 logger.LogInformation(
-                    "Compatibility assessment started (target {TargetRouterOsVersion})",
-                    assessmentOptions.Value.TargetRouterOsVersion);
+                    "Compatibility assessment started (v6Stepping={V6Stepping}, v7Target={V7Target})",
+                    RouterOsUpgradeVersions.V6SteppingVersionText,
+                    v7Target?.VersionText ?? "(unavailable)");
 
                 DeviceCompatibilityAssessment assessment = compatibilityAssessor.Assess(
                     connectionOptions.Host,
@@ -586,6 +588,8 @@ internal sealed class RouterJobExecutor(
             UpgradeOutcome.SkippedAlreadyAtTarget => (ScheduledJobTerminalState.Succeeded, true),
             UpgradeOutcome.NotAttempted => (ScheduledJobTerminalState.Succeeded, true),
             UpgradeOutcome.UpgradeSucceeded => (ScheduledJobTerminalState.Succeeded, true),
+            UpgradeOutcome.UpgradeSucceededV6Only => (ScheduledJobTerminalState.Succeeded, true),
+            UpgradeOutcome.SkippedNewerThanTarget => (ScheduledJobTerminalState.Succeeded, true),
             UpgradeOutcome.UpgradeInterrupted => (ScheduledJobTerminalState.Cancelled, false),
             _ => (ScheduledJobTerminalState.Failed, false),
         };

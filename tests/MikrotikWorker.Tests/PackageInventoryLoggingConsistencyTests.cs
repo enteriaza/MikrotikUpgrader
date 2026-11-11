@@ -63,17 +63,17 @@ public sealed class PackageInventoryLoggingConsistencyTests
 
         InstalledPackageInfo[] inventory =
         [
-            new("routeros-mipsbe", "6.49.19", false),
-            new("system", "6.49.19", false, "routeros-mipsbe"),
-            new("ipv6", "6.49.19", false, "routeros-mipsbe"),
-            new("wireless", "6.49.19", false, "routeros-mipsbe"),
-            new("hotspot", "6.49.19", false, "routeros-mipsbe"),
-            new("mpls", "6.49.19", false, "routeros-mipsbe"),
-            new("routing", "6.49.19", false, "routeros-mipsbe"),
-            new("ppp", "6.49.19", false, "routeros-mipsbe"),
-            new("dhcp", "6.49.19", false, "routeros-mipsbe"),
-            new("security", "6.49.19", false, "routeros-mipsbe"),
-            new("advanced-tools", "6.49.19", false, "routeros-mipsbe"),
+            new("routeros-mipsbe", "6.49.23", false),
+            new("system", "6.49.23", false, "routeros-mipsbe"),
+            new("ipv6", "6.49.23", false, "routeros-mipsbe"),
+            new("wireless", "6.49.23", false, "routeros-mipsbe"),
+            new("hotspot", "6.49.23", false, "routeros-mipsbe"),
+            new("mpls", "6.49.23", false, "routeros-mipsbe"),
+            new("routing", "6.49.23", false, "routeros-mipsbe"),
+            new("ppp", "6.49.23", false, "routeros-mipsbe"),
+            new("dhcp", "6.49.23", false, "routeros-mipsbe"),
+            new("security", "6.49.23", false, "routeros-mipsbe"),
+            new("advanced-tools", "6.49.23", false, "routeros-mipsbe"),
         ];
 
         PackageInventorySummary summary = PackageInventoryReporting.Summarize(inventory);
@@ -96,14 +96,14 @@ public sealed class PackageInventoryLoggingConsistencyTests
         string[] serviceMessages = serviceSink.Events.Select(static e => e.RenderMessage()).ToArray();
 
         Assert.Contains("Installed package count: 1", deviceLog, StringComparison.Ordinal);
-        Assert.Contains("Installed packages: routeros-mipsbe/6.49.19", deviceLog, StringComparison.Ordinal);
+        Assert.Contains("Installed packages: routeros-mipsbe/6.49.23", deviceLog, StringComparison.Ordinal);
         Assert.Contains("Bundled components: 10", deviceLog, StringComparison.Ordinal);
         Assert.DoesNotContain("PackageCount=11", deviceLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("system/6.49.19, ipv6", deviceLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("system/6.49.23, ipv6", deviceLog, StringComparison.Ordinal);
 
         Assert.DoesNotContain(serviceMessages, static m => m.Contains("Installed package count:", StringComparison.Ordinal));
         Assert.DoesNotContain(serviceMessages, static m => m.Contains("PackageCount=11", StringComparison.Ordinal));
-        Assert.DoesNotContain(serviceMessages, static m => m.Contains("system/6.49.19, ipv6", StringComparison.Ordinal));
+        Assert.DoesNotContain(serviceMessages, static m => m.Contains("system/6.49.23, ipv6", StringComparison.Ordinal));
     }
 
     private sealed class CollectingSink : ILogEventSink

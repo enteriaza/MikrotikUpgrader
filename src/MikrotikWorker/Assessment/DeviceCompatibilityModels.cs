@@ -22,13 +22,24 @@ public enum PackageCompatibilityStatus
 
 public enum UpgradePathStatus
 {
+    /// <summary>RouterOS v6 older than the fixed stepping release — step to 6.49.23 then v7.</summary>
     EligibleSubjectToManualPathVerification = 0,
     AlreadyAtTarget = 1,
+    /// <summary>Legacy: newer v6 no longer requires review; prefer <see cref="SkipV6SteppingProceedToV7"/>.</summary>
     NewerV6RequiresReview = 2,
+    /// <summary>Legacy: v7 is no longer out of scope; prefer the direct-v7 path statuses.</summary>
     OutOfScopeV7 = 3,
     UnknownRequiresManualReview = 4,
     Blocked = 5,
     NotEvaluated = 6,
+    /// <summary>Device already runs 6.49.23 or newer RouterOS 6 — skip stepping, proceed to v7.</summary>
+    SkipV6SteppingProceedToV7 = 7,
+    /// <summary>Device runs RouterOS 7 older than the dynamic target — upgrade directly.</summary>
+    EligibleDirectV7Upgrade = 8,
+    /// <summary>Device already runs the dynamic RouterOS 7 target.</summary>
+    AlreadyAtV7Target = 9,
+    /// <summary>Device runs RouterOS 7 newer than target — never downgrade.</summary>
+    NewerThanV7Target = 10,
 }
 
 public enum RouterboardFirmwareStatus

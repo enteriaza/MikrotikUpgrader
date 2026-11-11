@@ -61,7 +61,6 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
         new()
         {
             Enabled = false,
-            TargetRouterOsVersion = "6.49.23",
             FetchTimeout = TimeSpan.FromMinutes(10),
             ReconnectInterval = TimeSpan.FromSeconds(15),
             RebootTimeout = TimeSpan.FromMinutes(5),

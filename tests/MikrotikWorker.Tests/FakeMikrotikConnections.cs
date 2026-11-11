@@ -87,6 +87,104 @@ internal static class FakeMikrotikConnections
             .WithTrap(
                 static rows => rows.First() == "/system/identity/print",
                 "cannot read identity");
+
+    /// <summary>
+    /// Fully populated device info plus installed package inventory for live read-only audits.
+    /// </summary>
+    public static TikFakeConnection CreateWithPackageInventory(
+        string identity = "AP01.POP001.001.access",
+        string version = "6.49.10",
+        string architecture = "mipsbe",
+        string mainPackageName = "routeros-mipsbe",
+        bool includeBundled = true,
+        bool includeRouterboard = true)
+    {
+        TikFakeConnection fake = CreateFullyPopulated(
+            identity: identity,
+            version: version,
+            architecture: architecture,
+            includeRouterboard: includeRouterboard);
+
+        List<ITikSentence> packageRows =
+        [
+            new TikFakeReSentence(new Dictionary<string, string>
+            {
+                ["name"] = mainPackageName,
+                ["version"] = version,
+                ["disabled"] = "false",
+            }),
+        ];
+
+        if (includeBundled)
+        {
+            packageRows.Add(new TikFakeReSentence(new Dictionary<string, string>
+            {
+                ["name"] = "system",
+                ["version"] = version,
+                ["disabled"] = "false",
+                ["bundle"] = mainPackageName,
+            }));
+            packageRows.Add(new TikFakeReSentence(new Dictionary<string, string>
+            {
+                ["name"] = "ipv6",
+                ["version"] = version,
+                ["disabled"] = "true",
+                ["bundle"] = mainPackageName,
+            }));
+        }
+
+        packageRows.Add(new TikFakeReSentence(new Dictionary<string, string>
+        {
+            ["name"] = "user-manager",
+            ["version"] = version,
+            ["disabled"] = "false",
+        }));
+        packageRows.Add(new TikFakeDoneSentence());
+
+        return fake.WithResponse(
+            static rows => rows.First() == "/system/package/print",
+            packageRows);
+    }
+}
+
+/// <summary>
+/// Records RouterOS command texts issued through <see cref="ITikConnection.CreateCommand(string, ITikCommandParameter[])"/>.
+/// </summary>
+internal sealed class CommandRecordingConnection(ITikConnection inner) : DisposeTrackingConnection(inner)
+{
+    private readonly List<string> _commands = [];
+
+    public IReadOnlyList<string> Commands => _commands;
+
+    public override ITikCommand CreateCommand(string commandText, params ITikCommandParameter[] parameters)
+    {
+        _commands.Add(commandText);
+        return base.CreateCommand(commandText, parameters);
+    }
+
+    public override ITikCommand CreateCommand(
+        string commandText,
+        TikCommandParameterFormat defaultParameterFormat,
+        params ITikCommandParameter[] parameters)
+    {
+        _commands.Add(commandText);
+        return base.CreateCommand(commandText, defaultParameterFormat, parameters);
+    }
+
+    public override ITikCommand CreateCommandAndParameters(string commandText, params string[] parameterNamesAndValues)
+    {
+        _commands.Add(commandText);
+        return base.CreateCommandAndParameters(commandText, parameterNamesAndValues);
+    }
+
+    public override ITikCommand CreateCommandAndParameters(
+        string commandText,
+        TikCommandParameterFormat defaultParameterFormat,
+        params string[] parameterNamesAndValues)
+    {
+        _commands.Add(commandText);
+        return base.CreateCommandAndParameters(commandText, defaultParameterFormat, parameterNamesAndValues);
+    }
 }
 
 /// <summary>
@@ -153,24 +251,24 @@ internal class DisposeTrackingConnection(ITikConnection inner) : ITikConnection
 
     public void Close() => inner.Close();
 
-    public ITikCommand CreateCommand() => inner.CreateCommand();
+    public virtual ITikCommand CreateCommand() => inner.CreateCommand();
 
-    public ITikCommand CreateCommand(TikCommandParameterFormat defaultParameterFormat) =>
+    public virtual ITikCommand CreateCommand(TikCommandParameterFormat defaultParameterFormat) =>
         inner.CreateCommand(defaultParameterFormat);
 
-    public ITikCommand CreateCommand(string commandText, params ITikCommandParameter[] parameters) =>
+    public virtual ITikCommand CreateCommand(string commandText, params ITikCommandParameter[] parameters) =>
         inner.CreateCommand(commandText, parameters);
 
-    public ITikCommand CreateCommand(
+    public virtual ITikCommand CreateCommand(
         string commandText,
         TikCommandParameterFormat defaultParameterFormat,
         params ITikCommandParameter[] parameters) =>
         inner.CreateCommand(commandText, defaultParameterFormat, parameters);
 
-    public ITikCommand CreateCommandAndParameters(string commandText, params string[] parameterNamesAndValues) =>
+    public virtual ITikCommand CreateCommandAndParameters(string commandText, params string[] parameterNamesAndValues) =>
         inner.CreateCommandAndParameters(commandText, parameterNamesAndValues);
 
-    public ITikCommand CreateCommandAndParameters(
+    public virtual ITikCommand CreateCommandAndParameters(
         string commandText,
         TikCommandParameterFormat defaultParameterFormat,
         params string[] parameterNamesAndValues) =>

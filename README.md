@@ -7,11 +7,11 @@
 - a tik4net-based native RouterOS API communication foundation
 - CSV-based scheduled job ingestion with a bounded, time-aware in-memory scheduler
 
-CSV ingestion, in-memory scheduling, RouterOS assessment, **mandatory pre-upgrade backup**, package fetch/install via reboot, and post-upgrade verification are implemented for **RouterOS v6 → 6.49.23**.
+CSV ingestion, in-memory scheduling, RouterOS assessment, **mandatory pre-upgrade backup**, package fetch/install via reboot, and post-upgrade verification are implemented for a **two-stage** path: fixed **RouterOS 6.49.23** stepping (when required), then a dynamic **RouterOS 7** target from `FirmwareFiles/mikrotik/version`.
 
-**Hardware verification status:** one controlled live upgrade of test router `198.18.0.83` (`mipsbe` / hEX PoE / `960PGS`) from **6.49.19 → 6.49.23** completed successfully. That proves the v6 path on that architecture; it does **not** prove fleet-wide production readiness for every board, architecture, or optional-package combination.
+**Hardware verification status:** one controlled live upgrade of test router `198.18.0.83` (`mipsbe` / hEX PoE / `960PGS`) from **6.49.19 → 6.49.23** completed successfully on an earlier v6 milestone (historical lab evidence; stepping target is now also 6.49.23). That proves the v6 fetch/reboot path on that architecture; it does **not** prove fleet-wide production readiness for every board, architecture, optional-package combination, or RouterOS 7 transition.
 
-**Out of scope for this milestone:** RouterOS v7 migration, `/system/routerboard/upgrade`, multi-router fleet orchestration, and durable job persistence.
+**Out of scope for this milestone:** `/system/routerboard/upgrade`, multi-router fleet orchestration, and durable job persistence.
 
 **Deployment model:** a single application instance. All job and scheduling state is in memory only. There is no durable job store. A restart discards in-memory state; retained CSV files are the operator-controlled source for re-import (which may repeat work).
 
@@ -19,8 +19,10 @@ CSV ingestion, in-memory scheduling, RouterOS assessment, **mandatory pre-upgrad
 
 ```text
 MikrotikUpgrader/
-├── FirmwareFiles/                   # Source packages; copied into build/publish output
+├── FirmwareFiles/                   # Source packages + v7 target file; copied into build/publish output
 │   └── mikrotik/
+│       ├── version                  # Plain-text RouterOS 7 target (e.g. 7.23.8)
+│       └── *.npk
 ├── src/MikrotikWorker/
 └── tests/MikrotikWorker.Tests/
 ```
@@ -33,6 +35,8 @@ MikrotikWorker/
 ├── appsettings.json
 ├── FirmwareFiles/
 │   └── mikrotik/
+│       ├── version                  # Authoritative RouterOS 7 target
+│       └── *.npk
 ├── Backups/                         # Pre-upgrade .rsc / .backup / manifests (not served)
 ├── Logs/
 │   ├── application-YYYYMMDD.log     # Central Serilog application log
@@ -45,7 +49,7 @@ MikrotikWorker/
     └── Rejected/
 ```
 
-Relative paths resolve from `AppContext.BaseDirectory`.
+Relative paths resolve from `AppContext.BaseDirectory` (not the process working directory).
 
 ## ScheduledJobs CSV
 
@@ -170,55 +174,115 @@ All routers use the **same** username and password from `appsettings.json`. CSV 
 
 Set real credentials only on the deployment host. Keep placeholders in the repository copy of `appsettings.json` — do not commit production passwords.
 
-The shared account must be allowed to open the RouterOS API (port 8728) and SFTP (port 22 by default) from the worker host. With `FirmwareUpgrade:Enabled=false` (default), jobs perform connect → assessment → disconnect only. With upgrades enabled, eligible v6 devices continue through backup → fetch → reboot → verify.
+The shared account must be allowed to open the RouterOS API (port 8728) and SFTP (port 22 by default) from the worker host. With `FirmwareUpgrade:Enabled=false` (default), jobs perform connect → assessment → disconnect only. With upgrades enabled, eligible devices continue through the two-stage backup → fetch → reboot → verify workflow.
 
 Local overrides (gitignored): place `appsettings.Development.local.json` beside the appsettings files with real credentials for development/live testing. Do not commit that file.
 
 ### Firmware compatibility assessment
 
-Target RouterOS baseline (configurable, default **6.49.23**). Versions are parsed numerically; channel suffixes such as `(long-term)`, `rc`, and `beta` are recognised and ignored for comparison.
+**Fixed v6 stepping version:** `6.49.23` (code constant `RouterOsUpgradeVersions.V6SteppingVersionText`). It is **not** configured in `appsettings.json`.
 
-| Detected version | Overall status |
+**Dynamic RouterOS 7 target:** read from `{FirmwareFiles}/mikrotik/version` (resolved under `AppContext.BaseDirectory`). Example contents: a single line `7.23.8`. Versions are parsed numerically; channel suffixes such as `(long-term)`, `rc`, and `beta` are recognised and ignored for comparison.
+
+| Detected version | Assessment / upgrade behaviour |
 |---|---|
-| v6 earlier than target + matching main package | `ReadyForUpgrade` — automated upgrade to 6.49.23 is permitted when `FirmwareUpgrade:Enabled=true` |
-| Exactly target v6 | `AlreadyAtTarget` |
-| v6 later than target | `ManualReviewRequired` — no automatic downgrade |
-| v7+ | `Unsupported` |
-| Unparseable / missing package / arch mismatch | `Blocked` |
+| RouterOS 6 older than 6.49.23 | Step to 6.49.23 first, then continue to the validated v7 target when eligible |
+| RouterOS 6 equal to 6.49.23 | Skip v6 stepping; proceed directly to v7 when eligible |
+| RouterOS 6 newer than 6.49.23 | Skip v6 stepping; **never downgrade** to 6.49.23; proceed directly to v7 when eligible |
+| RouterOS 7 older than version-file target | Upgrade directly to the validated v7 target when eligible |
+| RouterOS 7 equal to target | No upgrade required |
+| RouterOS 7 newer than target | Never downgrade |
+| Unparseable / missing package / arch mismatch / no validated v7 target when required | `Blocked` |
 
-`FirmwareAssessment:TargetRouterOsVersion` and `FirmwareUpgrade:TargetRouterOsVersion` must remain **v6** releases; v7 targets are rejected at startup.
+Removed configuration keys (do not restore them):
+
+- `FirmwareAssessment:TargetRouterOsVersion`
+- `FirmwareUpgrade:TargetRouterOsVersion`
+- `FirmwareUpgrade:SecondStageTargetRouterOsVersion`
+
+#### Changing the RouterOS 7 target
+
+1. Edit `FirmwareFiles/mikrotik/version` so it contains exactly one valid RouterOS 7+ version (whitespace trimmed).
+2. The host watches the file (`FileSystemWatcher` with debounce/retry). A valid change is applied to **subsequently started** jobs without restarting the application.
+3. Running jobs keep the immutable target snapshot captured when they started.
+4. Invalid updates (empty, malformed, extra content, non-v7) are rejected; the last successfully validated target remains active.
+5. If the file is deleted after a successful load, the last known good target is kept. If no valid target has ever been loaded, RouterOS 7 upgrades do not start (`TargetUnavailable`).
+
+#### Device identity policy
+
+Standard identity: `[ACE|AP|BR|DCL]dd.POPddd.ddd.sss`.
+
+| Classification | RouterOS 7 |
+|---|---|
+| ACE | Excluded |
+| BR | Excluded |
+| AP / DCL | Eligible |
+| Unknown / empty / unavailable | Eligible |
+
+Only positively identified ACE or BR devices are excluded. Identity retrieval failure must not interrupt the workflow and must not produce a manual-review outcome.
 
 **Package matching** uses the FirmwareFiles catalog and the live `/system/package/print` `bundle` field:
 
-- Combined main package: unbundled `routeros` / `routeros-{arch}` → catalog `routeros-{arch}-{version}.npk` (e.g. `routeros-mipsbe-6.49.23.npk`)
+- Combined main package: unbundled `routeros` / `routeros-{arch}` → catalog `routeros-{arch}-{version}.npk` or `routeros-{version}-{arch}.npk`
 - Bundled components (`bundle=<main>`, including disabled ones such as `ipv6`) are **not** fetched separately
-- Independently installed optionals (`bundle` empty): `{name}-{version}-{arch}.npk` (e.g. `tr069-client-6.49.23-mipsbe.npk`)
+- Independently installed optionals (`bundle` empty): `{name}-{version}-{arch}.npk`
 - Exact package identity + architecture + version required; ambiguous duplicates fail safe
+- A stage never mixes RouterOS 6 and RouterOS 7 packages
 
-RouterBOARD current vs upgrade firmware is collected and logged before and after RouterOS upgrade. This milestone never runs `/system/routerboard/upgrade`. RouterOS v7 package migration remains deferred.
+RouterBOARD current vs upgrade firmware is collected and logged before and after RouterOS upgrade. This application never runs `/system/routerboard/upgrade`.
 
-### Automated RouterOS v6 → 6.49.23 upgrade
+#### Installed-package catalogue compatibility audit (non-live)
 
-Enable with `FirmwareUpgrade:Enabled=true` and set `AdvertisedBaseUrl` to an HTTP URL **reachable from routers** (not localhost), ending in `/firmware_files`.
+Before enabling fleet upgrades, operators can evaluate whether the on-disk catalogue can satisfy **synthetic fixture inventories** (and, later, captured inventories) without uploading packages or rebooting:
 
-**Live proof (single test router):** `198.18.0.83` was upgraded 6.49.19 → 6.49.23 using only `routeros-mipsbe-6.49.23.npk` (verified immediately post-reconnect). Evidence is retained under local `OperationalEvidence/` (gitignored). Operators should re-check the live version before treating the lab device as remaining on 6.49.23.
+```powershell
+dotnet run --project src/MikrotikWorker -- --audit-package-compatibility --output Reports/PackageCompatibility
+```
 
-Sequence for eligible devices:
+Reports (CSV + JSON): catalogue coverage per architecture for fixed **6.49.23** and the dynamic v7 target, plus per-fixture stage results. Fixtures are labelled `SyntheticFixture` and are not live router observations. ACE/BR report RouterOS 7 as `NotApplicable`. The audit reuses the production package resolver (`bundle` remains authoritative for bundled vs independent packages).
+
+#### Live read-only fleet package compatibility audit
+
+Explicitly authorised inventory collection from real routers. **Read-only only** — no firmware upload, backup, fetch, reboot, package change, or configuration modification.
+
+**Dual gate (both required before any connection):**
+
+1. CLI: `--audit-package-compatibility-live`
+2. Config: `LivePackageCompatibilityAudit:Enabled=true` (default `false`)
+
+Credentials alone never authorise live audit. Shared `Mikrotik:Username` / `Mikrotik:Password` are used; the input CSV must not contain credential columns.
+
+```powershell
+dotnet run --project src/MikrotikWorker -- `
+  --audit-package-compatibility-live `
+  --input path\to\routers.csv `
+  --output Reports/LivePackageCompatibility
+```
+
+Input CSV columns (case-insensitive, order-independent):
+
+| Column | Required | Notes |
+|---|---|---|
+| `routerip` | Yes | IPv4/IPv6 only (no hostnames) |
+| `routername` | No | Display name in reports |
+
+Defaults: `MaxConcurrentConnections=5`; per-router timeout falls back to `Mikrotik:ConnectionTimeout`. RouterOS commands used: `/system/identity/print`, `/system/resource/print`, `/system/package/print`, and optionally `/system/routerboard/print`. Timestamped CSV/JSON reports are written locally (not served by Kestrel). The live audit uses a dedicated minimal host (no upgrade scheduler, backup, fetch, or reboot services). Fleet completion is based on whether every valid router reached a natural terminal result — a `TotalAuditTimeout` that fires after successful completion cannot retroactively mark the run cancelled. Firmware upgrades remain controlled solely by `FirmwareUpgrade:Enabled` (default `false`).
+
+### Automated two-stage upgrade
+
+Enable with `FirmwareUpgrade:Enabled=true` and set `AdvertisedBaseUrl` to an HTTP URL **reachable from routers** (not localhost), ending in `/firmware_files`. Place matching architecture packages for **6.49.23** and for the version-file RouterOS 7 target under `FirmwareFiles`.
+
+**Live proof (single test router, earlier milestone):** `198.18.0.83` was upgraded 6.49.19 → 6.49.23 using only `routeros-mipsbe-6.49.23.npk` (verified immediately post-reconnect). Evidence is retained under local `OperationalEvidence/` (gitignored).
+
+High-level sequence for an eligible device older than 6.49.23:
 
 1. Inventory installed packages (`/system/package/print`, including `bundle`)
-2. Resolve independently installed packages only (main + true optionals)
-3. **Mandatory pre-upgrade backup** (blocking):
-   - `/export file={name}` → `{name}.rsc`
-   - `/system/backup/save name={name}` (optional separate `BackupPassword`; never the login password)
-   - Wait until both files exist with non-zero size
-   - Retrieve via **SFTP** to `Backups/Exports/` and `Backups/Binary/`
-   - Verify local size + SHA-256; write JSON manifest under `Backups/Manifests/`
-   - Delete **only** the two job-created remote backup files and verify absence
-4. Only then `/tool/fetch` each required package from Kestrel (`mode=http`, `keep-result=yes`, `dst-path=…`)
-5. Poll until on-router file sizes match the catalog (RouterOS can report an intermediate size briefly)
-6. `/system/reboot` exactly once (`.npk` install on reboot)
-7. Bounded reconnect; verify exact RouterOS 6.49.23 + installed package versions
-8. Log RouterBOARD firmware before/after without upgrading it
+2. **Mandatory pre-upgrade backup** for the v6 stepping stage (blocking)
+3. Resolve/fetch/stage **6.49.23** packages only; reboot; verify exact 6.49.23
+4. Classify identity; stop with `UpgradeSucceededV6Only` for ACE/BR
+5. For eligible devices: backup again (captures verified 6.49.23 or current newer-v6 / older-v7 state), resolve packages for the **job’s immutable v7 snapshot**, fetch/stage, reboot, verify exact target + package inventory
+
+Devices already on 6.49.23 or newer RouterOS 6 skip steps 2–3 and never receive 6.49.23 packages. Devices already on RouterOS 7 never receive RouterOS 6 packages.
 
 Backup failure, remote cleanup failure, missing packages, fetch failures, or verification mismatches stop that device — no fetch/reboot after a failed backup/cleanup. There is no automatic rollback or durable crash recovery: if the worker stops mid-upgrade, inspect the device and re-import the CSV manually.
 
