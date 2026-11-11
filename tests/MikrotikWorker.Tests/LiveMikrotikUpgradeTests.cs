@@ -140,10 +140,12 @@ public sealed class LiveMikrotikUpgradeTests
             Options.Create(upgradeOptions),
             TimeProvider.System,
             loggerFactory.CreateLogger<DeviceBackupService>());
-        FirmwarePackageCatalog catalog = new(Options.Create(new FirmwareFilesOptions { Path = firmwareRoot }));
-        UpgradePackageResolver resolver = new(
-            catalog,
-            Options.Create(new FirmwareFilesOptions { Path = firmwareRoot }));
+        IOptions<FirmwareFilesOptions> firmwareFilesOptions =
+            Options.Create(new FirmwareFilesOptions { Path = firmwareRoot });
+        IOptions<FirmwareUpgradeOptions> upgradeOptionsWrapper = Options.Create(upgradeOptions);
+        IOptions<MikroTikOptions> mikrotikOptionsWrapper = Options.Create(mikrotik);
+        FirmwarePackageCatalog catalog = new(firmwareFilesOptions);
+        UpgradePackageResolver resolver = new(catalog, firmwareFilesOptions);
         DeviceCompatibilityAssessor assessor = new(
             catalog,
             new FixedRouterOsV7TargetProvider("7.23.8"));
@@ -153,8 +155,18 @@ public sealed class LiveMikrotikUpgradeTests
             resolver,
             backupService,
             new FixedRouterOsV7TargetProvider("7.23.8"),
-            Options.Create(upgradeOptions),
-            Options.Create(mikrotik),
+            new LegacyFleetUpgradeAutomationCleanup(
+                api,
+                loggerFactory.CreateLogger<LegacyFleetUpgradeAutomationCleanup>()),
+            new RouterboardFirmwareUpgradeService(
+                api,
+                connectionFactory,
+                upgradeOptionsWrapper,
+                mikrotikOptionsWrapper,
+                TimeProvider.System,
+                loggerFactory.CreateLogger<RouterboardFirmwareUpgradeService>()),
+            upgradeOptionsWrapper,
+            mikrotikOptionsWrapper,
             TimeProvider.System,
             loggerFactory.CreateLogger<RouterOsV6UpgradeExecutor>());
 

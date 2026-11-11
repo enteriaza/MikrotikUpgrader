@@ -101,7 +101,7 @@ public sealed class RouterboardFirmwareMappingTests
         Assert.Contains(
             assessment.Findings,
             static f => f.Code == "routerboard.upgrade_available"
-                && f.Message.Contains("Do not run /system/routerboard/upgrade", StringComparison.Ordinal));
+                && f.Message.Contains("Assessment does not issue /system/routerboard/upgrade", StringComparison.Ordinal));
         Assert.Contains(
             assessment.Findings,
             static f => f.Message.Contains("bootloader", StringComparison.OrdinalIgnoreCase)

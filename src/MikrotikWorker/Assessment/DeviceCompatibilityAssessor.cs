@@ -340,7 +340,7 @@ internal sealed class DeviceCompatibilityAssessor(
                 findings.Add(new(
                     AssessmentFindingSeverity.Info,
                     "routerboard.upgrade_available",
-                    $"RouterBOOT upgrade-firmware ({upgrade}) is newer than current-firmware ({current}). These are bootloader versions, not RouterOS. Do not run /system/routerboard/upgrade."));
+                    $"RouterBOOT upgrade-firmware ({upgrade}) is newer than current-firmware ({current}). These are bootloader versions, not RouterOS. Assessment does not issue /system/routerboard/upgrade."));
                 return RouterboardFirmwareStatus.UpgradeAvailable;
             }
 

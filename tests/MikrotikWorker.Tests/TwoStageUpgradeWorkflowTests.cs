@@ -81,9 +81,15 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal(2, backup.CallCount);
+        Assert.Equal(3, backup.CallCount);
         Assert.Equal(2, ops.RebootCount);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.True(ops.SchedulerCountCalls > 0);
+        Assert.DoesNotContain(
+            ops.FetchedFiles,
+            f => f.Equals("FleetUpgradeInstall.rsc", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
         Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
         Assert.Equal(expectedType, DeviceIdentityClassifier.Classify(identity).DeviceType);
@@ -113,8 +119,9 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal(2, backup.CallCount);
+        Assert.Equal(3, backup.CallCount);
         Assert.Equal(2, ops.RebootCount);
     }
 
@@ -269,8 +276,9 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal(1, backup.CallCount); // only second-stage backup
+        Assert.Equal(2, backup.CallCount); // v7 backup + post-v7 backup before RouterBOARD
         Assert.Equal(1, ops.RebootCount);
         Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
@@ -306,8 +314,9 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal(2, backup.CallCount);
+        Assert.Equal(3, backup.CallCount);
         Assert.Equal(2, ops.RebootCount);
         Assert.Contains(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
         Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
@@ -343,8 +352,9 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal(1, backup.CallCount);
+        Assert.Equal(2, backup.CallCount);
         Assert.Equal(1, ops.RebootCount);
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
         Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
@@ -444,11 +454,11 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
-        Assert.Equal(UpgradeCompletedStages.RouterOs7, result.CompletedStage);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal(UpgradeExecutionMode.FullUpgrade, result.ExecutionMode);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
         Assert.Equal("mipsbe", result.PostUpgradeArchitecture);
-        Assert.Equal(1, backup.CallCount);
+        Assert.Equal(2, backup.CallCount);
         Assert.Equal(1, ops.RebootCount);
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
         Assert.Contains(ops.FetchedFiles, f => f.Equals("routeros-7.23.8-mipsbe.npk", StringComparison.Ordinal));
@@ -484,7 +494,8 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
-        Assert.Equal(1, backup.CallCount);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal(2, backup.CallCount);
         Assert.Equal(1, ops.RebootCount);
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
         Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
@@ -599,9 +610,149 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal(2, backup.CallCount);
         Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("7.24.0", StringComparison.Ordinal));
         Assert.Equal("7.24.0", v7.TryGetCurrent()!.VersionText);
+    }
+
+    [Fact]
+    public async Task FullUpgrade_RouterboardUpgradeRequired_IssuesCommandAndExtraReboot()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = ["7.23.8", "7.23.8"],
+            InitialVersion = "6.49.23",
+            RouterboardCurrentFirmware = "6.49.23",
+            RouterboardUpgradeFirmware = "7.23.8",
+        };
+        CountingBackup backup = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "6.49.23"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "7.23.8"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal(1, ops.RouterboardUpgradeCount);
+        Assert.Equal(2, ops.RebootCount); // v7 reboot + RouterBOARD reboot
+        Assert.Equal(2, backup.CallCount);
+        Assert.DoesNotContain(
+            ops.FetchedFiles,
+            f => f.Equals("FleetUpgradeInstall.rsc", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task FullUpgrade_LegacyCleanupFailure_SkipsFirmwareMutation()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = ["7.23.8"],
+            InitialVersion = "6.49.23",
+            PresentSchedulers = [LegacyFleetUpgradeObjectNames.SchedulerName],
+            ThrowOnSchedulerRemove = new InvalidOperationException("cleanup boom"),
+        };
+        CountingBackup backup = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "6.49.23"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "7.23.8"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.LegacyFirmwareAutomationCleanupFailed, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.None, result.CompletedStage);
+        Assert.Equal(0, ops.RebootCount);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.Equal(0, backup.CallCount);
+        Assert.Empty(ops.FetchedFiles);
+        Assert.True(ops.SchedulerCountCalls > 0);
+    }
+
+    [Fact]
+    public async Task FullUpgrade_RouterboardInconclusive_DoesNotUpgrade()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = ["7.23.8"],
+            InitialVersion = "6.49.23",
+            RouterboardCurrentFirmware = "",
+            RouterboardUpgradeFirmware = "7.23.8",
+        };
+        CountingBackup backup = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "6.49.23"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "7.23.8"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.RouterboardUpgradeFailed, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterOs7, result.CompletedStage);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.Equal(1, ops.RebootCount);
+        Assert.DoesNotContain(
+            ops.FetchedFiles,
+            f => f.Equals("FleetUpgradeInstall.rsc", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task AceOrBr_DoesNotRunFleetOrRouterboardPhases()
+    {
+        StageTrackingOps ops = new("BR12.POP123.456.edge")
+        {
+            VersionsAfterReboot = ["6.49.23"],
+        };
+        CountingBackup backup = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "BR12.POP123.456.edge", version: "6.49.23"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "BR12.POP123.456.edge", version: "6.49.10"),
+            CreateJob(),
+            CreateDevice("BR12.POP123.456.edge", "6.49.10"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "6.49.23"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.True(ops.SchedulerCountCalls > 0);
+        Assert.True(ops.ScriptCountCalls > 0);
+        Assert.DoesNotContain(
+            ops.FetchedFiles,
+            f => f.Equals("FleetUpgradeInstall.rsc", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string CreateFirmwareRootWithV6AndV7()
@@ -628,26 +779,43 @@ public sealed class TwoStageUpgradeWorkflowTests
             verify = reboot;
         }
 
+        IMikrotikConnectionFactory factory =
+            connectionFactory ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect"));
+        IOptions<FirmwareUpgradeOptions> upgradeOptions = Options.Create(new FirmwareUpgradeOptions
+        {
+            Enabled = true,
+            AdvertisedBaseUrl = "http://198.18.0.66:8080/firmware_files",
+            FetchTimeout = TimeSpan.FromSeconds(5),
+            ReconnectInterval = TimeSpan.FromMilliseconds(10),
+            RebootTimeout = reboot,
+            PostUpgradeVerifyTimeout = verify,
+            BackupFileReadyTimeout = TimeSpan.FromMilliseconds(100),
+            BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(20),
+        });
+        IOptions<FirmwareFilesOptions> firmwareFilesOptions =
+            Options.Create(new FirmwareFilesOptions { Path = firmwareRoot });
+        IOptions<MikroTikOptions> mikrotikOptions = Options.Create(new MikroTikOptions { Port = 8728 });
+
         return new RouterOsV6UpgradeExecutor(
             ops,
-            connectionFactory ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect")),
+            factory,
             new UpgradePackageResolver(
                 new StaticFirmwarePackageCatalog(firmwareRoot),
-                Options.Create(new FirmwareFilesOptions { Path = firmwareRoot })),
+                firmwareFilesOptions),
             backup,
             v7TargetProvider ?? new FixedRouterOsV7TargetProvider("7.23.8"),
-            Options.Create(new FirmwareUpgradeOptions
-            {
-                Enabled = true,
-                AdvertisedBaseUrl = "http://198.18.0.66:8080/firmware_files",
-                FetchTimeout = TimeSpan.FromSeconds(5),
-                ReconnectInterval = TimeSpan.FromMilliseconds(10),
-                RebootTimeout = reboot,
-                PostUpgradeVerifyTimeout = verify,
-                BackupFileReadyTimeout = TimeSpan.FromMilliseconds(100),
-                BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(20),
-            }),
-            Options.Create(new MikroTikOptions { Port = 8728 }),
+            new LegacyFleetUpgradeAutomationCleanup(
+                ops,
+                NullLogger<LegacyFleetUpgradeAutomationCleanup>.Instance),
+            new RouterboardFirmwareUpgradeService(
+                ops,
+                factory,
+                upgradeOptions,
+                mikrotikOptions,
+                TimeProvider.System,
+                NullLogger<RouterboardFirmwareUpgradeService>.Instance),
+            upgradeOptions,
+            mikrotikOptions,
             TimeProvider.System,
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
@@ -725,6 +893,7 @@ public sealed class TwoStageUpgradeWorkflowTests
     private sealed class StageTrackingOps(string identity) : IMikrotikRouterOperations
     {
         private int _rebootIndex;
+        private bool _routerboardUpgradeIssued;
 
         public string Identity { get; } = identity;
 
@@ -734,9 +903,34 @@ public sealed class TwoStageUpgradeWorkflowTests
 
         public int? FailOnPostRebootDeviceInfoReadNumber { get; init; }
 
+        /// <summary>Defaults equal so FullUpgrade success needs no RouterBOARD upgrade/reboot.</summary>
+        public string RouterboardCurrentFirmware { get; set; } = "7.23.8";
+
+        public string RouterboardUpgradeFirmware { get; set; } = "7.23.8";
+
+        public List<string> PresentScripts { get; init; } = [];
+
+        public List<string> PresentSchedulers { get; init; } = [];
+
+        public List<string> RemovalOrder { get; } = [];
+
+        public Exception? ThrowOnSchedulerRemove { get; init; }
+
+        public Exception? ThrowOnScriptRemove { get; init; }
+
         public int RebootCount { get; private set; }
 
         public int PostRebootDeviceInfoReads { get; private set; }
+
+        public int RouterboardUpgradeCount { get; private set; }
+
+        public int SchedulerCountCalls { get; private set; }
+
+        public int ScriptCountCalls { get; private set; }
+
+        public int CleanupInspectionCount => SchedulerCountCalls + ScriptCountCalls;
+
+        public Dictionary<string, long> FileSizes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         public List<string> FetchedFiles { get; } = [];
 
@@ -770,6 +964,8 @@ public sealed class TwoStageUpgradeWorkflowTests
                 Version = CurrentVersion,
                 ArchitectureName = "mipsbe",
                 BoardName = "hEX PoE",
+                RouterboardCurrentFirmware = RouterboardCurrentFirmware,
+                RouterboardUpgradeFirmware = RouterboardUpgradeFirmware,
             });
         }
 
@@ -807,8 +1003,12 @@ public sealed class TwoStageUpgradeWorkflowTests
             string fileName,
             CancellationToken cancellationToken = default)
         {
-            long size = fileName.Contains("7.23.8", StringComparison.Ordinal) ? 4 : 4;
-            return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, size));
+            if (FileSizes.TryGetValue(fileName, out long known))
+            {
+                return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, known));
+            }
+
+            return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, 4));
         }
 
         public Task WaitForFileAsync(
@@ -842,6 +1042,68 @@ public sealed class TwoStageUpgradeWorkflowTests
         {
             RebootCount++;
             _rebootIndex = RebootCount;
+            if (_routerboardUpgradeIssued)
+            {
+                RouterboardCurrentFirmware = RouterboardUpgradeFirmware;
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task<int> CountSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default)
+        {
+            ScriptCountCalls++;
+            return Task.FromResult(PresentScripts.Count(n => n.Equals(scriptName, StringComparison.Ordinal)));
+        }
+
+        public Task RemoveSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default)
+        {
+            if (ThrowOnScriptRemove is not null)
+            {
+                throw ThrowOnScriptRemove;
+            }
+
+            RemovalOrder.Add("script:" + scriptName);
+            PresentScripts.RemoveAll(n => n.Equals(scriptName, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        }
+
+        public Task<int> CountSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default)
+        {
+            SchedulerCountCalls++;
+            return Task.FromResult(PresentSchedulers.Count(n => n.Equals(schedulerName, StringComparison.Ordinal)));
+        }
+
+        public Task RemoveSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default)
+        {
+            if (ThrowOnSchedulerRemove is not null)
+            {
+                throw ThrowOnSchedulerRemove;
+            }
+
+            RemovalOrder.Add("scheduler:" + schedulerName);
+            PresentSchedulers.RemoveAll(n => n.Equals(schedulerName, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        }
+
+        public Task UpgradeRouterboardAsync(
+            ITikConnection connection,
+            CancellationToken cancellationToken = default)
+        {
+            RouterboardUpgradeCount++;
+            _routerboardUpgradeIssued = true;
             return Task.CompletedTask;
         }
     }

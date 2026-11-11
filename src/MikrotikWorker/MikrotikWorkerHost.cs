@@ -139,6 +139,8 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<ILivePackageCompatibilityFleetAuditor, LivePackageCompatibilityFleetAuditor>();
         builder.Services.AddSingleton<IMikrotikFileTransferClient, MikrotikScpFileTransferClient>();
         builder.Services.AddSingleton<IDeviceBackupService, DeviceBackupService>();
+        builder.Services.AddSingleton<LegacyFleetUpgradeAutomationCleanup>();
+        builder.Services.AddSingleton<RouterboardFirmwareUpgradeService>();
         builder.Services.AddSingleton<IRouterOsV6UpgradeExecutor, RouterOsV6UpgradeExecutor>();
         builder.Services.AddSingleton<ScheduledJobsPaths>();
         builder.Services.AddSingleton<IScheduledJobFileMover, FileSystemScheduledJobFileMover>();

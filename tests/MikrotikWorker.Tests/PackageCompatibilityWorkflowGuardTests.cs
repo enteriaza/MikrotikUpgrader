@@ -115,26 +115,43 @@ public sealed class PackageCompatibilityWorkflowGuardTests
         CountingBackup? backup = null)
     {
         backup ??= new CountingBackup();
+        IMikrotikConnectionFactory factory =
+            connectionFactory ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect"));
+        IOptions<FirmwareUpgradeOptions> upgradeOptions = Options.Create(new FirmwareUpgradeOptions
+        {
+            Enabled = true,
+            AdvertisedBaseUrl = "http://198.18.0.66:8080/firmware_files",
+            FetchTimeout = TimeSpan.FromSeconds(5),
+            ReconnectInterval = TimeSpan.FromMilliseconds(10),
+            RebootTimeout = TimeSpan.FromSeconds(5),
+            PostUpgradeVerifyTimeout = TimeSpan.FromSeconds(5),
+            BackupFileReadyTimeout = TimeSpan.FromMilliseconds(100),
+            BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(20),
+        });
+        IOptions<FirmwareFilesOptions> firmwareFilesOptions =
+            Options.Create(new FirmwareFilesOptions { Path = firmwareRoot });
+        IOptions<MikroTikOptions> mikrotikOptions = Options.Create(new MikroTikOptions { Port = 8728 });
+
         return new RouterOsV6UpgradeExecutor(
             ops,
-            connectionFactory ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect")),
+            factory,
             new UpgradePackageResolver(
                 new StaticFirmwarePackageCatalog(firmwareRoot),
-                Options.Create(new FirmwareFilesOptions { Path = firmwareRoot })),
+                firmwareFilesOptions),
             backup,
             new FixedRouterOsV7TargetProvider("7.23.8"),
-            Options.Create(new FirmwareUpgradeOptions
-            {
-                Enabled = true,
-                AdvertisedBaseUrl = "http://198.18.0.66:8080/firmware_files",
-                FetchTimeout = TimeSpan.FromSeconds(5),
-                ReconnectInterval = TimeSpan.FromMilliseconds(10),
-                RebootTimeout = TimeSpan.FromSeconds(5),
-                PostUpgradeVerifyTimeout = TimeSpan.FromSeconds(5),
-                BackupFileReadyTimeout = TimeSpan.FromMilliseconds(100),
-                BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(20),
-            }),
-            Options.Create(new MikroTikOptions { Port = 8728 }),
+            new LegacyFleetUpgradeAutomationCleanup(
+                ops,
+                NullLogger<LegacyFleetUpgradeAutomationCleanup>.Instance),
+            new RouterboardFirmwareUpgradeService(
+                ops,
+                factory,
+                upgradeOptions,
+                mikrotikOptions,
+                TimeProvider.System,
+                NullLogger<RouterboardFirmwareUpgradeService>.Instance),
+            upgradeOptions,
+            mikrotikOptions,
             TimeProvider.System,
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
@@ -261,6 +278,30 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             RebootCalled = true;
             return Task.CompletedTask;
         }
+
+        public Task<int> CountSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(0);
+
+        public Task RemoveSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task<int> CountSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(0);
+
+        public Task RemoveSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 
     private sealed class StageOps(string identity) : IMikrotikRouterOperations
@@ -351,6 +392,30 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             _rebootIndex = RebootCount;
             return Task.CompletedTask;
         }
+
+        public Task<int> CountSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(0);
+
+        public Task RemoveSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task<int> CountSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(0);
+
+        public Task RemoveSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 
     private sealed class DirectoryCatalog(string root) : IFirmwarePackageCatalog

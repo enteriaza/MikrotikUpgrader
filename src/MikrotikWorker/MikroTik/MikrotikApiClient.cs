@@ -6,8 +6,8 @@ using tik4net;
 namespace MikrotikWorker.MikroTik;
 
 /// <summary>
-/// tik4net-backed RouterOS API client for device info, inventory, backup, fetch, and reboot.
-/// Never issues <c>/system/routerboard/upgrade</c>.
+/// tik4net-backed RouterOS API client for device info, inventory, backup, fetch, reboot,
+/// FleetUpgrade script import, and RouterBOARD firmware upgrade.
 /// </summary>
 internal sealed class MikrotikApiClient(
     IMikrotikConnectionFactory connectionFactory,
@@ -372,6 +372,127 @@ internal sealed class MikrotikApiClient(
         catch (Exception ex)
         {
             logger.LogInformation(ex, "Router reboot command returned with connection loss (expected during restart)");
+        }
+    }
+
+    public Task<int> CountSystemScriptsByNameAsync(
+        ITikConnection connection,
+        string scriptName,
+        CancellationToken cancellationToken = default) =>
+        CountNamedObjectsAsync(connection, "/system/script/print", scriptName, cancellationToken);
+
+    public async Task RemoveSystemScriptsByNameAsync(
+        ITikConnection connection,
+        string scriptName,
+        CancellationToken cancellationToken = default)
+    {
+        await RemoveNamedObjectsAsync(connection, "/system/script/print", "/system/script/remove", scriptName, cancellationToken)
+            .ConfigureAwait(false);
+        logger.LogInformation("Removed /system/script objects named {Name}", scriptName);
+    }
+
+    public Task<int> CountSchedulersByNameAsync(
+        ITikConnection connection,
+        string schedulerName,
+        CancellationToken cancellationToken = default) =>
+        CountNamedObjectsAsync(connection, "/system/scheduler/print", schedulerName, cancellationToken);
+
+    public async Task RemoveSchedulersByNameAsync(
+        ITikConnection connection,
+        string schedulerName,
+        CancellationToken cancellationToken = default)
+    {
+        await RemoveNamedObjectsAsync(
+                connection,
+                "/system/scheduler/print",
+                "/system/scheduler/remove",
+                schedulerName,
+                cancellationToken)
+            .ConfigureAwait(false);
+        logger.LogInformation("Removed /system/scheduler objects named {Name}", schedulerName);
+    }
+
+    public async Task UpgradeRouterboardAsync(
+        ITikConnection connection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ITikCommand command = connection.CreateCommand("/system/routerboard/upgrade");
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        logger.LogInformation("Issued /system/routerboard/upgrade");
+    }
+
+    private async Task<int> CountNamedObjectsAsync(
+        ITikConnection connection,
+        string printCommand,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        IEnumerable<ITikReSentence> rows = await connection
+            .CreateCommand(printCommand)
+            .ExecuteListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        int count = 0;
+        foreach (ITikReSentence row in rows)
+        {
+            string rowName = row.GetResponseFieldOrDefault("name", string.Empty) ?? string.Empty;
+            if (string.Equals(rowName, name, StringComparison.Ordinal))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private async Task RemoveNamedObjectsAsync(
+        ITikConnection connection,
+        string printCommand,
+        string removeCommand,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        IEnumerable<ITikReSentence> rows = await connection
+            .CreateCommand(printCommand)
+            .ExecuteListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (ITikReSentence row in rows)
+        {
+            string rowName = row.GetResponseFieldOrDefault("name", string.Empty) ?? string.Empty;
+            if (!string.Equals(rowName, name, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // Exact-name match only. Removal must target the RouterOS object .id — never a
+            // broad/unqualified remove, and never a name-based numbers fallback that could be ambiguous.
+            string? id = NullIfWhiteSpace(row.GetResponseFieldOrDefault(".id", null));
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                throw new InvalidOperationException(
+                    $"RouterOS object named '{name}' matched on {printCommand} but returned no usable .id; refusing unsafe removal.");
+            }
+
+            ITikCommand remove = connection.CreateCommand(removeCommand);
+            remove.AddParameter(".id", id);
+            await remove.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            logger.LogInformation(
+                "Issued {RemoveCommand} .id={ObjectId} for exact name {Name}",
+                removeCommand,
+                id,
+                name);
         }
     }
 

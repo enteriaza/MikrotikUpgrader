@@ -700,26 +700,43 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         // These stage-oriented unit tests exercise the shared stage machinery with an ACE identity
         // so the RouterOS 7 transition is intentionally skipped after a successful v6 stepping path.
+        IMikrotikConnectionFactory factory = connectionFactory
+            ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect in this test"));
+        IOptions<FirmwareUpgradeOptions> upgradeOptions = Options.Create(new FirmwareUpgradeOptions
+        {
+            Enabled = enabled,
+            AdvertisedBaseUrl = advertisedBaseUrl,
+            FetchTimeout = TimeSpan.FromSeconds(5),
+            ReconnectInterval = reconnectInterval ?? TimeSpan.FromMilliseconds(10),
+            RebootTimeout = effectiveRebootTimeout,
+            PostUpgradeVerifyTimeout = effectiveVerifyTimeout,
+            BackupFileReadyTimeout = TimeSpan.FromMilliseconds(100),
+            BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(20),
+        });
+        IOptions<FirmwareFilesOptions> firmwareFilesOptions =
+            Options.Create(new FirmwareFilesOptions { Path = root });
+        IOptions<MikroTikOptions> mikrotikOptions = Options.Create(new MikroTikOptions { Port = 8728 });
+
         return new RouterOsV6UpgradeExecutor(
             ops,
-            connectionFactory ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect in this test")),
+            factory,
             new UpgradePackageResolver(
                 new StaticFirmwarePackageCatalog(root),
-                Options.Create(new FirmwareFilesOptions { Path = root })),
+                firmwareFilesOptions),
             backup,
             new FixedRouterOsV7TargetProvider("7.23.8"),
-            Options.Create(new FirmwareUpgradeOptions
-            {
-                Enabled = enabled,
-                AdvertisedBaseUrl = advertisedBaseUrl,
-                FetchTimeout = TimeSpan.FromSeconds(5),
-                ReconnectInterval = reconnectInterval ?? TimeSpan.FromMilliseconds(10),
-                RebootTimeout = effectiveRebootTimeout,
-                PostUpgradeVerifyTimeout = effectiveVerifyTimeout,
-                BackupFileReadyTimeout = TimeSpan.FromMilliseconds(100),
-                BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(20),
-            }),
-            Options.Create(new MikroTikOptions { Port = 8728 }),
+            new LegacyFleetUpgradeAutomationCleanup(
+                ops,
+                NullLogger<LegacyFleetUpgradeAutomationCleanup>.Instance),
+            new RouterboardFirmwareUpgradeService(
+                ops,
+                factory,
+                upgradeOptions,
+                mikrotikOptions,
+                timeProvider ?? TimeProvider.System,
+                NullLogger<RouterboardFirmwareUpgradeService>.Instance),
+            upgradeOptions,
+            mikrotikOptions,
             timeProvider ?? TimeProvider.System,
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
@@ -856,6 +873,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         /// </summary>
         public string Identity { get; init; } = "ACE01.POP001.001.core";
 
+        public string RouterboardCurrentFirmware { get; init; } = "7.23.8";
+
+        public string RouterboardUpgradeFirmware { get; init; } = "7.23.8";
+
         public bool HangPostRebootReadUntilCancelled { get; init; }
 
         public TaskCompletionSource PostRebootReadStarted { get; } =
@@ -864,6 +885,20 @@ public sealed class RouterOsV6UpgradeExecutorTests
         public int PostRebootDeviceInfoCount { get; private set; }
 
         public int PostRebootPackageListCount { get; private set; }
+
+        public int RouterboardUpgradeCount { get; private set; }
+
+        public List<string> PresentScripts { get; init; } = [];
+
+        public List<string> PresentSchedulers { get; init; } = [];
+
+        public List<string> RemovalOrder { get; } = [];
+
+        public int SchedulerCountCalls { get; private set; }
+
+        public int ScriptCountCalls { get; private set; }
+
+        public Dictionary<string, long> FileSizes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         public IReadOnlyList<InstalledPackageInfo>? Installed { get; init; }
 
@@ -888,6 +923,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 Version = PostUpgradeVersion,
                 ArchitectureName = "mipsbe",
                 BoardName = "hEX PoE",
+                RouterboardCurrentFirmware = RouterboardCurrentFirmware,
+                RouterboardUpgradeFirmware = RouterboardUpgradeFirmware,
             };
         }
 
@@ -936,10 +973,12 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 return Task.FromResult<RouterFileInfo?>(null);
             }
 
-            long size = FetchReturnsMatchingSize || !fileName.EndsWith(".npk", StringComparison.OrdinalIgnoreCase)
-                ? 4
-                : 4;
-            return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, size));
+            if (FileSizes.TryGetValue(fileName, out long known))
+            {
+                return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, known));
+            }
+
+            return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, 4));
         }
 
         public Task WaitForFileAsync(
@@ -973,6 +1012,52 @@ public sealed class RouterOsV6UpgradeExecutorTests
         public Task RebootAsync(ITikConnection connection, CancellationToken cancellationToken = default)
         {
             RebootCalled = true;
+            return Task.CompletedTask;
+        }
+
+        public Task<int> CountSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default)
+        {
+            ScriptCountCalls++;
+            return Task.FromResult(PresentScripts.Count(n => n.Equals(scriptName, StringComparison.Ordinal)));
+        }
+
+        public Task RemoveSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default)
+        {
+            RemovalOrder.Add("script:" + scriptName);
+            PresentScripts.RemoveAll(n => n.Equals(scriptName, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        }
+
+        public Task<int> CountSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default)
+        {
+            SchedulerCountCalls++;
+            return Task.FromResult(PresentSchedulers.Count(n => n.Equals(schedulerName, StringComparison.Ordinal)));
+        }
+
+        public Task RemoveSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default)
+        {
+            RemovalOrder.Add("scheduler:" + schedulerName);
+            PresentSchedulers.RemoveAll(n => n.Equals(schedulerName, StringComparison.Ordinal));
+            return Task.CompletedTask;
+        }
+
+        public Task UpgradeRouterboardAsync(
+            ITikConnection connection,
+            CancellationToken cancellationToken = default)
+        {
+            RouterboardUpgradeCount++;
             return Task.CompletedTask;
         }
     }

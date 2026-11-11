@@ -77,10 +77,14 @@ public sealed class UpgradeLifecycleDeviceLogTests
             ScpPort = 22,
             ScpTimeout = TimeSpan.FromSeconds(5),
         };
+        IOptions<FirmwareUpgradeOptions> upgradeOptionsWrapper = Options.Create(upgradeOptions);
+        IOptions<FirmwareFilesOptions> firmwareFilesOptions =
+            Options.Create(new FirmwareFilesOptions { Path = firmwareRoot });
+        IOptions<MikroTikOptions> mikrotikOptions = Options.Create(new MikroTikOptions { Port = 8728 });
         DeviceBackupService backup = new(
             ops,
             new InMemoryFileTransfer(),
-            Options.Create(upgradeOptions),
+            upgradeOptionsWrapper,
             time,
             loggerFactory.CreateLogger<DeviceBackupService>());
 
@@ -89,11 +93,21 @@ public sealed class UpgradeLifecycleDeviceLogTests
             connections,
             new UpgradePackageResolver(
                 new StaticFirmwarePackageCatalog(firmwareRoot),
-                Options.Create(new FirmwareFilesOptions { Path = firmwareRoot })),
+                firmwareFilesOptions),
             backup,
             new FixedRouterOsV7TargetProvider(null),
-            Options.Create(upgradeOptions),
-            Options.Create(new MikroTikOptions { Port = 8728 }),
+            new LegacyFleetUpgradeAutomationCleanup(
+                ops,
+                loggerFactory.CreateLogger<LegacyFleetUpgradeAutomationCleanup>()),
+            new RouterboardFirmwareUpgradeService(
+                ops,
+                connections,
+                upgradeOptionsWrapper,
+                mikrotikOptions,
+                time,
+                loggerFactory.CreateLogger<RouterboardFirmwareUpgradeService>()),
+            upgradeOptionsWrapper,
+            mikrotikOptions,
             time,
             loggerFactory.CreateLogger<RouterOsV6UpgradeExecutor>());
 
@@ -403,6 +417,30 @@ public sealed class UpgradeLifecycleDeviceLogTests
             RebootCalled = true;
             return Task.CompletedTask;
         }
+
+        public Task<int> CountSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(0);
+
+        public Task RemoveSystemScriptsByNameAsync(
+            ITikConnection connection,
+            string scriptName,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task<int> CountSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(0);
+
+        public Task RemoveSchedulersByNameAsync(
+            ITikConnection connection,
+            string schedulerName,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 
     private sealed class InMemoryFileTransfer : IMikrotikFileTransferClient

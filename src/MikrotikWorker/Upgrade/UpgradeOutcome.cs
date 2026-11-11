@@ -36,6 +36,21 @@ public enum UpgradeOutcome
     /// Deliberate no-op — not a policy violation.
     /// </summary>
     SkippedStageNotApplicable = 16,
+
+    /// <summary>
+    /// Legacy router-side FleetUpgrade script/scheduler could not be removed or verified absent
+    /// before firmware mutation.
+    /// </summary>
+    LegacyFirmwareAutomationCleanupFailed = 17,
+
+    /// <summary>RouterBOARD upgrade command failed or assessment forbade a safe decision.</summary>
+    RouterboardUpgradeFailed = 18,
+
+    /// <summary>RouterBOARD reboot reconnect/verification window timed out.</summary>
+    RouterboardUpgradeTimedOut = 19,
+
+    /// <summary>Post-RouterBOARD-reboot verification failed (firmware or RouterOS identity).</summary>
+    RouterboardVerificationFailed = 20,
 }
 
 /// <summary>
@@ -50,8 +65,14 @@ public static class UpgradeCompletedStages
     /// <summary>v6 stepping completed and post-reboot verification succeeded.</summary>
     public const string V6Stepping = "v6-stepping";
 
-    /// <summary>RouterOS 7 stage completed and verified, or device already at/above the v7 target under FullUpgrade.</summary>
+    /// <summary>RouterOS 7 package stage completed and verified (pre–RouterBOARD stage).</summary>
     public const string RouterOs7 = "routeros7";
+
+    /// <summary>
+    /// RouterBOARD assessment completed and any required upgrade/reboot verified
+    /// (or explicitly skipped as not required). Terminal FullUpgrade success stage.
+    /// </summary>
+    public const string RouterboardFirmware = "routerboard-firmware";
 }
 
 public sealed class UpgradeExecutionResult

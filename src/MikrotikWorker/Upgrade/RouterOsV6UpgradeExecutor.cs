@@ -28,6 +28,8 @@ internal sealed class RouterOsV6UpgradeExecutor(
     IUpgradePackageResolver packageResolver,
     IDeviceBackupService backupService,
     IRouterOsV7TargetProvider v7TargetProvider,
+    LegacyFleetUpgradeAutomationCleanup legacyFleetUpgradeAutomationCleanup,
+    RouterboardFirmwareUpgradeService routerboardFirmwareUpgradeService,
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     IOptions<MikroTikOptions> mikroTikOptions,
     TimeProvider timeProvider,
@@ -93,6 +95,25 @@ internal sealed class RouterOsV6UpgradeExecutor(
         logger.LogInformation(
             "Initial RouterOS version: {RouterOsVersion}",
             deviceInfo.Version);
+
+        // Connection-time safety: remove legacy router-side FleetUpgrade automation before any
+        // firmware mutation (applies to FullUpgrade and V6SteppingOnly, including ACE/BR).
+        LegacyFleetUpgradeCleanupResult legacyCleanup = await legacyFleetUpgradeAutomationCleanup
+            .CleanupAsync(connection, job, cancellationToken)
+            .ConfigureAwait(false);
+        if (!legacyCleanup.Succeeded)
+        {
+            return WithMode(
+                new UpgradeExecutionResult
+                {
+                    Outcome = UpgradeOutcome.LegacyFirmwareAutomationCleanupFailed,
+                    Detail = legacyCleanup.FailureReason,
+                    PostUpgradeVersion = deviceInfo.Version,
+                    PostUpgradeArchitecture = deviceInfo.ArchitectureName,
+                    CompletedStage = UpgradeCompletedStages.None,
+                },
+                executionMode);
+        }
 
         bool needsV6Stepping = currentVersion.IsV6 && currentVersion < stepping;
         logger.LogInformation(
@@ -339,17 +360,6 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 live = null;
             }
 
-            if (stage2.LiveConnection is not null)
-            {
-                try
-                {
-                    stage2.LiveConnection.Dispose();
-                }
-                catch
-                {
-                }
-            }
-
             if (stage2.Execution.Outcome == UpgradeOutcome.UpgradeSucceeded)
             {
                 logger.LogInformation(
@@ -359,20 +369,98 @@ internal sealed class RouterOsV6UpgradeExecutor(
             }
 
             bool stage2Verified = stage2.Execution.Outcome == UpgradeOutcome.UpgradeSucceeded;
-            return WithMode(
-                new UpgradeExecutionResult
+            if (!stage2Verified)
+            {
+                stage2.LiveConnection?.Dispose();
+                return WithMode(
+                    new UpgradeExecutionResult
+                    {
+                        Outcome = stage2.Execution.Outcome,
+                        Detail = stage2.Execution.Detail,
+                        PostUpgradeVersion = stage2.Execution.PostUpgradeVersion ?? workingDevice.Version,
+                        PostUpgradeArchitecture =
+                            stage2.PostDeviceInfo?.ArchitectureName ?? workingDevice.ArchitectureName,
+                        RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
+                    },
+                    executionMode,
+                    completedStage: completedAfterV6);
+            }
+
+            // Post-v7: RouterBOARD assessment/upgrade before FullUpgrade success.
+            ITikConnection? postV7 = stage2.LiveConnection;
+            bool disposePostV7 = postV7 is not null;
+            try
+            {
+                if (postV7 is null)
                 {
-                    Outcome = stage2.Execution.Outcome,
-                    Detail = stage2.Execution.Detail,
-                    PostUpgradeVersion = stage2.Execution.PostUpgradeVersion ?? workingDevice.Version,
-                    PostUpgradeArchitecture =
-                        stage2.PostDeviceInfo?.ArchitectureName ?? workingDevice.ArchitectureName,
-                    RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
-                },
-                executionMode,
-                completedStage: stage2Verified
-                    ? UpgradeCompletedStages.RouterOs7
-                    : completedAfterV6);
+                    MikrotikConnectionOptions reconnectOptions = new()
+                    {
+                        Host = job.RouterIp.ToString(),
+                        Username = username,
+                        Password = password,
+                        Port = mikroTikOptions.Value.Port,
+                    };
+                    postV7 = await connectionFactory
+                        .CreateAsync(reconnectOptions, cancellationToken)
+                        .ConfigureAwait(false);
+                    disposePostV7 = true;
+                }
+
+                MikrotikDeviceInfo postV7Device = stage2.PostDeviceInfo
+                    ?? await routerOperations
+                        .ReadDeviceInfoAsync(postV7, job.RouterIp.ToString(), cancellationToken)
+                        .ConfigureAwait(false);
+
+                logger.LogInformation("Post-RouterOS-7 backup before RouterBOARD assessment starting");
+                DeviceBackupResult postV7Backup = await backupService
+                    .CreatePreUpgradeBackupAsync(postV7, job, postV7Device, username, password, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!postV7Backup.Succeeded)
+                {
+                    return WithMode(
+                        new UpgradeExecutionResult
+                        {
+                            Outcome = UpgradeOutcome.BackupFailed,
+                            Detail = postV7Backup.FailureReason ?? "Post-RouterOS-7 backup before RouterBOARD assessment failed.",
+                            PostUpgradeVersion = postV7Device.Version,
+                            PostUpgradeArchitecture = postV7Device.ArchitectureName,
+                            RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
+                        },
+                        executionMode,
+                        completedStage: UpgradeCompletedStages.RouterOs7);
+                }
+
+                MikrotikDeviceInfo beforeRb = await routerOperations
+                    .ReadDeviceInfoAsync(postV7, job.RouterIp.ToString(), cancellationToken)
+                    .ConfigureAwait(false);
+
+                UpgradeExecutionResult rbResult = await routerboardFirmwareUpgradeService
+                    .ExecuteAsync(
+                        postV7,
+                        job,
+                        beforeRb,
+                        username,
+                        password,
+                        priorRebootInitiated: rebootInitiated || stage2.Execution.RebootInitiated,
+                        completedStageBefore: UpgradeCompletedStages.RouterOs7,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                return WithMode(rbResult, executionMode);
+            }
+            finally
+            {
+                if (disposePostV7 && postV7 is not null)
+                {
+                    try
+                    {
+                        postV7.Dispose();
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
         }
         finally
         {
