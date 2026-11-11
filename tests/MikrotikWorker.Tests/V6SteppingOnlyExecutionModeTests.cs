@@ -712,6 +712,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 mikrotikOptions,
                 clock,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
+            new PassingOspfMigrationService(),
             upgradeOptions,
             mikrotikOptions,
             clock,

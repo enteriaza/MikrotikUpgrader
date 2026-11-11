@@ -502,7 +502,7 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task RouterOs7AtTarget_SkipsUpgrade()
+    public async Task RouterOs7AtTarget_ReconcilesOspfWithoutPackageStage()
     {
         StageTrackingOps ops = new("AP01.POP001.001.access") { InitialVersion = "7.23.8" };
         CountingBackup backup = new();
@@ -519,8 +519,10 @@ public sealed class TwoStageUpgradeWorkflowTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.SkippedAlreadyAtTarget, result.Outcome);
-        Assert.Equal(0, backup.CallCount);
+        // Already on ROS7 target: OSPF reconcile + backup + RouterBOARD; no package fetch/reboot.
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal(1, backup.CallCount);
         Assert.Equal(0, ops.RebootCount);
         Assert.Empty(ops.FetchedFiles);
     }
@@ -715,7 +717,7 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.RouterboardUpgradeFailed, result.Outcome);
-        Assert.Equal(UpgradeCompletedStages.RouterOs7, result.CompletedStage);
+        Assert.Equal(UpgradeCompletedStages.OspfMigration, result.CompletedStage);
         Assert.Equal(0, ops.RouterboardUpgradeCount);
         Assert.Equal(1, ops.RebootCount);
         Assert.DoesNotContain(
@@ -814,6 +816,7 @@ public sealed class TwoStageUpgradeWorkflowTests
                 mikrotikOptions,
                 TimeProvider.System,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
+            new PassingOspfMigrationService(),
             upgradeOptions,
             mikrotikOptions,
             TimeProvider.System,

@@ -15,6 +15,12 @@ public sealed class FirmwareUpgradeOptions
     public bool Enabled { get; set; }
 
     /// <summary>
+    /// Explicit lab target pin for OSPF-only recovery tooling (exact IP + exact identity).
+    /// Empty by default; unused by the normal upgrade executor.
+    /// </summary>
+    public OspfLabTargetOptions OspfLabTarget { get; set; } = new();
+
+    /// <summary>
     /// HTTP base URL reachable from routers, including the <c>/firmware_files</c> prefix.
     /// Example: <c>http://198.18.0.1:8080/firmware_files</c>. Must not be localhost.
     /// </summary>
@@ -69,4 +75,16 @@ public sealed class FirmwareUpgradeOptions
             ? Path.GetFullPath(BackupDirectory)
             : Path.GetFullPath(Path.Combine(root, BackupDirectory));
     }
+}
+
+/// <summary>
+/// Exact management IPv4 + RouterOS identity pin for OSPF lab recovery runners.
+/// </summary>
+public sealed class OspfLabTargetOptions
+{
+    /// <summary>Exact management IPv4 of the single lab router.</summary>
+    public string RouterIp { get; set; } = string.Empty;
+
+    /// <summary>Exact RouterOS identity (case-sensitive ordinal match).</summary>
+    public string RouterIdentity { get; set; } = string.Empty;
 }

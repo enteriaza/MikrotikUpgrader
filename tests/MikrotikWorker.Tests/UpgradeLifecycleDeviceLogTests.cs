@@ -106,6 +106,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
                 mikrotikOptions,
                 time,
                 loggerFactory.CreateLogger<RouterboardFirmwareUpgradeService>()),
+            new PassingOspfMigrationService(),
             upgradeOptionsWrapper,
             mikrotikOptions,
             time,
@@ -192,11 +193,14 @@ public sealed class UpgradeLifecycleDeviceLogTests
         Assert.True(ops.RebootCalled);
         Assert.True(ops.FetchCalled);
 
-        await deviceLogWriter.StopAsync(CancellationToken.None);
-        deviceLogWriter.Dispose();
+        // Flush Serilog (including its async buffer) BEFORE stopping DeviceLogWriter.
+        // Otherwise late DeviceLogSink.Emit calls are dropped once _stopped is set, which
+        // intermittently omits "Final upgrade outcome" under suite load.
         await Log.CloseAndFlushAsync();
         await serilogLogger.DisposeAsync();
         Log.Logger = Serilog.Core.Logger.None;
+        await deviceLogWriter.StopAsync(CancellationToken.None);
+        deviceLogWriter.Dispose();
 
         string deviceLogPath = Path.Combine(deviceLogWriter.DeviceLogDirectory, expectedDeviceLogKey);
         Assert.True(File.Exists(deviceLogPath), $"Missing device log at {deviceLogPath}");

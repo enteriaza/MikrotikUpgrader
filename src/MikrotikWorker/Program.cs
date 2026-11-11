@@ -34,6 +34,16 @@ try
         return;
     }
 
+    if (MikrotikWorker.Upgrade.Ospf.OspfOnlyLabRecoveryRunner.IsRequested(args))
+    {
+        Log.Information("Running OSPF-only lab recovery (no firmware upgrade stages)");
+        int exitCode = await MikrotikWorker.Upgrade.Ospf.OspfOnlyLabRecoveryRunner
+            .RunAsync(args)
+            .ConfigureAwait(false);
+        Environment.ExitCode = exitCode;
+        return;
+    }
+
     WebApplicationBuilder builder = MikrotikWorkerHost.CreateApplicationBuilder(args);
     MikrotikWorkerHost.ConfigureSerilog(builder);
 

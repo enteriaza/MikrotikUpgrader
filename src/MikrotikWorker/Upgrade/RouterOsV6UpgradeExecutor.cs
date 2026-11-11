@@ -5,6 +5,7 @@ using MikrotikWorker.Configuration;
 using MikrotikWorker.Logging;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
+using MikrotikWorker.Upgrade.Ospf;
 using tik4net;
 
 namespace MikrotikWorker.Upgrade;
@@ -30,6 +31,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
     IRouterOsV7TargetProvider v7TargetProvider,
     LegacyFleetUpgradeAutomationCleanup legacyFleetUpgradeAutomationCleanup,
     RouterboardFirmwareUpgradeService routerboardFirmwareUpgradeService,
+    IOspfMigrationService ospfMigrationService,
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     IOptions<MikroTikOptions> mikroTikOptions,
     TimeProvider timeProvider,
@@ -127,6 +129,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
         bool disposeLive = false;
         bool rebootInitiated = false;
         bool v6SteppingVerified = false;
+        bool deleteOspfPlanInFinally = false;
         try
         {
             MikrotikDeviceInfo workingDevice = deviceInfo;
@@ -212,10 +215,51 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 ? UpgradeCompletedStages.V6Stepping
                 : UpgradeCompletedStages.None;
 
+            // Use the same identity string that drove classification (post re-read).
+            string liveIdentity = classification.Identity ?? workingDevice.Identity ?? string.Empty;
+
+            bool willEnterV7Stage =
+                executionMode != UpgradeExecutionMode.V6SteppingOnly
+                && classification.ShouldUpgradeToV7;
+
+            OspfMigrationPlan? ospfPlan = null;
+            OspfGateResult ospfGate = await ospfMigrationService
+                .CaptureAndValidateAsync(
+                    live,
+                    job,
+                    liveIdentity,
+                    workingDevice.Version,
+                    workingDevice.ArchitectureName,
+                    persistPlan: willEnterV7Stage,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!ospfGate.Succeeded)
+            {
+                ospfMigrationService.DeletePlan(job);
+                return WithMode(
+                    new UpgradeExecutionResult
+                    {
+                        Outcome = ospfGate.FailureOutcome ?? UpgradeOutcome.OspfPlanValidationFailed,
+                        Detail = ospfGate.Detail,
+                        PostUpgradeVersion = workingDevice.Version,
+                        PostUpgradeArchitecture = workingDevice.ArchitectureName,
+                        RebootInitiated = rebootInitiated,
+                        CompletedStage = completedAfterV6,
+                    },
+                    executionMode);
+            }
+
+            ospfPlan = ospfGate.Plan;
+            // Persist only when the v7 stage may run; always delete on every terminal path
+            // (including cancellation) via finally when a plan may exist on disk.
+            deleteOspfPlanInFinally = willEnterV7Stage;
+
             // Stage cap is independent of identity policy and must be checked in the executor
             // before any second-stage (RouterOS 7) activity — including v7 target snapshot capture.
             if (executionMode == UpgradeExecutionMode.V6SteppingOnly)
             {
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
                 return CompleteV6SteppingOnly(
                     job,
                     workingDevice,
@@ -226,6 +270,8 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
             if (!classification.ShouldUpgradeToV7)
             {
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
                 logger.LogInformation(
                     "RouterOS 7 upgrade skipped intentionally. DeviceType={DeviceType}, Reason={Reason}",
                     classification.DeviceType,
@@ -260,6 +306,8 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
             if (v7Snapshot is null)
             {
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
                 return new UpgradeExecutionResult
                 {
                     Outcome = UpgradeOutcome.TargetUnavailable,
@@ -274,6 +322,8 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
             if (!RouterOsVersion.TryParse(workingDevice.Version, out RouterOsVersion workingVersion))
             {
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
                 return PolicyBlock(
                     $"Post-step RouterOS version '{workingDevice.Version}' could not be parsed.",
                     executionMode);
@@ -282,23 +332,79 @@ internal sealed class RouterOsV6UpgradeExecutor(
             int cmpToV7 = workingVersion.CompareTo(v7Snapshot.Version);
             if (cmpToV7 == 0)
             {
+                // Already on ROS7 target: reconcile OSPF without package reboot, then RouterBOARD path.
                 logger.LogInformation(
-                    "Device already at RouterOS 7 target {Target}; no upgrade required",
+                    "Device already at RouterOS 7 target {Target}; reconciling OSPF without package stage",
                     v7Snapshot.VersionText);
-                return new UpgradeExecutionResult
+
+                // Verified backup before OSPF config mutation (and before any RouterBOARD firmware mutation).
+                MikrotikDeviceInfo alreadyV7Device = await routerOperations
+                    .ReadDeviceInfoAsync(live, job.RouterIp.ToString(), cancellationToken)
+                    .ConfigureAwait(false);
+
+                DeviceBackupResult alreadyV7Backup = await backupService
+                    .CreatePreUpgradeBackupAsync(live, job, alreadyV7Device, username, password, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!alreadyV7Backup.Succeeded)
                 {
-                    Outcome = UpgradeOutcome.SkippedAlreadyAtTarget,
-                    PostUpgradeVersion = workingDevice.Version,
-                    PostUpgradeArchitecture = workingDevice.ArchitectureName,
-                    RebootInitiated = rebootInitiated,
-                    ExecutionMode = executionMode,
-                    // Already at v7 target — no stage was performed this job; do not claim routeros7 completion.
-                    CompletedStage = UpgradeCompletedStages.None,
-                };
+                    ospfMigrationService.DeletePlan(job);
+                    deleteOspfPlanInFinally = false;
+                    return WithMode(
+                        new UpgradeExecutionResult
+                        {
+                            Outcome = UpgradeOutcome.BackupFailed,
+                            Detail = alreadyV7Backup.FailureReason ?? "Pre-OSPF backup failed on already-v7 device.",
+                            PostUpgradeVersion = alreadyV7Device.Version,
+                            PostUpgradeArchitecture = alreadyV7Device.ArchitectureName,
+                            RebootInitiated = rebootInitiated,
+                            CompletedStage = UpgradeCompletedStages.None,
+                        },
+                        executionMode);
+                }
+
+                OspfApplyGateResult alreadyV7Ospf = await ospfMigrationService
+                    .ApplyAndVerifyAsync(
+                        live,
+                        job,
+                        alreadyV7Device.Identity ?? workingDevice.Identity ?? string.Empty,
+                        ospfPlan,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
+                if (!alreadyV7Ospf.Succeeded)
+                {
+                    return WithMode(
+                        new UpgradeExecutionResult
+                        {
+                            Outcome = alreadyV7Ospf.FailureOutcome,
+                            Detail = alreadyV7Ospf.Detail,
+                            PostUpgradeVersion = alreadyV7Device.Version,
+                            PostUpgradeArchitecture = alreadyV7Device.ArchitectureName,
+                            RebootInitiated = rebootInitiated,
+                            CompletedStage = UpgradeCompletedStages.None,
+                        },
+                        executionMode);
+                }
+
+                UpgradeExecutionResult alreadyV7Rb = await routerboardFirmwareUpgradeService
+                    .ExecuteAsync(
+                        live,
+                        job,
+                        alreadyV7Device,
+                        username,
+                        password,
+                        priorRebootInitiated: rebootInitiated,
+                        completedStageBefore: UpgradeCompletedStages.OspfMigration,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return WithMode(alreadyV7Rb, executionMode);
             }
 
             if (cmpToV7 > 0)
             {
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
                 logger.LogInformation(
                     "Device RouterOS {Current} is newer than target {Target}; downgrade is not performed",
                     workingVersion,
@@ -372,6 +478,8 @@ internal sealed class RouterOsV6UpgradeExecutor(
             if (!stage2Verified)
             {
                 stage2.LiveConnection?.Dispose();
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
                 return WithMode(
                     new UpgradeExecutionResult
                     {
@@ -386,7 +494,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     completedStage: completedAfterV6);
             }
 
-            // Post-v7: RouterBOARD assessment/upgrade before FullUpgrade success.
+            // Post-v7: OSPF reconcile → backup → RouterBOARD.
             ITikConnection? postV7 = stage2.LiveConnection;
             bool disposePostV7 = postV7 is not null;
             try
@@ -411,6 +519,34 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         .ReadDeviceInfoAsync(postV7, job.RouterIp.ToString(), cancellationToken)
                         .ConfigureAwait(false);
 
+                OspfApplyGateResult ospfApply = await ospfMigrationService
+                    .ApplyAndVerifyAsync(
+                        postV7,
+                        job,
+                        postV7Device.Identity ?? workingDevice.Identity ?? string.Empty,
+                        ospfPlan,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!ospfApply.Succeeded)
+                {
+                    ospfMigrationService.DeletePlan(job);
+                    deleteOspfPlanInFinally = false;
+                    return WithMode(
+                        new UpgradeExecutionResult
+                        {
+                            Outcome = ospfApply.FailureOutcome,
+                            Detail = ospfApply.Detail,
+                            PostUpgradeVersion = postV7Device.Version,
+                            PostUpgradeArchitecture = postV7Device.ArchitectureName,
+                            RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
+                            CompletedStage = UpgradeCompletedStages.RouterOs7,
+                        },
+                        executionMode);
+                }
+
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
+
                 logger.LogInformation("Post-RouterOS-7 backup before RouterBOARD assessment starting");
                 DeviceBackupResult postV7Backup = await backupService
                     .CreatePreUpgradeBackupAsync(postV7, job, postV7Device, username, password, cancellationToken)
@@ -427,7 +563,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                             RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
                         },
                         executionMode,
-                        completedStage: UpgradeCompletedStages.RouterOs7);
+                        completedStage: UpgradeCompletedStages.OspfMigration);
                 }
 
                 MikrotikDeviceInfo beforeRb = await routerOperations
@@ -442,7 +578,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         username,
                         password,
                         priorRebootInitiated: rebootInitiated || stage2.Execution.RebootInitiated,
-                        completedStageBefore: UpgradeCompletedStages.RouterOs7,
+                        completedStageBefore: UpgradeCompletedStages.OspfMigration,
                         cancellationToken)
                     .ConfigureAwait(false);
 
@@ -464,6 +600,17 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
         finally
         {
+            if (deleteOspfPlanInFinally)
+            {
+                try
+                {
+                    ospfMigrationService.DeletePlan(job);
+                }
+                catch
+                {
+                }
+            }
+
             if (disposeLive && live is not null && !ReferenceEquals(live, connection))
             {
                 try

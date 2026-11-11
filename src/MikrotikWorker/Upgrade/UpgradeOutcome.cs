@@ -51,6 +51,18 @@ public enum UpgradeOutcome
 
     /// <summary>Post-RouterBOARD-reboot verification failed (firmware or RouterOS identity).</summary>
     RouterboardVerificationFailed = 20,
+
+    /// <summary>OSPF configuration could not be captured from the router.</summary>
+    OspfCaptureFailed = 21,
+
+    /// <summary>OSPF migration plan failed fleet-policy validation before v7 mutation.</summary>
+    OspfPlanValidationFailed = 22,
+
+    /// <summary>OSPF v7 reconciliation/apply failed.</summary>
+    OspfMigrationApplyFailed = 23,
+
+    /// <summary>Post-apply OSPF configuration verification failed.</summary>
+    OspfMigrationVerificationFailed = 24,
 }
 
 /// <summary>
@@ -67,6 +79,11 @@ public static class UpgradeCompletedStages
 
     /// <summary>RouterOS 7 package stage completed and verified (pre–RouterBOARD stage).</summary>
     public const string RouterOs7 = "routeros7";
+
+    /// <summary>
+    /// OSPF migration applied and configuration-verified after RouterOS 7 package verification.
+    /// </summary>
+    public const string OspfMigration = "ospf-migration";
 
     /// <summary>
     /// RouterBOARD assessment completed and any required upgrade/reboot verified

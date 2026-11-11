@@ -98,7 +98,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
     [Fact]
     public async Task V7Device_AtTarget_IsNeverModified()
     {
-        TrackingOps ops = new() { Identity = "AP01.POP001.001.access" };
+        TrackingOps ops = new()
+        {
+            Identity = "AP01.POP001.001.access",
+            PostUpgradeVersion = "7.23.8",
+        };
         RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, new SucceedingBackup(), enabled: true);
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
@@ -110,6 +114,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 Version = "7.23.8",
                 ArchitectureName = "mipsbe",
                 BoardName = "hEX PoE",
+                RouterboardCurrentFirmware = "7.23.8",
+                RouterboardUpgradeFirmware = "7.23.8",
             },
             CreateAssessment(DeviceAssessmentStatus.AlreadyAtTarget, RouterOsVersionClassification.RouterOsV7OrLater),
             "admin",
@@ -117,7 +123,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.SkippedAlreadyAtTarget, result.Outcome);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
         Assert.False(ops.FetchCalled);
         Assert.False(ops.RebootCalled);
     }
@@ -735,6 +743,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 mikrotikOptions,
                 timeProvider ?? TimeProvider.System,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
+            new PassingOspfMigrationService(),
             upgradeOptions,
             mikrotikOptions,
             timeProvider ?? TimeProvider.System,
