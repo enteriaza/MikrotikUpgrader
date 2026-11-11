@@ -328,11 +328,11 @@ internal sealed class DeviceCompatibilityAssessor(
             int cmp = current.CompareTo(upgrade);
             if (cmp == 0)
             {
-                findings.Add(new(
-                    AssessmentFindingSeverity.Info,
-                    "routerboard.current",
-                    "RouterBOARD current firmware matches upgrade firmware."));
-                return RouterboardFirmwareStatus.Current;
+            findings.Add(new(
+                AssessmentFindingSeverity.Info,
+                "routerboard.current",
+                "RouterBOOT current-firmware matches upgrade-firmware (loader versions; not RouterOS)."));
+            return RouterboardFirmwareStatus.Current;
             }
 
             if (cmp < 0)
@@ -340,14 +340,14 @@ internal sealed class DeviceCompatibilityAssessor(
                 findings.Add(new(
                     AssessmentFindingSeverity.Info,
                     "routerboard.upgrade_available",
-                    $"RouterBOARD firmware upgrade appears available (current {current}, upgrade {upgrade}). Do not run /system/routerboard/upgrade."));
+                    $"RouterBOOT upgrade-firmware ({upgrade}) is newer than current-firmware ({current}). These are bootloader versions, not RouterOS. Do not run /system/routerboard/upgrade."));
                 return RouterboardFirmwareStatus.UpgradeAvailable;
             }
 
             findings.Add(new(
                 AssessmentFindingSeverity.Info,
                 "routerboard.current_ahead",
-                $"RouterBOARD current firmware ({current}) is newer than the reported upgrade firmware ({upgrade}). No RouterBOARD upgrade is indicated."));
+                $"RouterBOOT current-firmware ({current}) is newer than upgrade-firmware ({upgrade}). Field values are preserved raw; no RouterBOARD upgrade is indicated."));
             return RouterboardFirmwareStatus.Current;
         }
 

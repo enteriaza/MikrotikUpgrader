@@ -292,10 +292,14 @@ public sealed class PackageCompatibilityWorkflowGuardTests
 
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([
-                new("routeros-mipsbe", RouterOsVersion.Parse(CurrentVersion).ToString(), false),
+            CancellationToken cancellationToken = default)
+        {
+            RouterOsVersion ver = RouterOsVersion.Parse(CurrentVersion);
+            string main = ver.IsV7OrLater ? "routeros" : "routeros-mipsbe";
+            return Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([
+                new(main, ver.ToString(), false),
             ]);
+        }
 
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,

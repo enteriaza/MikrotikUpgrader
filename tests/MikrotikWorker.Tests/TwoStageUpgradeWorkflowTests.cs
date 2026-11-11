@@ -411,6 +411,55 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
+    public async Task AlreadyAtV6Stepping_FullUpgrade_SkipsV6Fetch_VerifiesV7PackageName()
+    {
+        // Live regression: 6.49.23 Unknown → FullUpgrade → routeros/7.23.8 (not routeros-mipsbe).
+        StageTrackingOps ops = new("Mikrotik")
+        {
+            VersionsAfterReboot = ["7.23.8"],
+            InitialVersion = "6.49.23",
+        };
+        CountingBackup backup = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "Mikrotik",
+                version: "7.23.8",
+                architecture: "mipsbe",
+                boardName: "hEX PoE"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "Mikrotik",
+                version: "6.49.23",
+                architecture: "mipsbe",
+                boardName: "hEX PoE"),
+            CreateJob(),
+            CreateDevice("Mikrotik", "6.49.23"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "7.23.8"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterOs7, result.CompletedStage);
+        Assert.Equal(UpgradeExecutionMode.FullUpgrade, result.ExecutionMode);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal("mipsbe", result.PostUpgradeArchitecture);
+        Assert.Equal(1, backup.CallCount);
+        Assert.Equal(1, ops.RebootCount);
+        Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
+        Assert.Contains(ops.FetchedFiles, f => f.Equals("routeros-7.23.8-mipsbe.npk", StringComparison.Ordinal));
+        Assert.Equal(
+            "routeros",
+            (await ops.ListInstalledPackagesAsync(
+                FakeMikrotikConnections.CreateFullyPopulated(),
+                CancellationToken.None))[0].Name);
+    }
+
+    [Fact]
     public async Task RouterOs7Older_UpgradesDirectlyWithoutV6Packages()
     {
         StageTrackingOps ops = new("AP01.POP001.001.access")
@@ -534,7 +583,7 @@ public sealed class TwoStageUpgradeWorkflowTests
         };
         CountingBackup backup = new();
         string root = CreateFirmwareRootWithV6AndV7();
-        File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-7.24.0.npk"), [9, 9, 9, 9]);
+        File.WriteAllBytes(Path.Combine(root, "routeros-7.24.0-mipsbe.npk"), [9, 9, 9, 9]);
         ScriptedMikrotikConnectionFactory reconnect = new(_ =>
             FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"));
         RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect, v7TargetProvider: v7);
@@ -559,7 +608,7 @@ public sealed class TwoStageUpgradeWorkflowTests
     {
         string root = Directory.CreateTempSubdirectory("twostage-fw-").FullName;
         File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4]);
-        File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-7.23.8.npk"), [5, 6, 7, 8]);
+        File.WriteAllBytes(Path.Combine(root, "routeros-7.23.8-mipsbe.npk"), [5, 6, 7, 8]);
         return root;
     }
 
@@ -732,8 +781,11 @@ public sealed class TwoStageUpgradeWorkflowTests
             string numeric = RouterOsVersion.TryParse(version, out RouterOsVersion parsed)
                 ? parsed.ToString()
                 : version;
+            string mainName = RouterOsVersion.TryParse(version, out RouterOsVersion ver) && ver.IsV7OrLater
+                ? "routeros"
+                : "routeros-mipsbe";
             return Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([
-                new("routeros-mipsbe", numeric, false),
+                new(mainName, numeric, false),
             ]);
         }
 

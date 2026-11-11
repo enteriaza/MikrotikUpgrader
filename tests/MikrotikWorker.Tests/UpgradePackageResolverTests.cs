@@ -186,6 +186,39 @@ public sealed class UpgradePackageResolverTests
         Assert.False(new InstalledPackageInfo("routeros-mipsbe", "6.49.23", false).IsBundledComponent);
     }
 
+    [Fact]
+    public void Resolve_V6Target_ExpectedInstalledRemainsRouterOsMipsbe()
+    {
+        UpgradePackageResolution result = Resolve(
+            "mipsbe",
+            [Indep("routeros-mipsbe", "6.49.19")],
+            "routeros-mipsbe-6.49.23.npk");
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.Equal("routeros-mipsbe", result.Packages[0].InstalledPackageName);
+        Assert.Equal("routeros-mipsbe", result.Packages[0].ExpectedInstalledPackageName);
+    }
+
+    [Fact]
+    public void Resolve_V7TargetFromV6Inventory_ExpectedInstalledIsRouterOs()
+    {
+        string root = Directory.CreateTempSubdirectory("fw-v7-resolve-").FullName;
+        File.WriteAllBytes(Path.Combine(root, "routeros-7.23.8-mipsbe.npk"), [1, 2, 3]);
+        UpgradePackageResolver resolver = new(
+            new StaticFirmwarePackageCatalog(root),
+            Options.Create(new FirmwareFilesOptions { Path = root }));
+
+        UpgradePackageResolution result = resolver.Resolve(
+            "mipsbe",
+            [Indep("routeros-mipsbe", "6.49.23")],
+            RouterOsVersion.Parse("7.23.8"));
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        Assert.Equal("routeros-mipsbe", result.Packages[0].InstalledPackageName);
+        Assert.Equal("routeros", result.Packages[0].ExpectedInstalledPackageName);
+        Assert.Equal("routeros-7.23.8-mipsbe.npk", result.Packages[0].CatalogPackage.FileName);
+    }
+
     private static InstalledPackageInfo Indep(string name, string version) =>
         new(name, version, Disabled: false, Bundle: null);
 

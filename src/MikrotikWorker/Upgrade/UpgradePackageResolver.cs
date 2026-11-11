@@ -3,8 +3,15 @@ using MikrotikWorker.MikroTik;
 
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// A catalogue package selected for upgrade.
+/// <see cref="InstalledPackageName"/> is the pre-upgrade independent package that drove selection.
+/// <see cref="ExpectedInstalledPackageName"/> is the name RouterOS must report after the upgrade
+/// (version-aware for the main package: v6 <c>routeros-{arch}</c>, v7+ <c>routeros</c>).
+/// </summary>
 internal sealed record ResolvedUpgradePackage(
     string InstalledPackageName,
+    string ExpectedInstalledPackageName,
     FirmwarePackageInfo CatalogPackage,
     string RelativeUrlPath);
 
@@ -89,7 +96,7 @@ internal sealed class UpgradePackageResolver(
         }
 
         List<InstalledPackageInfo> mainPackages = independentlyInstalled
-            .Where(static p => IsMainRouterOsPackage(p.Name))
+            .Where(static p => RouterOsInstalledPackageNaming.IsMainRouterOsPackage(p.Name))
             .ToList();
 
         if (mainPackages.Count == 0)
@@ -134,8 +141,14 @@ internal sealed class UpgradePackageResolver(
             }
 
             FirmwarePackageInfo match = matches[0];
+            string expectedInstalled = RouterOsInstalledPackageNaming.ExpectedInstalledPackageName(
+                match.PackageName,
+                targetVersion,
+                normalizedArch,
+                match.Architecture);
             selected.Add(new ResolvedUpgradePackage(
                 installed.Name,
+                expectedInstalled,
                 match,
                 FirmwarePackageCatalog.GetRelativeUrlPath(firmwareRoot, match.FullPath)));
         }
@@ -172,22 +185,8 @@ internal sealed class UpgradePackageResolver(
         return name;
     }
 
-    internal static bool IsMainRouterOsPackage(string installedName)
-    {
-        string name = installedName.Trim().ToLowerInvariant();
-        if (name.Equals("routeros", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        if (!name.StartsWith("routeros-", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        string suffix = name["routeros-".Length..];
-        return FirmwarePackageFileNameParser.IsArchitectureToken(suffix);
-    }
+    internal static bool IsMainRouterOsPackage(string installedName) =>
+        RouterOsInstalledPackageNaming.IsMainRouterOsPackage(installedName);
 
     internal static bool IsSystemPackage(string installedName) =>
         installedName.Trim().Equals("system", StringComparison.OrdinalIgnoreCase);

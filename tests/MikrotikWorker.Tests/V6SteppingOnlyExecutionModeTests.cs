@@ -602,7 +602,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
     {
         string root = Directory.CreateTempSubdirectory("v6only-fw-").FullName;
         File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4]);
-        File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-7.23.8.npk"), [5, 6, 7, 8]);
+        File.WriteAllBytes(Path.Combine(root, "routeros-7.23.8-mipsbe.npk"), [5, 6, 7, 8]);
         return new CountingPackageResolver(root);
     }
 
@@ -833,12 +833,14 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 ? parsed.ToString()
                 : version;
 
+            bool isV7 = RouterOsVersion.TryParse(version, out RouterOsVersion ver) && ver.IsV7OrLater;
+            string mainName = isV7 ? "routeros" : "routeros-mipsbe";
             List<InstalledPackageInfo> packages =
             [
-                new("routeros-mipsbe", numeric, false),
+                new(mainName, numeric, false),
             ];
 
-            if (IncludeLabBundledInventory)
+            if (IncludeLabBundledInventory && !isV7)
             {
                 foreach (string component in LabBundledComponents)
                 {
@@ -846,6 +848,10 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 }
 
                 LastBundledComponentCount = LabBundledComponents.Length;
+            }
+            else
+            {
+                LastBundledComponentCount = 0;
             }
 
             return Task.FromResult<IReadOnlyList<InstalledPackageInfo>>(packages);

@@ -213,8 +213,8 @@ public sealed class UpgradeLifecycleDeviceLogTests
             "Reconnection attempt",
             "Reconnected successfully",
             "Post-upgrade RouterOS version",
-            "RouterBOARD firmware before v6-stepping",
-            "RouterBOARD firmware after upgrade",
+            "RouterBOARD RouterBOOT fields before v6-stepping",
+            "RouterBOARD RouterBOOT fields after upgrade",
             "Final upgrade outcome",
             "UpgradeSucceededV6Only",
         ];

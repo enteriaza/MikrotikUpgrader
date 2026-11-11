@@ -567,7 +567,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
             deviceInfo.Version,
             target);
         logger.LogInformation(
-            "RouterBOARD firmware before {Stage}: model={RouterboardModel}, type={FirmwareType}, current={CurrentFirmware}, upgrade={UpgradeFirmware}, factory={FactoryFirmware}",
+            "RouterBOARD RouterBOOT fields before {Stage} (raw): model={RouterboardModel}, type={FirmwareType}, current-firmware={CurrentFirmware}, upgrade-firmware={UpgradeFirmware}, factory-firmware={FactoryFirmware}",
             stageLabel,
             deviceInfo.RouterboardModel,
             deviceInfo.RouterboardFirmwareType,
@@ -983,8 +983,11 @@ internal sealed class RouterOsV6UpgradeExecutor(
             logger.LogInformation(
                 "Post-upgrade bundled components: {BundledCount}",
                 postInventory.BundledCount);
+            // Raw RouterBOOT loader fields from /system/routerboard/print — not RouterOS version,
+            // and not proof that /system/routerboard/upgrade ran. upgrade-firmware commonly updates
+            // when a new RouterOS package stages a newer bootloader file on disk.
             logger.LogInformation(
-                "RouterBOARD firmware after upgrade: model={RouterboardModel}, type={FirmwareType}, current={CurrentFirmware}, upgrade={UpgradeFirmware}, factory={FactoryFirmware}",
+                "RouterBOARD RouterBOOT fields after upgrade (raw; upgrade command not issued): model={RouterboardModel}, type={FirmwareType}, current-firmware={CurrentFirmware}, upgrade-firmware={UpgradeFirmware}, factory-firmware={FactoryFirmware}",
                 postInfo.RouterboardModel,
                 postInfo.RouterboardFirmwareType,
                 postInfo.RouterboardCurrentFirmware,
@@ -1010,8 +1013,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 });
             }
 
-            string? expectedArch = FirmwarePackageFileNameParser.NormalizeArchitecture(
-                deviceInfo.ArchitectureName ?? string.Empty);
+            string? expectedArch = string.IsNullOrWhiteSpace(deviceInfo.ArchitectureName)
+                ? null
+                : FirmwarePackageFileNameParser.NormalizeArchitecture(deviceInfo.ArchitectureName);
             string? actualArch = string.IsNullOrWhiteSpace(postInfo.ArchitectureName)
                 ? null
                 : FirmwarePackageFileNameParser.NormalizeArchitecture(postInfo.ArchitectureName);
@@ -1027,24 +1031,21 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 });
             }
 
-            foreach (ResolvedUpgradePackage required in resolution.Packages)
+            PostUpgradePackageVerification packageVerification = PostUpgradePackageVerifier.Verify(
+                target,
+                expectedArch,
+                postPackages,
+                resolution.Packages);
+            if (!packageVerification.Succeeded)
             {
-                InstalledPackageInfo? found = postPackages.FirstOrDefault(p =>
-                    p.Name.Equals(required.InstalledPackageName, StringComparison.OrdinalIgnoreCase));
-                if (found is null
-                    || !RouterOsVersion.TryParse(found.Version, out RouterOsVersion pkgVersion)
-                    || pkgVersion != target)
+                live.Dispose();
+                return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
-                    live.Dispose();
-                    return StageExecutionResult.Failed(new UpgradeExecutionResult
-                    {
-                        Outcome = UpgradeOutcome.UpgradePackageMismatch,
-                        Detail =
-                            $"Installed package '{required.InstalledPackageName}' was missing or not at {target} after upgrade.",
-                        PostUpgradeVersion = postInfo.Version,
-                        RebootInitiated = rebootInitiated,
-                    });
-                }
+                    Outcome = packageVerification.FailureOutcome,
+                    Detail = packageVerification.Detail,
+                    PostUpgradeVersion = postInfo.Version,
+                    RebootInitiated = rebootInitiated,
+                });
             }
 
             if (timeProvider.GetUtcNow() > rebootDeadline)

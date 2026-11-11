@@ -28,6 +28,7 @@ internal static class SyntheticPackageInventoryFixtures
         PowerPcAlias(),
         AmbiguousDuplicateMainCandidates(),
         LabV6SteppingOnlyMikrotik1981824011(),
+        LabV7PostUpgradeMikrotik1981824011(),
     ];
 
     public static PackageCompatibilityAuditDevice MainOnlyMipsbeOlderV6() =>
@@ -211,6 +212,19 @@ internal static class SyntheticPackageInventoryFixtures
                 Bundled("advanced-tools", "6.49.19", "routeros-mipsbe"),
                 Bundled("ipv6", "6.49.19", "routeros-mipsbe"),
             ]);
+
+    /// <summary>
+    /// Synthetic mirror of the observed post-RouterOS-7 inventory on 198.18.240.11
+    /// (identity Mikrotik, 7.23.8 mipsbe, independent main <c>routeros</c>, zero bundled).
+    /// </summary>
+    public static PackageCompatibilityAuditDevice LabV7PostUpgradeMikrotik1981824011() =>
+        Device(
+            "lab-v7-post-upgrade-198.18.240.11",
+            "Mikrotik",
+            "198.18.240.11",
+            "7.23.8",
+            "mipsbe",
+            [Indep("routeros", "7.23.8")]);
 
     private static PackageCompatibilityAuditDevice Device(
         string fixtureName,

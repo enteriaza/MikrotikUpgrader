@@ -900,14 +900,16 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 PostRebootPackageListCount++;
             }
 
+            string versionText = PostUpgradeVersion;
+            string numeric = RouterOsVersion.TryParse(versionText, out RouterOsVersion parsed)
+                ? parsed.ToString()
+                : "6.49.23";
+            string main = RouterOsVersion.TryParse(versionText, out RouterOsVersion ver) && ver.IsV7OrLater
+                ? "routeros"
+                : "routeros-mipsbe";
             return Task.FromResult(Installed ??
             [
-                new(
-                    "routeros-mipsbe",
-                    PostUpgradeVersion.StartsWith("6.49.23", StringComparison.Ordinal)
-                        ? "6.49.23"
-                        : "6.49.23",
-                    false),
+                new(main, numeric, false),
             ]);
         }
 
