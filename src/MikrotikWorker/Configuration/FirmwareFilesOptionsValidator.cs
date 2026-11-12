@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Options;
 
-namespace MikrotikWorker;
+namespace MikrotikWorker.Configuration;
 
 internal sealed class FirmwareFilesOptionsValidator : IValidateOptions<FirmwareFilesOptions>
 {

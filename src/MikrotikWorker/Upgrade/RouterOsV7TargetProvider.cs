@@ -2,6 +2,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
+using MikrotikWorker.Configuration;
 
 namespace MikrotikWorker.Upgrade;
 

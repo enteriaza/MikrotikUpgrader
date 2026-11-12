@@ -2,7 +2,7 @@ using System.Net;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Options;
 
-namespace MikrotikWorker;
+namespace MikrotikWorker.Configuration;
 
 internal sealed class KestrelListeningConfigureOptions(IOptions<ListeningOptions> listeningOptions)
     : IConfigureOptions<KestrelServerOptions>

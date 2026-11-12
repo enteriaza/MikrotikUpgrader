@@ -1,4 +1,4 @@
-namespace MikrotikWorker;
+namespace MikrotikWorker.Configuration;
 
 /// <summary>
 /// Location of MikroTik firmware packages served over HTTP.

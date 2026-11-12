@@ -1,4 +1,5 @@
 using MikrotikWorker.Assessment;
+using MikrotikWorker.Configuration;
 using MikrotikWorker.MikroTik;
 
 namespace MikrotikWorker.Upgrade;

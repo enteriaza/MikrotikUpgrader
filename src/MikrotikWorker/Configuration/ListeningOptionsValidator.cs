@@ -1,7 +1,7 @@
 using System.Net;
 using Microsoft.Extensions.Options;
 
-namespace MikrotikWorker;
+namespace MikrotikWorker.Configuration;
 
 internal sealed class ListeningOptionsValidator : IValidateOptions<ListeningOptions>
 {

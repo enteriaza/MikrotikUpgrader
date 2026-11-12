@@ -1,4 +1,4 @@
-namespace MikrotikWorker;
+namespace MikrotikWorker.Configuration;
 
 /// <summary>
 /// Configuration for the background worker loop.

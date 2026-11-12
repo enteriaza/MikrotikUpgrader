@@ -1,4 +1,4 @@
-namespace MikrotikWorker;
+namespace MikrotikWorker.Configuration;
 
 /// <summary>
 /// Kestrel listen endpoint configuration.
