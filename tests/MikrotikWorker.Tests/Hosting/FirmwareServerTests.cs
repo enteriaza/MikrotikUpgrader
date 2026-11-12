@@ -1,0 +1,326 @@
+namespace MikrotikWorker.Tests.Hosting;
+public sealed class FirmwareServerTests
+{
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
+    private static readonly byte[] SampleFirmware = "mikrotik-firmware-package"u8.ToArray();
+
+    [Fact]
+    public void ValidListeningConfiguration_IsAccepted()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot();
+        try
+        {
+            using WebApplication app = TestHostFactory.CreateApplication(
+                firmwareRoot,
+                TestHostFactory.GetFreeTcpPort(),
+                ipAddress: "127.0.0.1");
+
+            IOptions<ListeningOptions> options = app.Services.GetRequiredService<IOptions<ListeningOptions>>();
+
+            Assert.Equal("127.0.0.1", options.Value.IpAddress);
+            Assert.InRange(options.Value.Port, 1, 65535);
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InvalidIpAddress_IsRejectedAtStartup()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot();
+        try
+        {
+            OptionsValidationException exception = Assert.Throws<OptionsValidationException>(
+                () => TestHostFactory.CreateApplication(
+                    firmwareRoot,
+                    port: 8080,
+                    ipAddress: "not-a-valid-ip"));
+
+            Assert.Contains("IpAddress", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InvalidPort_IsRejectedAtStartup()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot();
+        try
+        {
+            WebApplicationBuilder builder = TestHostFactory.CreateBuilder(
+                firmwareRoot,
+                port: 8080,
+                additionalConfiguration: new Dictionary<string, string?>
+                {
+                    [$"{ListeningOptions.SectionName}:Port"] = "70000",
+                });
+
+            OptionsValidationException exception = Assert.Throws<OptionsValidationException>(
+                () => MikrotikWorkerHost.BuildApplication(builder));
+
+            Assert.Contains("Port", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task HttpServer_StartsOnConfiguredEndpoint()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot();
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(firmwareRoot, port);
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                Uri baseAddress = TestHostFactory.GetListeningAddress(app);
+                Assert.Equal(port, baseAddress.Port);
+                Assert.Equal(Uri.UriSchemeHttp, baseAddress.Scheme);
+
+                using HttpClient client = new() { BaseAddress = baseAddress, Timeout = TestTimeout };
+                using HttpResponseMessage response = await client.GetAsync("/");
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExistingNpkFile_CanBeRetrieved()
+    {
+        string relativePath = Path.Combine("mikrotik", "routeros-tile-6.49.23.npk");
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot((relativePath, SampleFirmware));
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(firmwareRoot, port);
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                using HttpClient client = CreateClient(app);
+                byte[] downloaded = await client.GetByteArrayAsync(
+                    "/firmware_files/mikrotik/routeros-tile-6.49.23.npk");
+
+                Assert.Equal(SampleFirmware, downloaded);
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MissingFirmwareFile_ReturnsNotFound()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot();
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(firmwareRoot, port);
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                using HttpClient client = CreateClient(app);
+                using HttpResponseMessage response = await client.GetAsync(
+                    "/firmware_files/mikrotik/does-not-exist.npk");
+
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DirectoryBrowsing_IsNotEnabled()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(
+            (Path.Combine("mikrotik", "routeros-tile-6.49.23.npk"), SampleFirmware));
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(firmwareRoot, port);
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                using HttpClient client = CreateClient(app);
+
+                using HttpResponseMessage rootResponse = await client.GetAsync("/firmware_files/");
+                using HttpResponseMessage folderResponse = await client.GetAsync("/firmware_files/mikrotik/");
+
+                Assert.Equal(HttpStatusCode.NotFound, rootResponse.StatusCode);
+                Assert.Equal(HttpStatusCode.NotFound, folderResponse.StatusCode);
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task NpkFiles_AreServedAsOctetStream()
+    {
+        string relativePath = Path.Combine("mikrotik", "sample.npk");
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot((relativePath, SampleFirmware));
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(firmwareRoot, port);
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                using HttpClient client = CreateClient(app);
+                using HttpResponseMessage response = await client.GetAsync("/firmware_files/mikrotik/sample.npk");
+
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                Assert.Equal(
+                    MediaTypeHeaderValue.Parse("application/octet-stream"),
+                    response.Content.Headers.ContentType);
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task WorkerAndKestrel_CoexistInSameHost()
+    {
+        string relativePath = Path.Combine("mikrotik", "sample.npk");
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot((relativePath, SampleFirmware));
+        RecordingLoggerProvider loggerProvider = new();
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(
+                firmwareRoot,
+                port,
+                heartbeatInterval: TimeSpan.FromMilliseconds(40),
+                configureLogging: logging =>
+                {
+                    logging.ClearProviders();
+                    logging.AddProvider(loggerProvider);
+                    logging.SetMinimumLevel(LogLevel.Information);
+                });
+
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                Assert.Contains(app.Services.GetServices<IHostedService>(), static service => service is Worker);
+
+                await loggerProvider.WaitForAsync(
+                    static message => message.Contains("Worker heartbeat", StringComparison.Ordinal),
+                    minimumCount: 1,
+                    timeout: TestTimeout);
+
+                using HttpClient client = CreateClient(app);
+                using HttpResponseMessage response = await client.GetAsync("/firmware_files/mikrotik/sample.npk");
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task HostShutdown_StopsWorkerAndKestrel()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(
+            (Path.Combine("mikrotik", "sample.npk"), SampleFirmware));
+        RecordingLoggerProvider loggerProvider = new();
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(
+                firmwareRoot,
+                port,
+                heartbeatInterval: TimeSpan.FromMilliseconds(40),
+                configureLogging: logging =>
+                {
+                    logging.ClearProviders();
+                    logging.AddProvider(loggerProvider);
+                    logging.SetMinimumLevel(LogLevel.Information);
+                });
+
+            await app.StartAsync().WaitAsync(TestTimeout);
+            Uri baseAddress = TestHostFactory.GetListeningAddress(app);
+
+            await app.StopAsync().WaitAsync(TestTimeout);
+
+            Assert.Contains(
+                loggerProvider.Messages,
+                static message => message.Contains("MikrotikWorker stopped", StringComparison.Ordinal));
+
+            using TcpClient tcpClient = new();
+            await Assert.ThrowsAnyAsync<SocketException>(
+                async () => await tcpClient.ConnectAsync(baseAddress.Host, baseAddress.Port));
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    private static HttpClient CreateClient(WebApplication app) =>
+        new()
+        {
+            BaseAddress = TestHostFactory.GetListeningAddress(app),
+            Timeout = TestTimeout,
+        };
+}
