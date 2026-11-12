@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
@@ -70,6 +71,8 @@ internal static class OspfOnlyLabRecoveryRunner
         IMikrotikDeviceInfoReader deviceInfoReader = host.Services.GetRequiredService<IMikrotikDeviceInfoReader>();
         IOspfMigrationService ospf = host.Services.GetRequiredService<IOspfMigrationService>();
         IOspfMikrotikOperations ops = host.Services.GetRequiredService<IOspfMikrotikOperations>();
+        IOspfStaticSummaryRedistributionService summaryRedistribution =
+            host.Services.GetRequiredService<IOspfStaticSummaryRedistributionService>();
         IDeviceBackupService backups = host.Services.GetRequiredService<IDeviceBackupService>();
         ILoggerFactory loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
         MsLog logger = loggerFactory.CreateLogger("OspfOnlyLabRecovery");
@@ -522,6 +525,52 @@ internal static class OspfOnlyLabRecoveryRunner
             return 7;
         }
 
+        // Same production service as the upgrade executor; respects RedistributeSummaryviaStatics.
+        // Pre-reconciliation backup already retains evidence before these mutations.
+        OspfStaticSummaryRedistributionResult summary = await summaryRedistribution
+            .ApplyAndVerifyAsync(connection, apply.Plan ?? plan, cancellationToken)
+            .ConfigureAwait(false);
+        await WriteJsonAsync(
+                Path.Combine(evidenceDir, "06b-static-summary-redistribution.json"),
+                new
+                {
+                    summary.Succeeded,
+                    summary.Skipped,
+                    summary.FailureOutcome,
+                    summary.Detail,
+                    summary.CompensationAttempted,
+                    summary.CompensationSucceeded,
+                    summary.CompensationDetail,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (summary.Skipped)
+        {
+            logger.LogInformation("{Detail}", summary.Detail);
+        }
+        else if (!summary.Succeeded)
+        {
+            logger.LogError(
+                "OSPF static summary redistribution failed. Detail={Detail}",
+                summary.Detail);
+            await WriteJsonAsync(
+                    Path.Combine(evidenceDir, "post-failure-operational.json"),
+                    await CaptureOperationalAsync(ops, connection, cancellationToken).ConfigureAwait(false),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            // Preserve plan for retry/diagnosis (same semantics as the upgrade executor).
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "FAILED — OSPF STATIC SUMMARY REDISTRIBUTION",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return 9;
+        }
+        else
+        {
+            logger.LogInformation("OSPF static summary redistribution completed successfully");
+        }
+
         object postOperational = await CaptureOperationalAsync(ops, connection, cancellationToken)
             .ConfigureAwait(false);
         await WriteJsonAsync(
@@ -796,6 +845,14 @@ internal static class OspfOnlyLabRecoveryRunner
         services.AddSingleton<OspfV7Reconciler>();
         services.AddSingleton<OspfV7MigrationVerifier>();
         services.AddSingleton<IOspfMigrationService, OspfMigrationService>();
+        services
+            .AddOptions<OspfSummaryRedistributionOptions>()
+            .Configure<IConfiguration>((opts, configuration) =>
+            {
+                opts.RedistributeSummaryviaStatics =
+                    configuration.GetValue("RedistributeSummaryviaStatics", false);
+            });
+        services.AddSingleton<IOspfStaticSummaryRedistributionService, OspfStaticSummaryRedistributionService>();
         // Explicitly do NOT register RouterBOARD upgrade, IRouterOsV6UpgradeExecutor, scheduler, or CSV watchers.
     }
 

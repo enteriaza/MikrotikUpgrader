@@ -696,6 +696,7 @@ public sealed class AutomaticUpgradePathTests
                 clock,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
             new PassingOspfMigrationService(),
+            new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptions,
             mikrotikOptions,
             clock,

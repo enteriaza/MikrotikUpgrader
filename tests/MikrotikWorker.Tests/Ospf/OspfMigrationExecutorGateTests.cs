@@ -185,6 +185,7 @@ public sealed class OspfMigrationExecutorGateTests
                 TimeProvider.System,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
             ospf,
+            new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptions,
             mikrotikOptions,
             TimeProvider.System,

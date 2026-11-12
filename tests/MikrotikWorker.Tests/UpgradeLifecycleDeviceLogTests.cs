@@ -107,6 +107,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
                 time,
                 loggerFactory.CreateLogger<RouterboardFirmwareUpgradeService>()),
             new PassingOspfMigrationService(),
+            new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptionsWrapper,
             mikrotikOptions,
             time,

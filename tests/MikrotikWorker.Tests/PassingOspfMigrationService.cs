@@ -111,3 +111,15 @@ internal sealed class PassingOspfMigrationService : IOspfMigrationService
             ],
         };
 }
+
+/// <summary>
+/// Default test double: stage reports skipped (disabled) and performs no RouterOS mutations.
+/// </summary>
+internal sealed class PassingOspfStaticSummaryRedistributionService : IOspfStaticSummaryRedistributionService
+{
+    public Task<OspfStaticSummaryRedistributionResult> ApplyAndVerifyAsync(
+        ITikConnection connection,
+        OspfMigrationPlan? plan,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(OspfStaticSummaryRedistributionResult.SkippedDisabled());
+}

@@ -200,6 +200,16 @@ Set real credentials only on the deployment host. Keep placeholders in the repos
 
 The shared account must be allowed to open the RouterOS API (port 8728) and SFTP (port 22 by default) from the worker host. `FirmwareUpgrade:Enabled` defaults to `true` in the shipped `appsettings.json`, so eligible devices continue through the automatic backup → fetch → reboot → verify workflow. Setting it to `false` is an explicit administrative kill-switch: no firmware is fetched or installed, the log states that upgrades are administratively disabled, and every job ends as **Failed** (never Succeeded).
 
+#### Optional OSPF static summary redistribution
+
+Root setting (independent of `FirmwareUpgrade:Enabled` / `MikroTik:Enabled`):
+
+| Setting | Default | Role |
+|---|---|---|
+| `RedistributeSummaryviaStatics` | `false` | When `true`, after successful OSPF migration verification and **before** RouterBOARD firmware upgrade, install distance-250 blackhole statics for each plan area-range prefix, reconcile filter chain `ospf-v2-out`, then enable `redistribute=static` on the live OSPFv2 instance with that outbound chain. When `false`, the stage is skipped and performs no route/filter/redistribute mutations. |
+
+This stage does **not** change the earlier OSPF migration’s deliberate routing-filter removal. Filters for this workaround are created only in this optional stage. Configuration verification is performed; Type-5 external LSA content is not independently inspected, and the workaround must not be described as producing Type-3 area-range summaries.
+
 Local overrides (gitignored): place `appsettings.Development.local.json` beside the appsettings files with real credentials for development/live testing. Do not commit that file.
 
 ### Firmware compatibility assessment

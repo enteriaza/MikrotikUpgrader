@@ -116,6 +116,14 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<IValidateOptions<FirmwareUpgradeOptions>, FirmwareUpgradeOptionsValidator>();
 
         builder.Services
+            .AddOptions<OspfSummaryRedistributionOptions>()
+            .Configure<IConfiguration>((opts, configuration) =>
+            {
+                opts.RedistributeSummaryviaStatics =
+                    configuration.GetValue("RedistributeSummaryviaStatics", false);
+            });
+
+        builder.Services
             .AddOptions<LivePackageCompatibilityAuditOptions>()
             .BindConfiguration(LivePackageCompatibilityAuditOptions.SectionName)
             .ValidateOnStart();
@@ -147,6 +155,7 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<OspfV7Reconciler>();
         builder.Services.AddSingleton<OspfV7MigrationVerifier>();
         builder.Services.AddSingleton<IOspfMigrationService, OspfMigrationService>();
+        builder.Services.AddSingleton<IOspfStaticSummaryRedistributionService, OspfStaticSummaryRedistributionService>();
         builder.Services.AddHostedService<OspfMigrationPlanStoreCleanupHostedService>();
         builder.Services.AddSingleton<IRouterOsV6UpgradeExecutor, RouterOsV6UpgradeExecutor>();
         builder.Services.AddSingleton<ScheduledJobsPaths>();

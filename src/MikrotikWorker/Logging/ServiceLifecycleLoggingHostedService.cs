@@ -19,6 +19,7 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
     private readonly ScheduledJobsPaths _scheduledJobsPaths;
     private readonly IOptions<MikroTikOptions> _mikroTik;
     private readonly IOptions<FirmwareUpgradeOptions> _firmwareUpgrade;
+    private readonly IOptions<OspfSummaryRedistributionOptions> _ospfSummaryRedistribution;
     private readonly IRouterOsV7TargetProvider _v7TargetProvider;
     private readonly IOptions<WorkerOptions> _worker;
     private readonly IOptions<SerilogOptions> _serilog;
@@ -35,6 +36,7 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
         ScheduledJobsPaths scheduledJobsPaths,
         IOptions<MikroTikOptions> mikroTik,
         IOptions<FirmwareUpgradeOptions> firmwareUpgrade,
+        IOptions<OspfSummaryRedistributionOptions> ospfSummaryRedistribution,
         IRouterOsV7TargetProvider v7TargetProvider,
         IOptions<WorkerOptions> worker,
         IOptions<SerilogOptions> serilog,
@@ -48,6 +50,7 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
         _scheduledJobsPaths = scheduledJobsPaths;
         _mikroTik = mikroTik;
         _firmwareUpgrade = firmwareUpgrade;
+        _ospfSummaryRedistribution = ospfSummaryRedistribution;
         _v7TargetProvider = v7TargetProvider;
         _worker = worker;
         _serilog = serilog;
@@ -97,7 +100,7 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
         // Never log credentials, tokens, or backup passwords.
         RouterOsV7TargetSnapshot? v7 = _v7TargetProvider.TryGetCurrent();
         _logger.LogInformation(
-            "Application configuration summary. Environment={EnvironmentName}, Listening={IpAddress}:{Port}, FirmwareFilesPath={FirmwareFilesPath}, ScheduledJobsPath={ScheduledJobsPath}, MikroTikEnabled={MikroTikEnabled}, MikroTikPort={MikroTikPort}, FirmwareUpgradeEnabled={FirmwareUpgradeEnabled}, V6SteppingVersion={V6SteppingVersion}, RouterOsV7Target={RouterOsV7Target}, MaxConcurrentRouterJobs={MaxConcurrentRouterJobs}, MaxConcurrentCsvImports={MaxConcurrentCsvImports}, HeartbeatInterval={HeartbeatInterval}, LogDirectory={LogDirectory}, DeviceLogEnabled={DeviceLogEnabled}",
+            "Application configuration summary. Environment={EnvironmentName}, Listening={IpAddress}:{Port}, FirmwareFilesPath={FirmwareFilesPath}, ScheduledJobsPath={ScheduledJobsPath}, MikroTikEnabled={MikroTikEnabled}, MikroTikPort={MikroTikPort}, FirmwareUpgradeEnabled={FirmwareUpgradeEnabled}, RedistributeSummaryviaStatics={RedistributeSummaryviaStatics}, V6SteppingVersion={V6SteppingVersion}, RouterOsV7Target={RouterOsV7Target}, MaxConcurrentRouterJobs={MaxConcurrentRouterJobs}, MaxConcurrentCsvImports={MaxConcurrentCsvImports}, HeartbeatInterval={HeartbeatInterval}, LogDirectory={LogDirectory}, DeviceLogEnabled={DeviceLogEnabled}",
             _environment.EnvironmentName,
             _listening.Value.IpAddress,
             _listening.Value.Port,
@@ -108,6 +111,7 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
             _mikroTik.Value.Enabled,
             _mikroTik.Value.Port,
             _firmwareUpgrade.Value.Enabled,
+            _ospfSummaryRedistribution.Value.RedistributeSummaryviaStatics,
             RouterOsUpgradeVersions.V6SteppingVersionText,
             v7?.VersionText ?? "(unavailable)",
             _scheduledJobs.Value.MaxConcurrentRouterJobs,

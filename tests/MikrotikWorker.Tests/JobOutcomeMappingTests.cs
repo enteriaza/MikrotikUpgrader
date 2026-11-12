@@ -32,6 +32,7 @@ public sealed class JobOutcomeMappingTests
     [InlineData(UpgradeOutcome.OspfPlanValidationFailed, ScheduledJobTerminalState.Failed, false)]
     [InlineData(UpgradeOutcome.OspfMigrationApplyFailed, ScheduledJobTerminalState.Failed, false)]
     [InlineData(UpgradeOutcome.OspfMigrationVerificationFailed, ScheduledJobTerminalState.Failed, false)]
+    [InlineData(UpgradeOutcome.OspfStaticSummaryRedistributionFailed, ScheduledJobTerminalState.Failed, false)]
     public void MapUpgradeOutcome_IsTruthful(
         UpgradeOutcome outcome,
         ScheduledJobTerminalState expectedTerminal,

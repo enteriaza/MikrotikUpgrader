@@ -32,6 +32,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
     LegacyFleetUpgradeAutomationCleanup legacyFleetUpgradeAutomationCleanup,
     RouterboardFirmwareUpgradeService routerboardFirmwareUpgradeService,
     IOspfMigrationService ospfMigrationService,
+    IOspfStaticSummaryRedistributionService ospfStaticSummaryRedistributionService,
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     IOptions<MikroTikOptions> mikroTikOptions,
     TimeProvider timeProvider,
@@ -370,6 +371,25 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     };
                 }
 
+                OptionalSummaryStageGate alreadyV7Summary = await RunOptionalStaticSummaryRedistributionAsync(
+                        live,
+                        alreadyV7Ospf.Plan ?? ospfPlan,
+                        alreadyV7Device.Version,
+                        alreadyV7Device.ArchitectureName,
+                        rebootInitiated,
+                        completedStageOnFailure: UpgradeCompletedStages.OspfMigration,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (alreadyV7Summary.Failure is not null)
+                {
+                    deleteOspfPlanInFinally = false;
+                    return alreadyV7Summary.Failure;
+                }
+
+                string alreadyV7CompletedBeforeRb = alreadyV7Summary.StageCompleted
+                    ? UpgradeCompletedStages.OspfSummaryRedistribution
+                    : UpgradeCompletedStages.OspfMigration;
+
                 ospfMigrationService.DeletePlan(job);
                 deleteOspfPlanInFinally = false;
 
@@ -381,7 +401,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         username,
                         password,
                         priorRebootInitiated: rebootInitiated,
-                        completedStageBefore: UpgradeCompletedStages.OspfMigration,
+                        completedStageBefore: alreadyV7CompletedBeforeRb,
                         cancellationToken)
                     .ConfigureAwait(false);
 
@@ -547,25 +567,49 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     };
                 }
 
-                ospfMigrationService.DeletePlan(job);
-                deleteOspfPlanInFinally = false;
-
-                logger.LogInformation("Post-RouterOS-7 backup before RouterBOARD assessment starting");
+                // Backup after OSPF verify and before summary mutations so a failed summary
+                // still has a retained post-ROS7 evidence backup.
+                logger.LogInformation(
+                    "Post-RouterOS-7 / post-OSPF backup before optional static-summary redistribution starting");
                 DeviceBackupResult postV7Backup = await backupService
                     .CreatePreUpgradeBackupAsync(postV7, job, postV7Device, username, password, cancellationToken)
                     .ConfigureAwait(false);
                 if (!postV7Backup.Succeeded)
                 {
+                    deleteOspfPlanInFinally = false;
                     return new UpgradeExecutionResult
                     {
                         Outcome = UpgradeOutcome.BackupFailed,
-                        Detail = postV7Backup.FailureReason ?? "Post-RouterOS-7 backup before RouterBOARD assessment failed.",
+                        Detail = postV7Backup.FailureReason
+                                 ?? "Post-RouterOS-7 backup before static-summary redistribution failed.",
                         PostUpgradeVersion = postV7Device.Version,
                         PostUpgradeArchitecture = postV7Device.ArchitectureName,
                         RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
                         CompletedStage = UpgradeCompletedStages.OspfMigration,
                     };
                 }
+
+                OptionalSummaryStageGate summaryGate = await RunOptionalStaticSummaryRedistributionAsync(
+                        postV7,
+                        ospfApply.Plan ?? ospfPlan,
+                        postV7Device.Version,
+                        postV7Device.ArchitectureName,
+                        rebootInitiated || stage2.Execution.RebootInitiated,
+                        completedStageOnFailure: UpgradeCompletedStages.OspfMigration,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (summaryGate.Failure is not null)
+                {
+                    deleteOspfPlanInFinally = false;
+                    return summaryGate.Failure;
+                }
+
+                string completedBeforeRb = summaryGate.StageCompleted
+                    ? UpgradeCompletedStages.OspfSummaryRedistribution
+                    : UpgradeCompletedStages.OspfMigration;
+
+                ospfMigrationService.DeletePlan(job);
+                deleteOspfPlanInFinally = false;
 
                 MikrotikDeviceInfo beforeRb = await routerOperations
                     .ReadDeviceInfoAsync(postV7, job.RouterIp.ToString(), cancellationToken)
@@ -579,7 +623,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         username,
                         password,
                         priorRebootInitiated: rebootInitiated || stage2.Execution.RebootInitiated,
-                        completedStageBefore: UpgradeCompletedStages.OspfMigration,
+                        completedStageBefore: completedBeforeRb,
                         cancellationToken)
                     .ConfigureAwait(false);
 
@@ -684,6 +728,63 @@ internal sealed class RouterOsV6UpgradeExecutor(
             classification.MatchedStandardFormat,
             classification.ShouldUpgradeToV7);
         logger.LogInformation("Second-stage eligibility: {Reason}", classification.PolicyReason);
+    }
+
+    /// <summary>
+    /// Runs the optional static-summary redistribution stage after OSPF verify and before RouterBOARD.
+    /// </summary>
+    private async Task<OptionalSummaryStageGate> RunOptionalStaticSummaryRedistributionAsync(
+        ITikConnection connection,
+        OspfMigrationPlan? plan,
+        string? postUpgradeVersion,
+        string? postUpgradeArchitecture,
+        bool rebootInitiated,
+        string completedStageOnFailure,
+        CancellationToken cancellationToken)
+    {
+        OspfStaticSummaryRedistributionResult summary = await ospfStaticSummaryRedistributionService
+            .ApplyAndVerifyAsync(connection, plan, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (summary.Skipped)
+        {
+            logger.LogInformation("{Detail}", summary.Detail);
+            return OptionalSummaryStageGate.Skipped();
+        }
+
+        if (!summary.Succeeded)
+        {
+            logger.LogWarning(
+                "OSPF static summary redistribution failed; preserving migration plan and blocking RouterBOARD. Detail={Detail}",
+                summary.Detail);
+            return OptionalSummaryStageGate.Failed(new UpgradeExecutionResult
+            {
+                Outcome = summary.FailureOutcome,
+                Detail = summary.Detail,
+                PostUpgradeVersion = postUpgradeVersion,
+                PostUpgradeArchitecture = postUpgradeArchitecture,
+                RebootInitiated = rebootInitiated,
+                CompletedStage = completedStageOnFailure,
+            });
+        }
+
+        logger.LogInformation(
+            "OSPF static summary redistribution completed; CompletedStage={CompletedStage}",
+            UpgradeCompletedStages.OspfSummaryRedistribution);
+        return OptionalSummaryStageGate.Completed();
+    }
+
+    private readonly struct OptionalSummaryStageGate
+    {
+        public UpgradeExecutionResult? Failure { get; private init; }
+        public bool StageCompleted { get; private init; }
+
+        public static OptionalSummaryStageGate Skipped() => new();
+
+        public static OptionalSummaryStageGate Completed() => new() { StageCompleted = true };
+
+        public static OptionalSummaryStageGate Failed(UpgradeExecutionResult failure) =>
+            new() { Failure = failure };
     }
 
     private async Task<StageExecutionResult> ExecuteStageAsync(

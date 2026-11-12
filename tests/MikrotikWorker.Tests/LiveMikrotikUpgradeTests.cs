@@ -164,6 +164,7 @@ public sealed class LiveMikrotikUpgradeTests
                 TimeProvider.System,
                 loggerFactory.CreateLogger<RouterboardFirmwareUpgradeService>()),
             new PassingOspfMigrationService(),
+            new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptionsWrapper,
             mikrotikOptionsWrapper,
             TimeProvider.System,

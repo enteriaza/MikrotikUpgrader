@@ -300,6 +300,7 @@ public sealed class FirmwareUploadStorageModelTests
                 TimeProvider.System,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
             new PassingOspfMigrationService(),
+            new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptions,
             mikrotikOptions,
             TimeProvider.System,

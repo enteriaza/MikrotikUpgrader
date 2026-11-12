@@ -152,6 +152,7 @@ public sealed class PackageCompatibilityWorkflowGuardTests
                 TimeProvider.System,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
             new PassingOspfMigrationService(),
+            new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptions,
             mikrotikOptions,
             TimeProvider.System,

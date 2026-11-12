@@ -66,6 +66,12 @@ public enum UpgradeOutcome
 
     /// <summary>Post-apply OSPF configuration verification failed.</summary>
     OspfMigrationVerificationFailed = 24,
+
+    /// <summary>
+    /// Optional static-summary redistribution stage failed (routes, <c>ospf-v2-out</c> filter,
+    /// or OSPFv2 redistribute/out-filter-chain verification).
+    /// </summary>
+    OspfStaticSummaryRedistributionFailed = 25,
 }
 
 /// <summary>
@@ -87,6 +93,12 @@ public static class UpgradeCompletedStages
     /// OSPF migration applied and configuration-verified after RouterOS 7 package verification.
     /// </summary>
     public const string OspfMigration = "ospf-migration";
+
+    /// <summary>
+    /// Optional static-summary redistribution (blackhole routes + <c>ospf-v2-out</c>) verified
+    /// after OSPF migration and before RouterBOARD firmware.
+    /// </summary>
+    public const string OspfSummaryRedistribution = "ospf-summary-redistribution";
 
     /// <summary>
     /// RouterBOARD assessment completed and any required upgrade/reboot verified

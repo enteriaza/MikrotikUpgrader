@@ -7,6 +7,7 @@ using MikrotikWorker.Configuration;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
 using MikrotikWorker.Upgrade;
+using MikrotikWorker.Upgrade.Ospf;
 using tik4net;
 
 namespace MikrotikWorker.Tests;
@@ -780,6 +781,226 @@ public sealed class TwoStageUpgradeWorkflowTests
         return root;
     }
 
+    [Fact]
+    public async Task StaticSummaryFailure_AfterOspf_BlocksRouterboard()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = [],
+            InitialVersion = "7.23.8",
+            RouterboardCurrentFirmware = "7.23.8",
+            RouterboardUpgradeFirmware = "7.23.8",
+        };
+        CountingBackup backup = new();
+        TrackingOspfMigrationService ospf = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(
+            ops,
+            backup,
+            root,
+            summary: new FailingStaticSummaryService(),
+            ospf: ospf);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "7.23.8"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "7.23.8"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.OspfStaticSummaryRedistributionFailed, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.OspfMigration, result.CompletedStage);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.Equal(0, ospf.DeletePlanCount);
+        Assert.Equal(1, backup.CallCount); // Path A pre-OSPF backup only
+    }
+
+    [Fact]
+    public async Task PathB_StaticSummaryFailure_AfterOspf_BlocksRouterboard_PreservesPlan()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
+        };
+        CountingBackup backup = new();
+        TrackingOspfMigrationService ospf = new();
+        RecordingStaticSummaryService summary = new(OspfStaticSummaryRedistributionResult.Failed("path-b summary failure"));
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(
+            ops,
+            backup,
+            root,
+            reconnect,
+            summary: summary,
+            ospf: ospf);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.10"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "6.49.10"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "6.49.23"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.OspfStaticSummaryRedistributionFailed, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.OspfMigration, result.CompletedStage);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.Equal(0, ospf.DeletePlanCount);
+        Assert.Equal(1, summary.CallCount);
+        Assert.Equal(3, backup.CallCount); // v6 + v7 + post-OSPF/pre-summary
+        Assert.True(backup.CallCount >= summary.CallCount); // backup before summary
+    }
+
+    [Fact]
+    public async Task PathB_StaticSummarySuccess_RunsBeforeRouterboard()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
+        };
+        CountingBackup backup = new();
+        RecordingStaticSummaryService summary = new(OspfStaticSummaryRedistributionResult.Ok())
+        {
+            Backup = backup,
+        };
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(
+            ops,
+            backup,
+            root,
+            reconnect,
+            summary: summary);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.10"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "6.49.10"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "6.49.23"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal(1, summary.CallCount);
+        Assert.Equal(3, backup.CallCount);
+        Assert.Equal(3, summary.LastCallBackupCount);
+    }
+
+    [Fact]
+    public async Task PathB_BackupFailureBeforeSummary_BlocksSummaryAndRouterboard()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
+        };
+        CountingBackup backup = new() { FailOnCallNumber = 3 };
+        RecordingStaticSummaryService summary = new(OspfStaticSummaryRedistributionResult.Ok());
+        TrackingOspfMigrationService ospf = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(
+            ops,
+            backup,
+            root,
+            reconnect,
+            summary: summary,
+            ospf: ospf);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.10"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "6.49.10"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "6.49.23"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.BackupFailed, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.OspfMigration, result.CompletedStage);
+        Assert.Equal(0, summary.CallCount);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.Equal(0, ospf.DeletePlanCount);
+    }
+
+    [Fact]
+    public async Task StaticSummarySuccess_ThenRouterboardCommandFailure_ReportsSummaryCompletedStage()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = [],
+            InitialVersion = "7.23.8",
+            RouterboardCurrentFirmware = "7.23.8",
+            RouterboardUpgradeFirmware = "7.24.0",
+            ThrowOnRouterboardUpgrade = new IOException("rb upgrade refused"),
+        };
+        CountingBackup backup = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(
+            ops,
+            backup,
+            root,
+            summary: new RecordingStaticSummaryService(OspfStaticSummaryRedistributionResult.Ok()));
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "7.23.8"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "7.23.8"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.RouterboardUpgradeFailed, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.OspfSummaryRedistribution, result.CompletedStage);
+    }
+
+    [Fact]
+    public async Task StaticSummaryDisabled_ThenRouterboardCommandFailure_ReportsOspfMigrationStage()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = [],
+            InitialVersion = "7.23.8",
+            RouterboardCurrentFirmware = "7.23.8",
+            RouterboardUpgradeFirmware = "7.24.0",
+            ThrowOnRouterboardUpgrade = new IOException("rb upgrade refused"),
+        };
+        CountingBackup backup = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(
+            ops,
+            backup,
+            root,
+            summary: new PassingOspfStaticSummaryRedistributionService());
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "7.23.8"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "7.23.8"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.RouterboardUpgradeFailed, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.OspfMigration, result.CompletedStage);
+    }
+
     private static RouterOsV6UpgradeExecutor CreateTwoStageExecutor(
         StageTrackingOps ops,
         IDeviceBackupService backup,
@@ -787,7 +1008,9 @@ public sealed class TwoStageUpgradeWorkflowTests
         IMikrotikConnectionFactory? connectionFactory = null,
         TimeSpan? rebootTimeout = null,
         TimeSpan? postUpgradeVerifyTimeout = null,
-        IRouterOsV7TargetProvider? v7TargetProvider = null)
+        IRouterOsV7TargetProvider? v7TargetProvider = null,
+        IOspfStaticSummaryRedistributionService? summary = null,
+        IOspfMigrationService? ospf = null)
     {
         TimeSpan reboot = rebootTimeout ?? TimeSpan.FromSeconds(5);
         TimeSpan verify = postUpgradeVerifyTimeout ?? reboot;
@@ -831,11 +1054,83 @@ public sealed class TwoStageUpgradeWorkflowTests
                 mikrotikOptions,
                 TimeProvider.System,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
-            new PassingOspfMigrationService(),
+            ospf ?? new PassingOspfMigrationService(),
+            summary ?? new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptions,
             mikrotikOptions,
             TimeProvider.System,
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
+    }
+
+    private sealed class FailingStaticSummaryService : IOspfStaticSummaryRedistributionService
+    {
+        public Task<OspfStaticSummaryRedistributionResult> ApplyAndVerifyAsync(
+            ITikConnection connection,
+            OspfMigrationPlan? plan,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(OspfStaticSummaryRedistributionResult.Failed("forced summary failure"));
+    }
+
+    private sealed class RecordingStaticSummaryService(OspfStaticSummaryRedistributionResult result)
+        : IOspfStaticSummaryRedistributionService
+    {
+        public int CallCount { get; private set; }
+        public int? LastCallBackupCount { get; private set; }
+        public CountingBackup? Backup { get; init; }
+
+        public Task<OspfStaticSummaryRedistributionResult> ApplyAndVerifyAsync(
+            ITikConnection connection,
+            OspfMigrationPlan? plan,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            LastCallBackupCount = Backup?.CallCount;
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class TrackingOspfMigrationService : IOspfMigrationService
+    {
+        private readonly PassingOspfMigrationService _inner = new();
+        public int DeletePlanCount { get; private set; }
+
+        public Task<OspfGateResult> CaptureAndValidateAsync(
+            ITikConnection connection,
+            MikrotikScheduledJob job,
+            string identity,
+            string routerOsVersion,
+            string? architecture,
+            bool persistPlan,
+            CancellationToken cancellationToken) =>
+            _inner.CaptureAndValidateAsync(
+                connection,
+                job,
+                identity,
+                routerOsVersion,
+                architecture,
+                persistPlan,
+                cancellationToken);
+
+        public Task<OspfApplyGateResult> ApplyAndVerifyAsync(
+            ITikConnection connection,
+            MikrotikScheduledJob job,
+            string identity,
+            OspfMigrationPlan? inMemoryPlan,
+            CancellationToken cancellationToken,
+            string? managementHost = null) =>
+            _inner.ApplyAndVerifyAsync(
+                connection,
+                job,
+                identity,
+                inMemoryPlan,
+                cancellationToken,
+                managementHost);
+
+        public void DeletePlan(MikrotikScheduledJob job)
+        {
+            DeletePlanCount++;
+            _inner.DeletePlan(job);
+        }
     }
 
     private static MikrotikScheduledJob CreateJob() =>
@@ -929,6 +1224,8 @@ public sealed class TwoStageUpgradeWorkflowTests
         public List<string> PresentScripts { get; init; } = [];
 
         public List<string> PresentSchedulers { get; init; } = [];
+
+        public Exception? ThrowOnRouterboardUpgrade { get; init; }
 
         public List<string> RemovalOrder { get; } = [];
 
@@ -1120,6 +1417,11 @@ public sealed class TwoStageUpgradeWorkflowTests
             ITikConnection connection,
             CancellationToken cancellationToken = default)
         {
+            if (ThrowOnRouterboardUpgrade is not null)
+            {
+                throw ThrowOnRouterboardUpgrade;
+            }
+
             RouterboardUpgradeCount++;
             _routerboardUpgradeIssued = true;
             return Task.CompletedTask;

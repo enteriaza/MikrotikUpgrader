@@ -749,6 +749,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 timeProvider ?? TimeProvider.System,
                 NullLogger<RouterboardFirmwareUpgradeService>.Instance),
             new PassingOspfMigrationService(),
+            new PassingOspfStaticSummaryRedistributionService(),
             upgradeOptions,
             mikrotikOptions,
             timeProvider ?? TimeProvider.System,
