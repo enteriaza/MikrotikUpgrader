@@ -180,6 +180,7 @@ public sealed class InMemoryJobSchedulerTests
         DateTime stop = start.AddHours(1);
 
         await harness.Scheduler.ScheduleAsync(CreateJob(importId, 2, start, stop, "A"), CancellationToken.None);
+        harness.Scheduler.SetAcceptedPath(importId, harness.AcceptedCsv);
 
         using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(100));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(

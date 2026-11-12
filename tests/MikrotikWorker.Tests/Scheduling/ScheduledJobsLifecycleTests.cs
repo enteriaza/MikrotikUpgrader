@@ -317,21 +317,22 @@ public sealed class ScheduledJobsLifecycleTests
     }
 
     [Fact]
-    public async Task CancellationDuringIngestion_LeavesFileInProcessing()
+    public async Task CancellationDuringIngestion_DoesNotRejectOrLoseFile()
     {
         string jobsRoot = TestHostFactory.CreateScheduledJobsRoot();
         string firmwareRoot = TestHostFactory.CreateFirmwareRoot();
         FakeTimeProvider time = new(new DateTimeOffset(UtcNow));
-        await using SchedulerHost host = await SchedulerHost.CreateAsync(
-            firmwareRoot,
-            jobsRoot,
-            time,
-            additionalConfiguration: new Dictionary<string, string?>
-            {
-                ["ScheduledJobs:MaximumPendingJobs"] = "1",
-            });
         try
         {
+            await using SchedulerHost host = await SchedulerHost.CreateAsync(
+                firmwareRoot,
+                jobsRoot,
+                time,
+                additionalConfiguration: new Dictionary<string, string?>
+                {
+                    ["ScheduledJobs:MaximumPendingJobs"] = "1",
+                });
+
             Guid blocker = Guid.NewGuid();
             host.Scheduler.RegisterImport(blocker, 1);
             await host.Scheduler.ScheduleAsync(
@@ -353,13 +354,18 @@ public sealed class ScheduledJobsLifecycleTests
             using CancellationTokenSource cts = new();
             Task process = host.Processor.ProcessIncomingAsync(incoming, cts.Token);
             await WaitForAsync(
-                () => File.Exists(Path.Combine(jobsRoot, "Processing", "cancel.csv")),
+                () => File.Exists(Path.Combine(jobsRoot, "Processing", "cancel.csv"))
+                      || Directory.EnumerateFiles(Path.Combine(jobsRoot, "Accepted"), "cancel*.csv").Any(),
                 TestTimeout);
             cts.Cancel();
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await process.WaitAsync(TestTimeout));
-            Assert.True(File.Exists(Path.Combine(jobsRoot, "Processing", "cancel.csv")));
-            Assert.False(Directory.EnumerateFiles(Path.Combine(jobsRoot, "Accepted"), "cancel*.csv").Any());
+
+            // Cancel may land before Accepted move (Processing) or after path registration while
+            // ScheduleAsync waits for capacity (Accepted). Either way the CSV must not be Rejected.
+            bool inProcessing = File.Exists(Path.Combine(jobsRoot, "Processing", "cancel.csv"));
+            bool inAccepted = Directory.EnumerateFiles(Path.Combine(jobsRoot, "Accepted"), "cancel*.csv").Any();
+            Assert.True(inProcessing || inAccepted);
             Assert.False(Directory.EnumerateFiles(Path.Combine(jobsRoot, "Rejected"), "cancel*.csv").Any());
         }
         finally

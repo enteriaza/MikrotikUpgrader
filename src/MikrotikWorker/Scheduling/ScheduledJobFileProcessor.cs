@@ -16,6 +16,17 @@ internal sealed class ScheduledJobFileProcessor(
 {
     private readonly ConcurrentProcessingGate _gate = new();
 
+    /// <summary>
+    /// Test seam: invoked after Accepted path registration and before job scheduling begins.
+    /// </summary>
+    internal Func<Guid, string, CancellationToken, Task>? AfterAcceptedPathRegisteredForTestsAsync { get; set; }
+
+    /// <summary>
+    /// Test seam: invoked after each successful <see cref="IInMemoryJobScheduler.ScheduleAsync"/> with the
+    /// running scheduled count.
+    /// </summary>
+    internal Func<Guid, int, CancellationToken, Task>? AfterJobScheduledForTestsAsync { get; set; }
+
     public async Task ProcessIncomingAsync(string filePath, CancellationToken cancellationToken)
     {
         string fileName = Path.GetFileName(filePath);
@@ -48,7 +59,7 @@ internal sealed class ScheduledJobFileProcessor(
             logger.LogWarning(
                 "CSV ingestion cancelled for {FileName}. File left in {Location}. Inspect it, then manually move it back to Incoming to re-import. Partial in-memory state is not reconstructed.",
                 fileName,
-                processingPath is not null && File.Exists(processingPath) ? "Processing" : "incoming/unknown");
+                DescribeCsvLocation(fileName, processingPath));
             throw;
         }
         catch (Exception ex)
@@ -106,13 +117,30 @@ internal sealed class ScheduledJobFileProcessor(
         HashSet<int> scheduledRows = [];
         scheduler.RegisterImport(importId, validation.RecordCount);
         string? acceptedPath = null;
+        int queued = 0;
 
         try
         {
-            int queued = 0;
-            await foreach (MikrotikScheduledJob job in parser.EnumerateJobsAsync(processingPath, importId, cancellationToken)
+            // Register the actual Accepted path before any job can be dispatched. The scheduler
+            // also holds pre-accept schedules until SetAcceptedPath; production ordering still
+            // moves and registers first so workers never race the path store.
+            string intendedAcceptedPath = Path.Combine(paths.Accepted, fileName);
+            scheduler.BindAcceptedPathIntent(importId, intendedAcceptedPath);
+
+            acceptedPath = fileMover.MoveSafely(processingPath, paths.Accepted, fileName, logger);
+            scheduler.SetAcceptedPath(importId, acceptedPath);
+
+            if (AfterAcceptedPathRegisteredForTestsAsync is not null)
+            {
+                await AfterAcceptedPathRegisteredForTestsAsync(importId, acceptedPath, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            await foreach (MikrotikScheduledJob job in parser.EnumerateJobsAsync(acceptedPath, importId, cancellationToken)
                                .ConfigureAwait(false))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 if (!scheduledRows.Add(job.RowNumber))
                 {
                     logger.LogDebug(
@@ -131,6 +159,11 @@ internal sealed class ScheduledJobFileProcessor(
                     job.RowNumber,
                     job.RouterName,
                     job.RouterIp);
+
+                if (AfterJobScheduledForTestsAsync is not null)
+                {
+                    await AfterJobScheduledForTestsAsync(importId, queued, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             if (queued != validation.RecordCount)
@@ -139,14 +172,7 @@ internal sealed class ScheduledJobFileProcessor(
                     $"Scheduled {queued} jobs but validation counted {validation.RecordCount} records for {fileName}.");
             }
 
-            // Bind the intended Accepted path before the filesystem move so shutdown/exceptions
-            // cannot leave an Accepted CSV without an in-memory batch. Completion stays blocked
-            // until SetAcceptedPath confirms the on-disk path after the move.
-            string intendedAcceptedPath = Path.Combine(paths.Accepted, fileName);
-            scheduler.BindAcceptedPathIntent(importId, intendedAcceptedPath);
-
-            acceptedPath = fileMover.MoveSafely(processingPath, paths.Accepted, fileName, logger);
-            scheduler.SetAcceptedPath(importId, acceptedPath);
+            scheduler.FinalizeImportActivation(importId, queued, activationIncomplete: false);
 
             logger.LogInformation(
                 "CSV moved to Accepted: {FileName}. ImportId={ImportId}, JobsScheduled={JobsScheduled}, MaximumPendingJobs={MaximumPendingJobs}",
@@ -157,13 +183,25 @@ internal sealed class ScheduledJobFileProcessor(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await HandleIngestFailureAsync(importId, acceptedPath, abortedByCancellation: true).ConfigureAwait(false);
+            await HandleIngestFailureAsync(
+                    importId,
+                    acceptedPath,
+                    queued,
+                    abortedByCancellation: true,
+                    validation.RecordCount)
+                .ConfigureAwait(false);
             scheduledRows.Clear();
             throw;
         }
         catch (Exception)
         {
-            await HandleIngestFailureAsync(importId, acceptedPath, abortedByCancellation: false).ConfigureAwait(false);
+            await HandleIngestFailureAsync(
+                    importId,
+                    acceptedPath,
+                    queued,
+                    abortedByCancellation: false,
+                    validation.RecordCount)
+                .ConfigureAwait(false);
             scheduledRows.Clear();
             throw;
         }
@@ -173,23 +211,35 @@ internal sealed class ScheduledJobFileProcessor(
         }
     }
 
-    private async Task HandleIngestFailureAsync(Guid importId, string? acceptedPath, bool abortedByCancellation)
+    private async Task HandleIngestFailureAsync(
+        Guid importId,
+        string? acceptedPath,
+        int scheduledCount,
+        bool abortedByCancellation,
+        int validatedCount)
     {
         // Only treat the CSV as Accepted when the move actually produced a path that exists.
         // An intent-only bind (pre-move) must still Abort so we do not keep a phantom Accepted path.
         if (acceptedPath is null || !File.Exists(acceptedPath))
         {
             await scheduler.AbortImportAsync(importId, CancellationToken.None).ConfigureAwait(false);
+            logger.LogWarning(
+                "CSV import activation aborted before Accepted move. ImportId={ImportId}, ValidatedRows={ValidatedRows}, ScheduledRows={ScheduledRows}, Cancelled={Cancelled}",
+                importId,
+                validatedCount,
+                scheduledCount,
+                abortedByCancellation);
             return;
         }
 
-        // File is already in Accepted: confirm the path so terminal jobs can complete the batch.
-        // Do not abort — that would drop tracking while leaving the CSV in Accepted.
+        // File is already in Accepted: keep path registration while any scheduled jobs need it,
+        // reconcile Remaining for never-scheduled rows, and never Reject/delete the CSV.
         try
         {
             if (scheduler.IsTracked(importId))
             {
                 scheduler.SetAcceptedPath(importId, acceptedPath);
+                scheduler.FinalizeImportActivation(importId, scheduledCount, activationIncomplete: true);
             }
             else
             {
@@ -203,11 +253,36 @@ internal sealed class ScheduledJobFileProcessor(
         {
             logger.LogCritical(
                 ex,
-                "Failed to bind accepted path after movement. ImportId={ImportId}, Path={Path}, Cancelled={Cancelled}",
+                "Failed to finalize accepted import after activation failure. ImportId={ImportId}, Path={Path}, ScheduledRows={ScheduledRows}, ValidatedRows={ValidatedRows}, Cancelled={Cancelled}",
                 importId,
                 acceptedPath,
+                scheduledCount,
+                validatedCount,
                 abortedByCancellation);
         }
+    }
+
+    private string DescribeCsvLocation(string fileName, string? processingPath)
+    {
+        if (processingPath is not null && File.Exists(processingPath))
+        {
+            return "Processing";
+        }
+
+        string stem = Path.GetFileNameWithoutExtension(fileName);
+        if (Directory.Exists(paths.Accepted)
+            && Directory.EnumerateFiles(paths.Accepted, stem + "*.csv").Any())
+        {
+            return "Accepted";
+        }
+
+        string incoming = Path.Combine(paths.Root, fileName);
+        if (File.Exists(incoming))
+        {
+            return "Incoming";
+        }
+
+        return "unknown";
     }
 
     public void WarnAboutInterruptedProcessingFiles()

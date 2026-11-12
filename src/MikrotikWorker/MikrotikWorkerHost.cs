@@ -170,6 +170,10 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<ScheduledJobCsvParser>();
         builder.Services.AddSingleton<CsvFileReadinessChecker>();
         builder.Services.AddSingleton<RouterJobExecutionQueue>();
+        builder.Services.AddSingleton<ImportedCsvPathStore>();
+        builder.Services.AddSingleton<IImportedCsvPathResolver>(static sp => sp.GetRequiredService<ImportedCsvPathStore>());
+        builder.Services.AddSingleton<ImportedCsvResultWriter>();
+        builder.Services.AddSingleton<IImportedCsvResultWriter>(static sp => sp.GetRequiredService<ImportedCsvResultWriter>());
         builder.Services.AddSingleton<InMemoryJobScheduler>();
         builder.Services.AddSingleton<IInMemoryJobScheduler>(static sp => sp.GetRequiredService<InMemoryJobScheduler>());
         builder.Services.AddSingleton<IRouterJobExecutionCompleter>(static sp => sp.GetRequiredService<InMemoryJobScheduler>());

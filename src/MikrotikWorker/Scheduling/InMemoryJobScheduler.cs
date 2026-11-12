@@ -23,6 +23,17 @@ internal interface IInMemoryJobScheduler
     /// </summary>
     void BindAcceptedPathIntent(Guid importId, string intendedAcceptedPath);
 
+    /// <summary>
+    /// Marks import activation finished (all intended rows scheduled, or activation stopped early).
+    /// Reconciles <c>Remaining</c> so never-scheduled rows are not treated as outstanding work.
+    /// </summary>
+    /// <param name="scheduledCount">Rows successfully accepted by <see cref="ScheduleAsync"/>.</param>
+    /// <param name="activationIncomplete">
+    /// True when activation stopped early (cancel/failure) and <paramref name="scheduledCount"/> may be
+    /// less than the validated row count. Incomplete activation never archives to Completed.
+    /// </param>
+    void FinalizeImportActivation(Guid importId, int scheduledCount, bool activationIncomplete);
+
     ValueTask ScheduleAsync(MikrotikScheduledJob job, CancellationToken cancellationToken);
 
     Task AbortImportAsync(Guid importId, CancellationToken cancellationToken);
@@ -48,6 +59,8 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
     private readonly IScheduledJobFileMover _fileMover;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<InMemoryJobScheduler> _logger;
+    private readonly IImportedCsvResultWriter _csvResultWriter;
+    private readonly ImportedCsvPathStore _csvPathStore;
     private readonly RouterJobExecutionQueue _executionQueue;
     private readonly JobRetryOptions _retryOptions;
     private readonly SemaphoreSlim _capacity;
@@ -71,7 +84,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         RouterJobExecutionQueue executionQueue,
         TimeProvider timeProvider,
         ILogger<InMemoryJobScheduler> logger,
-        IOptions<JobRetryOptions>? retryOptions = null)
+        IOptions<JobRetryOptions>? retryOptions = null,
+        IImportedCsvResultWriter? csvResultWriter = null,
+        ImportedCsvPathStore? csvPathStore = null)
     {
         MaximumPendingJobs = options.Value.MaximumPendingJobs;
         _capacity = new SemaphoreSlim(MaximumPendingJobs, MaximumPendingJobs);
@@ -81,6 +96,8 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         _timeProvider = timeProvider;
         _logger = logger;
         _retryOptions = retryOptions?.Value ?? new JobRetryOptions();
+        _csvResultWriter = csvResultWriter ?? NullImportedCsvResultWriter.Instance;
+        _csvPathStore = csvPathStore ?? new ImportedCsvPathStore();
     }
 
     public int MaximumPendingJobs { get; }
@@ -210,6 +227,10 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             shouldAttemptCompletion = batch.Remaining == 0 && !batch.Archived;
         }
 
+        // Path store must be populated before any held jobs become dispatchable.
+        _csvPathStore.SetAcceptedPath(importId, acceptedPath);
+        ReleaseHeldJobsForDispatch(batch);
+
         _logger.LogInformation(
             "Import accepted path set: ImportId={ImportId}, Path={Path}, Remaining={Remaining}",
             importId,
@@ -218,8 +239,124 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
 
         if (shouldAttemptCompletion)
         {
-            TryCompleteImport(batch);
+            AttemptImportClosure(batch);
         }
+    }
+
+    public void FinalizeImportActivation(Guid importId, int scheduledCount, bool activationIncomplete)
+    {
+        if (!_imports.TryGetValue(importId, out ImportBatch? batch))
+        {
+            return;
+        }
+
+        if (scheduledCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(scheduledCount));
+        }
+
+        int validatedCount;
+        int neverScheduled;
+        int remainingAfter;
+        string? acceptedPath;
+        bool acceptedOnDisk;
+        lock (batch.Sync)
+        {
+            if (batch.Aborted || batch.Archived)
+            {
+                return;
+            }
+
+            if (batch.ActivationFinalized)
+            {
+                return;
+            }
+
+            if (scheduledCount > batch.ValidatedCount)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(scheduledCount),
+                    scheduledCount,
+                    $"Scheduled count exceeds validated count {batch.ValidatedCount} for import '{importId}'.");
+            }
+
+            validatedCount = batch.ValidatedCount;
+            neverScheduled = validatedCount - scheduledCount;
+            batch.ActivationFinalized = true;
+            batch.ActivationIncomplete = activationIncomplete;
+            batch.ScheduledCount = scheduledCount;
+
+            // Remaining started as ValidatedCount and decrements only on terminal scheduled jobs.
+            // Never-scheduled rows must not keep the import outstanding forever.
+            if (neverScheduled > 0)
+            {
+                batch.Remaining = Math.Max(0, batch.Remaining - neverScheduled);
+            }
+
+            remainingAfter = batch.Remaining;
+            acceptedPath = batch.AcceptedPath;
+            acceptedOnDisk = batch.AcceptedOnDisk;
+        }
+
+        bool retainForScheduledJobs = remainingAfter > 0;
+        bool retireImmediately =
+            remainingAfter == 0 && activationIncomplete && scheduledCount < validatedCount;
+        string finalizeMessage =
+            "Import activation finalized: ImportId={ImportId}, AcceptedPath={AcceptedPath}, ValidatedRows={ValidatedRows}, ScheduledRows={ScheduledRows}, NeverScheduledRows={NeverScheduledRows}, OutstandingScheduledJobs={OutstandingScheduledJobs}, ActivationIncomplete={ActivationIncomplete}, AcceptedOnDisk={AcceptedOnDisk}, RetainForScheduledJobs={RetainForScheduledJobs}, RetireImmediately={RetireImmediately}";
+        if (activationIncomplete)
+        {
+            _logger.LogWarning(
+                finalizeMessage,
+                importId,
+                acceptedPath,
+                validatedCount,
+                scheduledCount,
+                neverScheduled,
+                remainingAfter,
+                activationIncomplete,
+                acceptedOnDisk,
+                retainForScheduledJobs,
+                retireImmediately);
+        }
+        else
+        {
+            _logger.LogInformation(
+                finalizeMessage,
+                importId,
+                acceptedPath,
+                validatedCount,
+                scheduledCount,
+                neverScheduled,
+                remainingAfter,
+                activationIncomplete,
+                acceptedOnDisk,
+                retainForScheduledJobs,
+                retireImmediately);
+        }
+
+        if (remainingAfter == 0 && acceptedOnDisk)
+        {
+            AttemptImportClosure(batch);
+        }
+    }
+
+    /// <summary>
+    /// Test seam: outstanding work remaining for a tracked import (scheduled jobs not yet terminal,
+    /// after activation reconciliation when finalized).
+    /// </summary>
+    internal bool TryGetImportRemaining(Guid importId, out int remaining)
+    {
+        if (_imports.TryGetValue(importId, out ImportBatch? batch))
+        {
+            lock (batch.Sync)
+            {
+                remaining = batch.Remaining;
+                return true;
+            }
+        }
+
+        remaining = 0;
+        return false;
     }
 
     public async ValueTask ScheduleAsync(MikrotikScheduledJob job, CancellationToken cancellationToken)
@@ -267,8 +404,26 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
 
                 JobEntry entry = new(job);
                 int sequence = ++_sequence;
+                JobPriority priority = new(job.EffectiveEligibleUtc, sequence);
                 _entries[key] = entry;
-                _queue.Enqueue(entry, new JobPriority(job.EffectiveEligibleUtc, sequence));
+
+                // Jobs must not enter the dispatch queue until the Accepted CSV path is on disk
+                // and registered for this ImportId (see SetAcceptedPath / ReleaseHeldJobsForDispatch).
+                bool dispatchable;
+                lock (batch.Sync)
+                {
+                    dispatchable = batch.AcceptedOnDisk;
+                    if (!dispatchable)
+                    {
+                        batch.HeldForDispatch.Add((entry, priority));
+                    }
+                }
+
+                if (dispatchable)
+                {
+                    _queue.Enqueue(entry, priority);
+                }
+
                 capacityHeld = false;
             }
 
@@ -325,6 +480,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             {
                 batch.AbortedFlag = 1;
                 batch.Aborted = true;
+                batch.HeldForDispatch.Clear();
             }
 
             foreach (KeyValuePair<(Guid ImportId, int RowNumber), JobEntry> pair in _entries.ToArray())
@@ -364,6 +520,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
 
         _imports.TryRemove(importId, out _);
+        _csvPathStore.Clear(importId);
         SignalWake();
 
         _logger.LogWarning(
@@ -826,8 +983,66 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             }
 
             ReleaseCapacity(entry);
+
+            // Persist CSV results before import completion may move Accepted → Completed.
+            PersistCsvCompletion(job, state, error);
+
             OnJobTerminal(job.ImportId);
         }
+    }
+
+    private void PersistCsvCompletion(MikrotikScheduledJob job, ScheduledJobTerminalState state, Exception? error)
+    {
+        try
+        {
+            _csvResultWriter
+                .RecordJobCompletedAsync(
+                    job,
+                    _timeProvider.GetUtcNow(),
+                    state,
+                    error?.Message,
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Unexpected failure while persisting CSV completion. ImportId={ImportId}, JobId={JobId}. In-memory job outcome is unchanged.",
+                job.ImportId,
+                job.JobId);
+        }
+    }
+
+    private void ReleaseHeldJobsForDispatch(ImportBatch batch)
+    {
+        List<(JobEntry Entry, JobPriority Priority)> held;
+        lock (batch.Sync)
+        {
+            if (batch.HeldForDispatch.Count == 0)
+            {
+                return;
+            }
+
+            held = [.. batch.HeldForDispatch];
+            batch.HeldForDispatch.Clear();
+        }
+
+        lock (_gate)
+        {
+            foreach ((JobEntry entry, JobPriority priority) in held)
+            {
+                if (entry.IsRemovedOrTerminalOrDispatched)
+                {
+                    continue;
+                }
+
+                _queue.Enqueue(entry, priority);
+            }
+        }
+
+        SignalWake();
     }
 
     private void OnJobTerminal(Guid importId)
@@ -837,7 +1052,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             return;
         }
 
-        bool shouldAttemptCompletion = false;
+        bool shouldAttemptClosure;
         lock (batch.Sync)
         {
             if (batch.Aborted)
@@ -850,15 +1065,15 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
                 batch.Remaining--;
             }
 
-            shouldAttemptCompletion = batch.Remaining == 0
-                                      && batch.AcceptedPath is not null
-                                      && batch.AcceptedOnDisk
-                                      && !batch.Archived;
+            shouldAttemptClosure = batch.Remaining == 0
+                                   && batch.AcceptedPath is not null
+                                   && batch.AcceptedOnDisk
+                                   && !batch.Archived;
         }
 
-        if (shouldAttemptCompletion)
+        if (shouldAttemptClosure)
         {
-            TryCompleteImport(batch);
+            AttemptImportClosure(batch);
         }
     }
 
@@ -879,7 +1094,95 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
 
             if (shouldAttempt)
             {
-                TryCompleteImport(batch);
+                AttemptImportClosure(batch);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Closes an import whose outstanding scheduled work is zero: either archive Accepted→Completed
+    /// (full activation) or retire tracking while leaving the Accepted CSV in place (incomplete activation).
+    /// </summary>
+    private void AttemptImportClosure(ImportBatch batch)
+    {
+        bool retireWithoutArchive;
+        lock (batch.Sync)
+        {
+            if (batch.Aborted
+                || batch.Archived
+                || batch.Remaining != 0
+                || batch.AcceptedPath is null
+                || !batch.AcceptedOnDisk
+                || batch.CompletionInProgress)
+            {
+                return;
+            }
+
+            retireWithoutArchive = batch.ActivationFinalized
+                                   && batch.ActivationIncomplete
+                                   && batch.ScheduledCount < batch.ValidatedCount;
+        }
+
+        if (retireWithoutArchive)
+        {
+            RetireImportLeavingAcceptedFile(batch);
+        }
+        else
+        {
+            TryCompleteImport(batch);
+        }
+    }
+
+    private void RetireImportLeavingAcceptedFile(ImportBatch batch)
+    {
+        string? acceptedPath;
+        int validated;
+        int scheduled;
+        lock (batch.Sync)
+        {
+            if (batch.Aborted
+                || batch.Archived
+                || batch.Remaining != 0
+                || batch.AcceptedPath is null
+                || !batch.AcceptedOnDisk
+                || batch.CompletionInProgress)
+            {
+                return;
+            }
+
+            batch.CompletionInProgress = true;
+            acceptedPath = batch.AcceptedPath;
+            validated = batch.ValidatedCount;
+            scheduled = batch.ScheduledCount;
+            batch.HeldForDispatch.Clear();
+        }
+
+        try
+        {
+            lock (batch.Sync)
+            {
+                batch.Archived = true;
+            }
+
+            _imports.TryRemove(batch.ImportId, out _);
+            _csvPathStore.Clear(batch.ImportId);
+
+            _logger.LogWarning(
+                "Import activation incomplete; leaving Accepted CSV in place for inspection/manual re-import. ImportId={ImportId}, Path={Path}, ValidatedRows={ValidatedRows}, ScheduledRows={ScheduledRows}, NeverScheduledRows={NeverScheduledRows}. File was not moved to Completed or Rejected.",
+                batch.ImportId,
+                acceptedPath,
+                validated,
+                scheduled,
+                validated - scheduled);
+        }
+        finally
+        {
+            lock (batch.Sync)
+            {
+                if (!batch.Archived)
+                {
+                    batch.CompletionInProgress = false;
+                }
             }
         }
     }
@@ -894,6 +1197,14 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
                 || batch.Remaining != 0
                 || batch.AcceptedPath is null
                 || !batch.AcceptedOnDisk)
+            {
+                return;
+            }
+
+            // Incomplete activation must not be archived as a successful Completed import.
+            if (batch.ActivationFinalized
+                && batch.ActivationIncomplete
+                && batch.ScheduledCount < batch.ValidatedCount)
             {
                 return;
             }
@@ -932,6 +1243,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             }
 
             _imports.TryRemove(batch.ImportId, out _);
+            _csvPathStore.Clear(batch.ImportId);
 
             _logger.LogInformation(
                 "CSV archived to Completed: {FileName}. ImportId={ImportId}, Path={Path}",
@@ -1204,7 +1516,26 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
 
         public object Sync { get; } = new();
 
+        /// <summary>Validated CSV row count at registration (immutable).</summary>
+        public int ValidatedCount { get; } = jobCount;
+
+        /// <summary>
+        /// Outstanding work. Starts as <see cref="ValidatedCount"/>; decrements on terminal scheduled
+        /// jobs; reduced by never-scheduled rows when activation is finalized.
+        /// </summary>
         public int Remaining { get; set; } = jobCount;
+
+        /// <summary>Rows successfully accepted by <see cref="ScheduleAsync"/> (set at activation finalize).</summary>
+        public int ScheduledCount { get; set; }
+
+        /// <summary>True after <see cref="FinalizeImportActivation"/> (or equivalent) has run once.</summary>
+        public bool ActivationFinalized { get; set; }
+
+        /// <summary>
+        /// True when activation stopped early; with <see cref="ScheduledCount"/> &lt; <see cref="ValidatedCount"/>
+        /// prevents Accepted→Completed archival.
+        /// </summary>
+        public bool ActivationIncomplete { get; set; }
 
         public string? AcceptedPath { get; set; }
 
@@ -1214,7 +1545,13 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         public bool AcceptedOnDisk { get; set; }
 
         /// <summary>
-        /// True after the CSV has been successfully moved to Completed.
+        /// Jobs scheduled before <see cref="AcceptedOnDisk"/>; released into the dispatch queue
+        /// only from <see cref="SetAcceptedPath"/>.
+        /// </summary>
+        public List<(JobEntry Entry, JobPriority Priority)> HeldForDispatch { get; } = [];
+
+        /// <summary>
+        /// True after the import lifecycle is closed (Completed archive or retire-leaving-Accepted).
         /// </summary>
         public bool Archived { get; set; }
 

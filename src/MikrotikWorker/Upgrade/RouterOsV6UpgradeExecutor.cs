@@ -36,8 +36,12 @@ internal sealed class RouterOsV6UpgradeExecutor(
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     IOptions<MikroTikOptions> mikroTikOptions,
     TimeProvider timeProvider,
-    ILogger<RouterOsV6UpgradeExecutor> logger) : IRouterOsV6UpgradeExecutor
+    ILogger<RouterOsV6UpgradeExecutor> logger,
+    IImportedCsvResultWriter? csvResultWriter = null) : IRouterOsV6UpgradeExecutor
 {
+    private readonly IImportedCsvResultWriter _csvResultWriter =
+        csvResultWriter ?? NullImportedCsvResultWriter.Instance;
+
     public async Task<UpgradeExecutionResult> ExecuteAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -102,6 +106,11 @@ internal sealed class RouterOsV6UpgradeExecutor(
         logger.LogInformation(
             "Initial RouterOS version: {RouterOsVersion}",
             deviceInfo.Version);
+
+        // UpgradeStarted boundary: after connect/preflight/policy gates, before mutation work.
+        await _csvResultWriter
+            .RecordUpgradeStartedAsync(job, timeProvider.GetUtcNow(), cancellationToken)
+            .ConfigureAwait(false);
 
         // Connection-time safety: remove legacy router-side FleetUpgrade automation before any
         // firmware mutation (applies to every device, including ACE/BR).

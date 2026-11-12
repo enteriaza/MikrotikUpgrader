@@ -16,6 +16,8 @@ internal sealed class ScheduledJobCsvParser(
 
     private const string RemovedExecutionModeHeader = "executionmode";
 
+    // Application-owned output columns on the Accepted CSV. Present after jobs finish; ignored on re-import.
+
     public async Task<CsvParseResult> ValidateAsync(
         string filePath,
         DateTime utcNow,
@@ -219,6 +221,9 @@ internal sealed class ScheduledJobCsvParser(
                     + "eligible devices are always upgraded automatically to the configured RouterOS 7 target. Remove the column and re-submit the file.",
             });
         }
+
+        // Result columns (UpgradeStarted/UpgradeCompleted/Result) are allowed and ignored:
+        // ReadRow only maps RequiredHeaders, so prior results never become job inputs.
 
         foreach (string required in RequiredHeaders)
         {

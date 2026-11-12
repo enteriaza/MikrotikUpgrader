@@ -87,7 +87,7 @@ public sealed class SchedulerConcurrencyHardeningTests
     }
 
     [Fact]
-    public async Task JobsTerminalBeforeAcceptedPath_CompleteExactlyOnceAfterPathSet()
+    public async Task JobsHeldUntilAcceptedPath_ThenCompleteAndArchiveOnce()
     {
         FakeTimeProvider time = new(new DateTimeOffset(2026, 12, 1, 12, 0, 0, TimeSpan.Zero));
         await using HardeningHarness harness = CreateHarness(time);
@@ -101,7 +101,8 @@ public sealed class SchedulerConcurrencyHardeningTests
             CreateJob(importId, 3, time.GetUtcNow().UtcDateTime.AddMinutes(-1), time.GetUtcNow().UtcDateTime.AddHours(1)),
             CancellationToken.None);
 
-        await WaitForAsync(() => harness.Scheduler.PendingCount == 0, TimeSpan.FromSeconds(5));
+        Assert.Equal(2, harness.Scheduler.PendingCount);
+        Assert.Equal(0, harness.Scheduler.DispatchedCount);
         Assert.True(harness.Scheduler.IsTracked(importId));
         Assert.False(Directory.EnumerateFiles(harness.CompletedDir, "*.csv").Any());
 
@@ -115,7 +116,7 @@ public sealed class SchedulerConcurrencyHardeningTests
     }
 
     [Fact]
-    public async Task AcceptedPathIntent_BlocksCompletedMove_UntilOnDiskConfirmed()
+    public async Task AcceptedPathIntent_BlocksDispatch_UntilOnDiskConfirmed()
     {
         FakeTimeProvider time = new(new DateTimeOffset(2026, 12, 1, 12, 0, 0, TimeSpan.Zero));
         await using HardeningHarness harness = CreateHarness(time);
@@ -127,8 +128,8 @@ public sealed class SchedulerConcurrencyHardeningTests
             CancellationToken.None);
 
         harness.Scheduler.BindAcceptedPathIntent(importId, harness.AcceptedCsv);
-        await WaitForAsync(() => harness.Scheduler.PendingCount == 0, TimeSpan.FromSeconds(5));
-
+        Assert.Equal(1, harness.Scheduler.PendingCount);
+        Assert.Equal(0, harness.Scheduler.DispatchedCount);
         Assert.True(harness.Scheduler.IsTracked(importId));
         Assert.False(Directory.EnumerateFiles(harness.CompletedDir, "*.csv").Any());
 
@@ -152,7 +153,7 @@ public sealed class SchedulerConcurrencyHardeningTests
             CancellationToken.None);
 
         harness.Scheduler.BindAcceptedPathIntent(importId, harness.AcceptedCsv);
-        await WaitForAsync(() => harness.Scheduler.PendingCount == 0, TimeSpan.FromSeconds(5));
+        Assert.Equal(0, harness.Scheduler.DispatchedCount);
 
         // Simulate HandleIngestFailure recovery after SetAcceptedPath threw post-move:
         // intent was bound, file is on disk under Accepted, confirm now.
@@ -181,7 +182,8 @@ public sealed class SchedulerConcurrencyHardeningTests
             CancellationToken.None);
         harness.Scheduler.BindAcceptedPathIntent(importId, harness.AcceptedCsv);
 
-        await WaitForAsync(() => harness.Scheduler.PendingCount == 0, TimeSpan.FromSeconds(5));
+        Assert.Equal(1, harness.Scheduler.PendingCount);
+        Assert.Equal(0, harness.Scheduler.DispatchedCount);
         await harness.Scheduler.StopAsync();
 
         Assert.False(Directory.EnumerateFiles(harness.CompletedDir, "*.csv").Any());

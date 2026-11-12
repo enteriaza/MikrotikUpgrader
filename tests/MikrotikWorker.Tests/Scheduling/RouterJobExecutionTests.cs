@@ -127,6 +127,7 @@ public sealed class RouterJobExecutionTests
                 CancellationToken.None);
         }
 
+        harness.Scheduler.SetAcceptedPath(blockerImport, harness.AcceptedCsv);
         await WaitForAsync(() => gate.Active >= 12, TimeSpan.FromSeconds(5));
 
         Guid victimImport = Guid.NewGuid();
@@ -136,6 +137,10 @@ public sealed class RouterJobExecutionTests
         await harness.Scheduler.ScheduleAsync(
             CreateJob(victimImport, 2, victimStart, victimStop, "VICTIM", "10.0.0.99"),
             CancellationToken.None);
+        // Distinct Accepted path so the victim import is dispatchable while blockers hold workers.
+        string victimCsv = Path.Combine(Path.GetDirectoryName(harness.AcceptedCsv)!, "victim.csv");
+        await File.WriteAllTextAsync(victimCsv, "placeholder");
+        harness.Scheduler.SetAcceptedPath(victimImport, victimCsv);
 
         await WaitForAsync(() => harness.Scheduler.DispatchedCount >= 13, TimeSpan.FromSeconds(5));
 
@@ -169,6 +174,7 @@ public sealed class RouterJobExecutionTests
                 CancellationToken.None);
         }
 
+        harness.Scheduler.SetAcceptedPath(importId, harness.AcceptedCsv);
         await WaitForAsync(() => gate.MaxActive >= 12, TimeSpan.FromSeconds(5));
         Assert.True(gate.MaxActive <= 12, $"MaxActive={gate.MaxActive}");
         gate.ReleaseAll();
@@ -190,6 +196,7 @@ public sealed class RouterJobExecutionTests
         await harness.Scheduler.ScheduleAsync(
             CreateJob(importId, 2, time.GetUtcNow().UtcDateTime.AddMinutes(-1), time.GetUtcNow().UtcDateTime.AddHours(1)),
             CancellationToken.None);
+        harness.Scheduler.SetAcceptedPath(importId, harness.AcceptedCsv);
 
         await WaitForAsync(() => gate.Active >= 1, TimeSpan.FromSeconds(5));
         string completedDir = harness.CompletedDir;
