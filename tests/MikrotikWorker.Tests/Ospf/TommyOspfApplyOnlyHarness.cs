@@ -182,7 +182,6 @@ public sealed class TommyOspfApplyOnlyHarness
             RouterIp = targetIp,
             DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
             DateStopUtc = DateTime.UtcNow.AddHours(2),
-            ExecutionMode = UpgradeExecutionMode.FullUpgrade,
         };
 
         logger.LogInformation("CaptureAndValidate starting. ExecutionId={ExecutionId}", executionId);

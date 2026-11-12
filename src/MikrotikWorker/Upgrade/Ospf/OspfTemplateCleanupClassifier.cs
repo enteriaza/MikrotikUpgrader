@@ -212,9 +212,9 @@ internal static class OspfTemplateCleanupClassifier
                 Row = row,
                 Classification = OspfTemplateClassification.Unknown,
                 Reason =
-                    plan.SupersededTemplates.Count == 0
-                        ? "Not a planned template and plan has no superseded-template provenance; cannot establish migration ownership."
-                        : "Not a planned template and does not match any superseded migration provenance identity.",
+                    "Not a planned template and no consolidated-prefix replacement "
+                    + "(same-area more-specific containment), desired-state relationship, "
+                    + "or recorded superseded provenance could be established.",
             });
         }
 
@@ -307,7 +307,24 @@ internal static class OspfTemplateCleanupClassifier
             return false;
         }
 
-        // Positive provenance only: complete semantic identity recorded when the planner superseded a matcher.
+        // Primary rule: same-area strictly more-specific networks under a planned consolidated
+        // interfaces=all prefix are obsolete. No provenance or semantic attribute matching required.
+        if (OspfConsolidatedPrefixObsolescence.TryExplain(row, plan, out string containmentReason))
+        {
+            reason = containmentReason;
+            return true;
+        }
+
+        // Additional path: richer desired-state / conversion relationships (fleet aggregates,
+        // interface consolidation with semantic compatibility).
+        if (OspfLiveSupersededProvenance.TryExplainLiveSupersession(row, plan, out string desiredReason))
+        {
+            reason = "Desired-state replacement: " + desiredReason;
+            return true;
+        }
+
+        // Planner-recorded complete semantic provenance remains an additional positive path
+        // (exact fingerprint match) for identities captured before consolidation.
         if (plan.SupersededTemplates.Count == 0)
         {
             return false;

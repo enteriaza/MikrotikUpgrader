@@ -37,15 +37,15 @@ public sealed class OspfMigrationExecutorGateTests
     }
 
     [Fact]
-    public async Task V6SteppingOnly_DeletesPlanAndDoesNotApplyV7Ospf()
+    public async Task V7TargetUnavailable_DeletesPlanAndDoesNotApplyV7Ospf()
     {
         TrackingOps ops = new();
         RecordingOspfMigrationService ospf = new();
-        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, ospf);
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, ospf, v7Target: null);
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"),
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob(),
             CreateDevice("6.49.23"),
             CreateAssessment(),
             "admin",
@@ -53,7 +53,7 @@ public sealed class OspfMigrationExecutorGateTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TargetUnavailable, result.Outcome);
         Assert.True(ospf.CaptureCalled);
         Assert.False(ospf.ApplyCalled);
         Assert.True(ospf.DeleteCalled);
@@ -82,7 +82,6 @@ public sealed class OspfMigrationExecutorGateTests
 
         Assert.Equal(UpgradeOutcome.OspfPlanValidationFailed, result.Outcome);
         Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.False(ops.FetchCalled);
         Assert.False(ops.RebootCalled);
     }
@@ -145,7 +144,8 @@ public sealed class OspfMigrationExecutorGateTests
 
     private static RouterOsV6UpgradeExecutor CreateExecutor(
         TrackingOps ops,
-        IOspfMigrationService ospf)
+        IOspfMigrationService ospf,
+        string? v7Target = "7.23.8")
     {
         string root = Path.Combine(Path.GetTempPath(), "fw-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -173,7 +173,7 @@ public sealed class OspfMigrationExecutorGateTests
                 new StaticFirmwarePackageCatalog(root),
                 firmwareFilesOptions),
             new SucceedingBackup(),
-            new FixedRouterOsV7TargetProvider("7.23.8"),
+            new FixedRouterOsV7TargetProvider(v7Target),
             new LegacyFleetUpgradeAutomationCleanup(
                 ops,
                 NullLogger<LegacyFleetUpgradeAutomationCleanup>.Instance),
@@ -191,8 +191,7 @@ public sealed class OspfMigrationExecutorGateTests
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
 
-    private static MikrotikScheduledJob CreateJob(
-        UpgradeExecutionMode mode = UpgradeExecutionMode.FullUpgrade) =>
+    private static MikrotikScheduledJob CreateJob() =>
         new()
         {
             ImportId = Guid.NewGuid(),
@@ -202,7 +201,6 @@ public sealed class OspfMigrationExecutorGateTests
             RouterIp = IPAddress.Parse("10.0.0.50"),
             DateStartUtc = DateTime.UtcNow.AddMinutes(-5),
             DateStopUtc = DateTime.UtcNow.AddHours(1),
-            ExecutionMode = mode,
         };
 
     private static MikrotikDeviceInfo CreateDevice(string version, string identity = "AP01.POP001.001.access") =>

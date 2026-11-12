@@ -152,7 +152,22 @@ internal static class OspfSiteMatcherConsolidation
         OspfSupersededTemplateIdentity identity) =>
         OspfTemplateSemanticIdentity.Matches(row, identity);
 
-    private static string FoldPrefix(
+    /// <summary>
+    /// Folds a site-matcher prefix into the deterministic consolidation target.
+    /// </summary>
+    /// <remarks>
+    /// Precedence:
+    /// <list type="number">
+    /// <item>Fleet aggregates (<c>100.64.0.0/10</c>, <c>172.16.0.0/12</c>) win first.</item>
+    /// <item>Among same-area area-ranges that contain the prefix, choose the most specific
+    /// (longest-prefix) match so management <c>/24</c> boundaries beat broader aggregates
+    /// regardless of input ordering.</item>
+    /// <item>Equal-length candidates: prefer the explicit MGMT summarisation boundary
+    /// (<see cref="OspfFleetNaming.ManagementRangeComment"/>).</item>
+    /// <item>Remaining ambiguity fails closed rather than silently picking by list order.</item>
+    /// </list>
+    /// </remarks>
+    internal static string FoldPrefix(
         string cidr,
         string areaName,
         IReadOnlyList<OspfPlanAreaRange> areaRanges,
@@ -185,6 +200,7 @@ internal static class OspfSiteMatcherConsolidation
             return Private172Aggregate.ToCidrString();
         }
 
+        List<(OspfPlanAreaRange Range, OspfIpPrefix Prefix)> eligible = [];
         foreach (OspfPlanAreaRange range in areaRanges.Where(r =>
                      string.Equals(r.AreaName, areaName, StringComparison.OrdinalIgnoreCase)))
         {
@@ -195,17 +211,83 @@ internal static class OspfSiteMatcherConsolidation
 
             if (rangePrefix.Contains(prefix) || prefix.Equals(rangePrefix))
             {
-                if (!prefix.Equals(rangePrefix))
-                {
-                    notes.Add(
-                        $"Folding site matcher '{prefix.ToCidrString()}' into area-range '{rangePrefix.ToCidrString()}'.");
-                }
-
-                return rangePrefix.ToCidrString();
+                eligible.Add((range, rangePrefix));
             }
         }
 
-        return prefix.ToCidrString();
+        if (eligible.Count == 0)
+        {
+            return prefix.ToCidrString();
+        }
+
+        OspfIpPrefix selected = SelectFoldAreaRange(prefix, eligible, notes);
+        if (!prefix.Equals(selected))
+        {
+            notes.Add(
+                $"Folding site matcher '{prefix.ToCidrString()}' into area-range '{selected.ToCidrString()}'.");
+        }
+
+        return selected.ToCidrString();
+    }
+
+    /// <summary>
+    /// Selects the deterministic area-range fold target from eligible containing ranges.
+    /// </summary>
+    internal static OspfIpPrefix SelectFoldAreaRange(
+        OspfIpPrefix prefix,
+        IReadOnlyList<(OspfPlanAreaRange Range, OspfIpPrefix Prefix)> eligible,
+        List<string>? notes = null)
+    {
+        ArgumentNullException.ThrowIfNull(eligible);
+        if (eligible.Count == 0)
+        {
+            throw new ArgumentException("At least one eligible area-range is required.", nameof(eligible));
+        }
+
+        int longest = eligible.Max(static e => e.Prefix.PrefixLength);
+        List<(OspfPlanAreaRange Range, OspfIpPrefix Prefix)> longestMatches = eligible
+            .Where(e => e.Prefix.PrefixLength == longest)
+            .ToList();
+
+        if (longestMatches.Count == 1)
+        {
+            return longestMatches[0].Prefix;
+        }
+
+        List<(OspfPlanAreaRange Range, OspfIpPrefix Prefix)> mgmtMatches = longestMatches
+            .Where(static e =>
+                string.Equals(
+                    e.Range.Comment,
+                    OspfFleetNaming.ManagementRangeComment,
+                    StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (mgmtMatches.Count == 1)
+        {
+            notes?.Add(
+                $"Area-range fold for '{prefix.ToCidrString()}' selected MGMT boundary "
+                + $"'{mgmtMatches[0].Prefix.ToCidrString()}' among {longestMatches.Count} equal-length candidates.");
+            return mgmtMatches[0].Prefix;
+        }
+
+        // Identical CIDR duplicates with a single distinct prefix are still unambiguous once
+        // comments/advertise flags are ignored for the fold target itself.
+        HashSet<string> distinctCidrs = longestMatches
+            .Select(static e => e.Prefix.ToCidrString())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (distinctCidrs.Count == 1 && mgmtMatches.Count == 0)
+        {
+            return longestMatches[0].Prefix;
+        }
+
+        string detail = string.Join(
+            ", ",
+            longestMatches.Select(static e =>
+                $"{e.Prefix.ToCidrString()}(comment={e.Range.Comment ?? "<none>"})"));
+        throw new InvalidOperationException(
+            $"Ambiguous OSPF area-range hierarchy while folding '{prefix.ToCidrString()}': "
+            + $"multiple equal-length candidates without a unique MGMT boundary [{detail}]. "
+            + "Refusing silent first-match selection.");
     }
 
     private static OspfIpPrefix ParseRequired(string cidr) =>

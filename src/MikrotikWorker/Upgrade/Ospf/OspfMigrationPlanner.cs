@@ -249,13 +249,6 @@ internal static class OspfMigrationPlanner
                 notes);
         }
 
-        // Collapse per-VLAN / per-network site matchers into one interfaces=all template per site area.
-        // Record superseded source identities as positive KnownLegacy provenance for cleanup.
-        OspfSiteConsolidationResult consolidation =
-            OspfSiteMatcherConsolidation.ConsolidateWithProvenance(sites, ranges, notes);
-        sites = consolidation.Consolidated.ToList();
-        List<OspfSupersededTemplateIdentity> superseded = consolidation.Superseded.ToList();
-
         if (backhauls.Count == 0)
         {
             errors.Add("No valid active backbone PTP backhaul could be classified.");
@@ -270,6 +263,8 @@ internal static class OspfMigrationPlanner
         // on a different interface (would risk unintended activation under OR matching).
         errors.AddRange(ValidateBackhaulTemplateIsolation(backhauls, snapshot.IpAddresses));
 
+        // Derive management /24 and attach the MGMT area-range BEFORE consolidation so FoldPrefix
+        // can fold subdivided management matchers into the planned summary during provenance capture.
         string? derivedMgmt = null;
         if (loopbackRid.Succeeded && backhauls.Count > 0)
         {
@@ -297,8 +292,16 @@ internal static class OspfMigrationPlanner
                     derivedMgmt,
                     notes,
                     errors);
+                sites = EnsureDerivedManagementSiteMatcher(sites, areas, derivedMgmt, notes);
             }
         }
+
+        // Collapse per-VLAN / per-network site matchers into one interfaces=all template per site area.
+        // Record superseded source identities as positive KnownLegacy provenance for cleanup.
+        OspfSiteConsolidationResult consolidation =
+            OspfSiteMatcherConsolidation.ConsolidateWithProvenance(sites, ranges, notes);
+        sites = consolidation.Consolidated.ToList();
+        List<OspfSupersededTemplateIdentity> superseded = consolidation.Superseded.ToList();
 
         OspfPlanArea? siteArea = areas.FirstOrDefault(static a => !a.IsBackbone);
         if (siteArea is not null
@@ -838,6 +841,66 @@ internal static class OspfMigrationPlanner
 
     private static string? NullIfWhite(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>
+    /// Ensures the derived management <c>/24</c> is available as a consolidation input when needed.
+    /// Does not inject a duplicate <c>/24</c> when a broader site matcher already covers it and there
+    /// are no more-specific management subdivisions to fold — the MGMT area-range remains the
+    /// summarisation artifact in that hierarchy.
+    /// </summary>
+    private static List<OspfPlanSiteNetworkTemplate> EnsureDerivedManagementSiteMatcher(
+        List<OspfPlanSiteNetworkTemplate> sites,
+        IReadOnlyList<OspfPlanArea> areas,
+        string derivedMgmtCidr,
+        List<string> notes)
+    {
+        OspfPlanArea? site = areas.FirstOrDefault(static a => !a.IsBackbone);
+        if (site is null || !OspfIpPrefix.TryParse(derivedMgmtCidr, out OspfIpPrefix mgmt))
+        {
+            return sites;
+        }
+
+        List<OspfIpPrefix> siteNets = sites
+            .Where(s => string.Equals(s.AreaName, site.Name, StringComparison.OrdinalIgnoreCase))
+            .SelectMany(s =>
+                OspfNetworkList.TryParseAll(s.NetworkCidr, out List<OspfIpPrefix> nets, out _)
+                    ? nets
+                    : [])
+            .ToList();
+
+        bool exactPresent = siteNets.Any(n => n.Equals(mgmt));
+        if (exactPresent)
+        {
+            return sites;
+        }
+
+        bool coveredByBroader = siteNets.Any(n => n.Contains(mgmt) && !n.Equals(mgmt));
+        bool hasMoreSpecific = siteNets.Any(n => mgmt.Contains(n) && !n.Equals(mgmt));
+
+        if (coveredByBroader && !hasMoreSpecific)
+        {
+            notes.Add(
+                $"Derived management /24 '{derivedMgmtCidr}' is already covered by a broader site matcher; "
+                + "not injecting a duplicate /24 into interface-templates "
+                + "(MGMT area-range remains the summarisation artifact).");
+            return sites;
+        }
+
+        notes.Add(
+            hasMoreSpecific
+                ? $"Adding derived management /24 '{derivedMgmtCidr}' so subdivided management matchers can fold during consolidation."
+                : $"Adding derived management /24 '{derivedMgmtCidr}' as a site matcher input (no covering site network was present).");
+        List<OspfPlanSiteNetworkTemplate> result = sites.ToList();
+        result.Add(new OspfPlanSiteNetworkTemplate
+        {
+            AreaName = site.Name,
+            Interfaces = OspfSiteMatcherConsolidation.AllInterfaces,
+            NetworkCidr = mgmt.ToCidrString(),
+            Comment = OspfFleetNaming.ManagementRangeComment,
+            Passive = true,
+        });
+        return result;
+    }
 
     private static List<OspfPlanAreaRange> EnsureManagementAreaRange(
         List<OspfPlanAreaRange> ranges,

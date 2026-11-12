@@ -10,7 +10,9 @@ public sealed class FirmwareUpgradeOptions
     public const string SectionName = "FirmwareUpgrade";
 
     /// <summary>
-    /// When false, jobs perform assessment only and never fetch/install/reboot.
+    /// Administrative kill-switch. <c>appsettings.json</c> ships with <c>true</c> so eligible devices are
+    /// upgraded automatically. When false, jobs never fetch/install/reboot and each job is reported as
+    /// <c>Failed</c> (upgrade administratively disabled) — never as a success.
     /// </summary>
     public bool Enabled { get; set; }
 

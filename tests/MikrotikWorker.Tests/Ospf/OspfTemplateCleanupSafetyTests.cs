@@ -14,7 +14,7 @@ public sealed class OspfTemplateCleanupSafetyTests
     [Theory]
     [InlineData("unexpected-area", "backbone-v2", "ether99", "10.255.255.0/30", true, false)]
     [InlineData("unrelated-network", "site", "Bridge-VLAN-99_MGMT", "192.0.2.0/24", true, false)]
-    [InlineData("unrelated-active", "site", "Bridge-VLAN-50", "10.16.11.0/27", false, false)]
+    [InlineData("unrelated-active", "site", "Bridge-VLAN-50", "198.51.100.0/30", false, false)]
     [InlineData("unrelated-passive", "site", "all", "203.0.113.0/24", true, false)]
     [InlineData("disabled-unrelated", "backbone-v2", "ether88", "10.254.0.0/30", true, true)]
     public async Task UnknownTemplate_Aborts_WithZeroDeletes(
@@ -106,7 +106,7 @@ public sealed class OspfTemplateCleanupSafetyTests
     }
 
     [Fact]
-    public void Classifier_CoveredPrefixWithoutProvenance_IsUnknown()
+    public void Classifier_UnrelatedPrefixOutsideConsolidated_IsUnknown()
     {
         OspfMigrationPlan plan = MinimalPlan(includeLegacyProvenance: false);
         InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
@@ -116,11 +116,11 @@ public sealed class OspfTemplateCleanupSafetyTests
                     InventoryFrom(PlannedBackhaul(plan)),
                     InventoryFrom(PlannedLoopback(plan)),
                     InventoryFrom(PlannedSite(plan)),
-                    InventoryFrom(Row("*OP", "site", "VLAN-200", "10.16.11.128/26", passive: true, disabled: false)),
+                    InventoryFrom(Row("*OP", "site", "VLAN-200", "192.0.2.0/24", passive: true, disabled: false)),
                 ]));
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Contains("*OP", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("provenance", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("consolidated-prefix replacement", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -408,11 +408,11 @@ public sealed class OspfTemplateCleanupSafetyTests
     }
 
     [Fact]
-    public async Task OperatorManagedCoveredPrefix_AbortsCleanup()
+    public async Task OperatorManagedUnrelatedPrefix_AbortsCleanup()
     {
         OspfMigrationPlan plan = MinimalPlan(includeLegacyProvenance: false);
         MutableTemplateStore store = MutableTemplateStore.WithPlanned(plan);
-        store.Templates.Add(Row("*OP", "site", "VLAN-200", "10.16.11.128/26", passive: true, disabled: false));
+        store.Templates.Add(Row("*OP", "site", "VLAN-200", "192.0.2.0/24", passive: true, disabled: false));
         MutableTemplateConnection capturing = store.Connect();
 
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>

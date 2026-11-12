@@ -41,7 +41,7 @@ public sealed class FirmwareUploadStorageModelTests
     [Theory]
     [InlineData("BR01.POP011.016.Tommy", DeviceType.Br)]
     [InlineData("ACE01.POP001.001.core", DeviceType.Ace)]
-    public void LowFlashDeviceTypes_RemainEligibleForFullUpgrade(string identity, DeviceType expectedType)
+    public void LowFlashDeviceTypes_RemainEligibleForRouterOs7(string identity, DeviceType expectedType)
     {
         DeviceIdentityClassification classification = DeviceIdentityClassifier.Classify(identity);
 
@@ -112,10 +112,10 @@ public sealed class FirmwareUploadStorageModelTests
             ExpectedFetchSizeBytes = packageBytes,
         };
 
-        RouterOsV6UpgradeExecutor executor = CreateV6OnlyExecutor(ops, root);
+        RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(ops, root);
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "BR01.POP011.016.Tommy", version: "6.49.10"),
-            CreateJob("Tommy", "198.18.240.11", UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob("Tommy", "198.18.240.11"),
             CreateDevice("BR01.POP011.016.Tommy", "6.49.10"),
             CreateAssessment("198.18.240.11"),
             "admin",
@@ -123,7 +123,9 @@ public sealed class FirmwareUploadStorageModelTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        // The v6 stage fetched and rebooted; with no RouterOS 7 target the job stops as TargetUnavailable (never success).
+        Assert.Equal(UpgradeOutcome.TargetUnavailable, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
         Assert.True(ops.FetchCalled);
         Assert.Equal(1, ops.RebootCount);
     }
@@ -135,10 +137,10 @@ public sealed class FirmwareUploadStorageModelTests
         await File.WriteAllBytesAsync(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4]);
 
         TrackingOps ops = new("ACE01.POP001.001.core") { FetchThrows = true };
-        RouterOsV6UpgradeExecutor executor = CreateV6OnlyExecutor(ops, root);
+        RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(ops, root);
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "ACE01.POP001.001.core", version: "6.49.10"),
-            CreateJob("ACE", "10.0.0.50", UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob("ACE", "10.0.0.50"),
             CreateDevice("ACE01.POP001.001.core", "6.49.10"),
             CreateAssessment("10.0.0.50"),
             "admin",
@@ -163,13 +165,13 @@ public sealed class FirmwareUploadStorageModelTests
             IncompleteFetchSizeBytes = 3,
         };
 
-        RouterOsV6UpgradeExecutor executor = CreateV6OnlyExecutor(
+        RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(
             ops,
             root,
             fetchTimeout: TimeSpan.FromMilliseconds(50));
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "BR01.POP011.016.Tommy", version: "6.49.10"),
-            CreateJob("Tommy", "198.18.240.11", UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob("Tommy", "198.18.240.11"),
             CreateDevice("BR01.POP011.016.Tommy", "6.49.10"),
             CreateAssessment("198.18.240.11"),
             "admin",
@@ -189,10 +191,10 @@ public sealed class FirmwareUploadStorageModelTests
         await File.WriteAllBytesAsync(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4]);
 
         TrackingOps ops = new("BR01.POP011.016.Tommy");
-        RouterOsV6UpgradeExecutor executor = CreateV6OnlyExecutor(ops, root, backup: new FailingBackup());
+        RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(ops, root, backup: new FailingBackup());
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "BR01.POP011.016.Tommy", version: "6.49.10"),
-            CreateJob("Tommy", "198.18.240.11", UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob("Tommy", "198.18.240.11"),
             CreateDevice("BR01.POP011.016.Tommy", "6.49.10"),
             CreateAssessment("198.18.240.11"),
             "admin",
@@ -222,7 +224,7 @@ public sealed class FirmwareUploadStorageModelTests
         return File.ReadAllText(path);
     }
 
-    private static MikrotikScheduledJob CreateJob(string name, string ip, UpgradeExecutionMode mode) =>
+    private static MikrotikScheduledJob CreateJob(string name, string ip) =>
         new()
         {
             ImportId = Guid.NewGuid(),
@@ -232,7 +234,6 @@ public sealed class FirmwareUploadStorageModelTests
             RouterIp = IPAddress.Parse(ip),
             DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
             DateStopUtc = DateTime.UtcNow.AddHours(1),
-            ExecutionMode = mode,
         };
 
     private static MikrotikDeviceInfo CreateDevice(string identity, string version) =>
@@ -257,7 +258,7 @@ public sealed class FirmwareUploadStorageModelTests
             AssessedAtUtc = DateTimeOffset.UtcNow,
         };
 
-    private static RouterOsV6UpgradeExecutor CreateV6OnlyExecutor(
+    private static RouterOsV6UpgradeExecutor CreateExecutorWithoutV7Target(
         TrackingOps ops,
         string firmwareRoot,
         IDeviceBackupService? backup = null,
@@ -289,7 +290,7 @@ public sealed class FirmwareUploadStorageModelTests
                 new StaticFirmwarePackageCatalog(firmwareRoot),
                 firmwareFilesOptions),
             backup ?? new SucceedingBackup(),
-            new FixedRouterOsV7TargetProvider("7.25.1"),
+            new FixedRouterOsV7TargetProvider(null),
             new LegacyFleetUpgradeAutomationCleanup(ops, NullLogger<LegacyFleetUpgradeAutomationCleanup>.Instance),
             new RouterboardFirmwareUpgradeService(
                 ops,

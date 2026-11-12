@@ -103,11 +103,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
             Identity = "AP01.POP001.001.access",
             PostUpgradeVersion = "7.23.8",
         };
-        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, new SucceedingBackup(), enabled: true);
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, new SucceedingBackup(), enabled: true, v7Target: "7.23.8");
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"),
-            CreateJob(UpgradeExecutionMode.FullUpgrade),
+            CreateJob(),
             new MikrotikDeviceInfo
             {
                 Identity = "AP01.POP001.001.access",
@@ -123,7 +123,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeOutcome.SkippedAlreadyAtTarget, result.Outcome);
         Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
         Assert.False(ops.FetchCalled);
@@ -291,7 +291,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
         Assert.True(ops.RebootCalled);
         Assert.True(result.RebootInitiated);
     }
@@ -332,7 +332,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TargetUnavailable, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
         Assert.Equal("6.49.23", result.PostUpgradeVersion);
         Assert.True(factory.SuccessCount >= 1);
     }
@@ -374,7 +375,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TargetUnavailable, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
     }
 
     [Fact]
@@ -453,7 +455,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
     }
 
     [Fact]
@@ -491,7 +493,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(UpgradeOutcome.UpgradeInterrupted, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
         Assert.True(result.RebootInitiated);
     }
 
@@ -530,7 +532,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
     }
 
     [Fact]
@@ -558,7 +560,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TargetUnavailable, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
         Assert.Equal("6.49.23", result.PostUpgradeVersion);
     }
 
@@ -646,7 +649,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
         Assert.True(result.RebootInitiated);
         Assert.True(time.GetUtcNow() >= new DateTimeOffset(2026, 11, 10, 12, 5, 0, TimeSpan.Zero));
     }
@@ -676,7 +679,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TargetUnavailable, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
         Assert.True(ops.PostRebootPackageListCount >= 1);
         Assert.True(ops.PostRebootDeviceInfoCount >= 1);
     }
@@ -691,7 +695,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
         TimeProvider? timeProvider = null,
         TimeSpan? rebootTimeout = null,
         TimeSpan? reconnectInterval = null,
-        TimeSpan? postUpgradeVerifyTimeout = null)
+        TimeSpan? postUpgradeVerifyTimeout = null,
+        string? v7Target = null)
     {
         string root = firmwareRoot ?? Directory.CreateTempSubdirectory("upg-fw-").FullName;
         if (firmwareRoot is null)
@@ -706,8 +711,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
             effectiveVerifyTimeout = effectiveRebootTimeout;
         }
 
-        // These stage-oriented unit tests exercise the shared stage machinery with an ACE identity
-        // so the RouterOS 7 transition is intentionally skipped after a successful v6 stepping path.
+        // These stage-oriented unit tests exercise the v6 stepping machinery. No RouterOS 7 target is configured,
+        // so after a verified v6 step the workflow stops with TargetUnavailable (a Blocked job, never a success).
         IMikrotikConnectionFactory factory = connectionFactory
             ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect in this test"));
         IOptions<FirmwareUpgradeOptions> upgradeOptions = Options.Create(new FirmwareUpgradeOptions
@@ -732,7 +737,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
                 new StaticFirmwarePackageCatalog(root),
                 firmwareFilesOptions),
             backup,
-            new FixedRouterOsV7TargetProvider("7.23.8"),
+            new FixedRouterOsV7TargetProvider(v7Target),
             new LegacyFleetUpgradeAutomationCleanup(
                 ops,
                 NullLogger<LegacyFleetUpgradeAutomationCleanup>.Instance),
@@ -826,8 +831,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         }
     }
 
-    private static MikrotikScheduledJob CreateJob(
-        UpgradeExecutionMode executionMode = UpgradeExecutionMode.V6SteppingOnly) =>
+    private static MikrotikScheduledJob CreateJob() =>
         new()
         {
             ImportId = Guid.NewGuid(),
@@ -837,13 +841,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
             RouterIp = IPAddress.Parse("10.0.0.50"),
             DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
             DateStopUtc = DateTime.UtcNow.AddHours(1),
-            ExecutionMode = executionMode,
         };
 
     private static MikrotikDeviceInfo CreateDevice() =>
         new()
         {
-            // Stage-unit tests default to V6SteppingOnly so ACE/BR eligibility does not enter the v7 stage.
             Identity = "ACE01.POP001.001.core",
             Version = "6.49.10",
             ArchitectureName = "mipsbe",

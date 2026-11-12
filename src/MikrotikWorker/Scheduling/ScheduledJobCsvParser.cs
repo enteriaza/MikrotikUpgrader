@@ -5,7 +5,6 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
-using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Scheduling;
 
@@ -14,6 +13,8 @@ internal sealed class ScheduledJobCsvParser(
     CsvDateTimeParser dateTimeParser)
 {
     private static readonly string[] RequiredHeaders = ["datestart", "datestop", "routername", "routerip"];
+
+    private const string RemovedExecutionModeHeader = "executionmode";
 
     public async Task<CsvParseResult> ValidateAsync(
         string filePath,
@@ -163,7 +164,6 @@ internal sealed class ScheduledJobCsvParser(
                 RouterIp = row.RouterIp,
                 DateStartUtc = row.DateStartUtc,
                 DateStopUtc = row.DateStopUtc,
-                ExecutionMode = row.ExecutionMode,
             };
         }
     }
@@ -208,6 +208,18 @@ internal sealed class ScheduledJobCsvParser(
             map[header] = i;
         }
 
+        if (map.ContainsKey(RemovedExecutionModeHeader))
+        {
+            errors?.Add(new CsvValidationError
+            {
+                FileName = fileName,
+                ColumnName = RemovedExecutionModeHeader,
+                Reason =
+                    "Column 'executionmode' is no longer supported. ExecutionMode (FullUpgrade / V6SteppingOnly) has been removed; "
+                    + "eligible devices are always upgraded automatically to the configured RouterOS 7 target. Remove the column and re-submit the file.",
+            });
+        }
+
         foreach (string required in RequiredHeaders)
         {
             if (!map.ContainsKey(required))
@@ -235,47 +247,12 @@ internal sealed class ScheduledJobCsvParser(
         string dateStopRaw = GetRequiredField(csv, headers, "datestop", fileName, rowNumber);
         string routerName = GetRequiredField(csv, headers, "routername", fileName, rowNumber);
         string routerIpRaw = GetRequiredField(csv, headers, "routerip", fileName, rowNumber);
-        UpgradeExecutionMode executionMode = ReadExecutionMode(csv, headers, fileName, rowNumber);
 
         DateTime dateStartUtc = dateTimeParser.ParseToUtc(dateStartRaw, fileName, rowNumber, "datestart");
         DateTime dateStopUtc = dateTimeParser.ParseToUtc(dateStopRaw, fileName, rowNumber, "datestop");
         IPAddress routerIp = ParseIpAddress(routerIpRaw, fileName, rowNumber);
 
-        return new ParsedCsvRow(routerName, routerIp, dateStartUtc, dateStopUtc, executionMode);
-    }
-
-    private static UpgradeExecutionMode ReadExecutionMode(
-        CsvReader csv,
-        Dictionary<string, int> headers,
-        string fileName,
-        int rowNumber)
-    {
-        if (!headers.TryGetValue("executionmode", out int index))
-        {
-            // Column absent → production default. Do not invent v6-only behaviour.
-            return UpgradeExecutionMode.FullUpgrade;
-        }
-
-        string? raw = csv.GetField(index);
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            throw new CsvScheduleException(
-                fileName,
-                rowNumber,
-                "executionmode",
-                "Value is empty. Omit the column for FullUpgrade, or supply FullUpgrade / V6SteppingOnly.");
-        }
-
-        if (!UpgradeExecutionModeParser.TryParse(raw, out UpgradeExecutionMode mode))
-        {
-            throw new CsvScheduleException(
-                fileName,
-                rowNumber,
-                "executionmode",
-                $"Value '{raw.Trim()}' is not a supported execution mode. Use FullUpgrade or V6SteppingOnly.");
-        }
-
-        return mode;
+        return new ParsedCsvRow(routerName, routerIp, dateStartUtc, dateStopUtc);
     }
 
     private static string GetRequiredField(
@@ -359,28 +336,8 @@ internal sealed class ScheduledJobCsvParser(
         DateTime? expectedStopUtc,
         ErrorAccumulator errors)
     {
-        if (row.DateStartUtc <= utcNow)
-        {
-            errors.Add(new CsvValidationError
-            {
-                FileName = fileName,
-                RowNumber = rowNumber,
-                ColumnName = "datestart",
-                Reason = $"datestart '{row.DateStartUtc:O}' must be in the future (UTC).",
-            });
-        }
-
-        if (row.DateStopUtc <= utcNow)
-        {
-            errors.Add(new CsvValidationError
-            {
-                FileName = fileName,
-                RowNumber = rowNumber,
-                ColumnName = "datestop",
-                Reason = $"datestop '{row.DateStopUtc:O}' must be in the future (UTC).",
-            });
-        }
-
+        // Maintenance window: DateStartUtc inclusive, DateStopUtc exclusive (matches the scheduler).
+        // Past/equal start with a still-open stop is valid (already-active window → immediate eligibility).
         if (row.DateStopUtc <= row.DateStartUtc)
         {
             errors.Add(new CsvValidationError
@@ -389,6 +346,17 @@ internal sealed class ScheduledJobCsvParser(
                 RowNumber = rowNumber,
                 ColumnName = "datestop",
                 Reason = "datestop must be later than datestart.",
+            });
+        }
+        else if (row.DateStopUtc <= utcNow)
+        {
+            errors.Add(new CsvValidationError
+            {
+                FileName = fileName,
+                RowNumber = rowNumber,
+                ColumnName = "datestop",
+                Reason =
+                    $"datestop '{row.DateStopUtc:O}' is not after the current time (UTC); the maintenance window has expired.",
             });
         }
 
@@ -419,8 +387,7 @@ internal sealed class ScheduledJobCsvParser(
         string RouterName,
         IPAddress RouterIp,
         DateTime DateStartUtc,
-        DateTime DateStopUtc,
-        UpgradeExecutionMode ExecutionMode);
+        DateTime DateStopUtc);
 
     private sealed class ErrorAccumulator(int maxRetained)
     {

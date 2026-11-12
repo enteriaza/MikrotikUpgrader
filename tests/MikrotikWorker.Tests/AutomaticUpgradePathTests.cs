@@ -12,10 +12,12 @@ using tik4net;
 namespace MikrotikWorker.Tests;
 
 /// <summary>
-/// Non-live coverage for per-job <see cref="UpgradeExecutionMode.V6SteppingOnly"/>.
-/// Includes a synthetic lab fixture for 198.18.240.11 — not a live router result.
+/// Non-live coverage for the automatic upgrade path: eligible devices are always upgraded to the
+/// configured RouterOS 7 target (v6 stepping first when the device runs RouterOS 6 older than 6.49.23).
+/// There is no operator-selectable execution mode. Includes a synthetic lab fixture for
+/// 198.18.240.11 — not a live router result. Uses fakes only.
 /// </summary>
-public sealed class V6SteppingOnlyExecutionModeTests
+public sealed class AutomaticUpgradePathTests
 {
     private static readonly string[] LabBundledComponents =
     [
@@ -38,7 +40,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
     [InlineData("DCL12.POP123.456.some.device", DeviceType.Dcl)]
     [InlineData("ACE01.POP001.001.core", DeviceType.Ace)]
     [InlineData("BR12.POP123.456.edge", DeviceType.Br)]
-    public async Task V6SteppingOnly_EligibleOrExcludedIdentity_StopsAfterV6(
+    public async Task RouterOs6BelowStepping_AnyIdentity_StepsThenUpgradesToRouterOs7(
         string identity,
         DeviceType expectedType)
     {
@@ -46,28 +48,24 @@ public sealed class V6SteppingOnlyExecutionModeTests
         StageTrackingOps ops = new(effectiveIdentity)
         {
             InitialVersion = "6.49.19",
-            VersionsAfterReboot = ["6.49.23"],
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
         };
         CountingBackup backup = new();
         CountingPackageResolver packages = CreateCountingResolver();
         CountingV7TargetProvider v7 = new("7.23.8");
-        string root = packages.FirmwareRoot;
         ScriptedMikrotikConnectionFactory reconnect = new(_ =>
             FakeMikrotikConnections.CreateFullyPopulated(
                 identity: effectiveIdentity,
                 version: "6.49.23",
                 architecture: "mipsbe"));
-        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, backup, root, reconnect, packages, v7);
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, backup, packages.FirmwareRoot, reconnect, packages, v7);
 
-        CommandRecordingConnection recording = new(
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(
                 identity: effectiveIdentity,
                 version: "6.49.19",
-                architecture: "mipsbe"));
-
-        UpgradeExecutionResult result = await executor.ExecuteAsync(
-            recording,
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
+                architecture: "mipsbe"),
+            CreateJob(),
             CreateDevice(effectiveIdentity, "6.49.19"),
             CreateAssessment(),
             "admin",
@@ -75,18 +73,17 @@ public sealed class V6SteppingOnlyExecutionModeTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, result.ExecutionMode);
-        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
-        Assert.Equal("6.49.23", result.PostUpgradeVersion);
-        Assert.Equal(1, backup.CallCount);
-        Assert.Equal(1, ops.RebootCount);
-        Assert.Equal(0, v7.CaptureCount);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(3, backup.CallCount);
+        Assert.Equal(2, ops.RebootCount);
+        Assert.Equal(1, v7.CaptureCount);
         Assert.True(ops.SchedulerCountCalls > 0);
-        Assert.All(packages.ResolvedTargets, t => Assert.True(t.IsV6));
-        Assert.DoesNotContain(packages.ResolvedTargets, static t => t.IsV7OrLater);
-        AssertNoV7Mutation(ops);
-        AssertNoRouterboardUpgrade(recording);
+        Assert.Equal(2, packages.ResolvedTargets.Count);
+        Assert.Equal(RouterOsUpgradeVersions.V6Stepping, packages.ResolvedTargets[0]);
+        Assert.True(packages.ResolvedTargets[1].IsV7OrLater);
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
         Assert.DoesNotContain(
             ops.FetchedFiles,
             f => f.Equals("FleetUpgradeInstall.rsc", StringComparison.OrdinalIgnoreCase));
@@ -94,7 +91,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
     }
 
     [Fact]
-    public async Task SyntheticLabFixture_198_18_240_11_V6SteppingOnly_SucceedsWithoutV7()
+    public async Task SyntheticLabFixture_198_18_240_11_StepsThenUpgradesToRouterOs7()
     {
         // SyntheticFixture only — not a live router observation or live upgrade result.
         const string identity = "Mikrotik";
@@ -102,7 +99,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
         StageTrackingOps ops = new(identity)
         {
             InitialVersion = "6.49.19",
-            VersionsAfterReboot = ["6.49.23"],
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
             IncludeLabBundledInventory = true,
         };
         CountingBackup backup = new();
@@ -121,26 +118,22 @@ public sealed class V6SteppingOnlyExecutionModeTests
             packages,
             v7);
 
-        CommandRecordingConnection recording = new(
-            FakeMikrotikConnections.CreateFullyPopulated(
-                identity: identity,
-                version: "6.49.19",
-                architecture: "mipsbe"));
-
         MikrotikScheduledJob job = new()
         {
             ImportId = Guid.NewGuid(),
-            SourceFileName = "lab-v6-only-synthetic.csv",
+            SourceFileName = "lab-synthetic.csv",
             RowNumber = 2,
             RouterName = identity,
             RouterIp = IPAddress.Parse(routerIp),
             DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
             DateStopUtc = DateTime.UtcNow.AddHours(1),
-            ExecutionMode = UpgradeExecutionMode.V6SteppingOnly,
         };
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
-            recording,
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: identity,
+                version: "6.49.19",
+                architecture: "mipsbe"),
             job,
             new MikrotikDeviceInfo
             {
@@ -155,46 +148,50 @@ public sealed class V6SteppingOnlyExecutionModeTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, result.ExecutionMode);
-        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
-        Assert.Equal("6.49.23", result.PostUpgradeVersion);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
         Assert.Equal("mipsbe", result.PostUpgradeArchitecture);
-        Assert.Equal(1, backup.CallCount);
-        Assert.Equal(1, ops.RebootCount);
-        Assert.Single(ops.FetchedFiles);
+        Assert.Equal(3, backup.CallCount);
+        Assert.Equal(2, ops.RebootCount);
         Assert.Contains("routeros-mipsbe-6.49.23.npk", ops.FetchedFiles[0], StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(10, ops.LastBundledComponentCount);
-        Assert.Equal(0, v7.CaptureCount);
-        Assert.Single(packages.ResolvedTargets);
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
         Assert.Equal(RouterOsUpgradeVersions.V6Stepping, packages.ResolvedTargets[0]);
-        Assert.DoesNotContain(packages.ResolvedTargets, static t => t.IsV7OrLater);
-        AssertNoV7Mutation(ops);
-        AssertNoRouterboardUpgrade(recording);
+        Assert.True(packages.ResolvedTargets[^1].IsV7OrLater);
     }
 
     [Theory]
     [InlineData("6.49.23")]
     [InlineData("6.49.24")]
-    public async Task V6SteppingOnly_AlreadyAtOrAboveStepping_DoesNotClaimCompletedStage(string version)
+    public async Task RouterOs6AtOrAboveStepping_SkipsStepping_AndUpgradesDirectlyToRouterOs7(string version)
     {
-        StageTrackingOps ops = new("Mikrotik") { InitialVersion = version };
+        StageTrackingOps ops = new("Mikrotik")
+        {
+            InitialVersion = version,
+            VersionsAfterReboot = ["7.23.8"],
+        };
         CountingBackup backup = new();
         CountingPackageResolver packages = CreateCountingResolver();
         CountingV7TargetProvider v7 = new("7.23.8");
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "Mikrotik",
+                version: "7.23.8",
+                architecture: "mipsbe"));
         RouterOsV6UpgradeExecutor executor = CreateExecutor(
             ops,
             backup,
             packages.FirmwareRoot,
-            packageResolver: packages,
-            v7TargetProvider: v7);
+            reconnect,
+            packages,
+            v7);
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(
                 identity: "Mikrotik",
                 version: version,
                 architecture: "mipsbe"),
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob(),
             CreateDevice("Mikrotik", version),
             CreateAssessment(),
             "admin",
@@ -202,23 +199,89 @@ public sealed class V6SteppingOnlyExecutionModeTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, result.ExecutionMode);
-        Assert.Equal(UpgradeCompletedStages.None, result.CompletedStage);
-        Assert.Equal(version, result.PostUpgradeVersion);
-        Assert.Equal("mipsbe", result.PostUpgradeArchitecture);
-        Assert.Equal(0, backup.CallCount);
-        Assert.Equal(0, ops.RebootCount);
-        Assert.Empty(ops.FetchedFiles);
-        Assert.Empty(packages.ResolvedTargets);
-        Assert.Equal(0, v7.CaptureCount);
-        AssertNoV7Mutation(ops);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(1, ops.RebootCount);
+        Assert.Equal(1, v7.CaptureCount);
+        RouterOsVersion only = Assert.Single(packages.ResolvedTargets);
+        Assert.True(only.IsV7OrLater);
+        Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task V6SteppingOnly_RouterOs7Device_IsSkippedStageNotApplicable()
+    public async Task RouterOs7OlderThanTarget_UpgradesDirectlyToTarget()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            InitialVersion = "7.22.0",
+            VersionsAfterReboot = ["7.23.8"],
+        };
+        CountingBackup backup = new();
+        CountingPackageResolver packages = CreateCountingResolver();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "AP01.POP001.001.access",
+                version: "7.23.8",
+                architecture: "mipsbe"));
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, backup, packages.FirmwareRoot, reconnect, packages);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "AP01.POP001.001.access",
+                version: "7.22.0",
+                architecture: "mipsbe"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "7.22.0"),
+            CreateAssessment(),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(1, ops.RebootCount);
+        Assert.All(packages.ResolvedTargets, static t => Assert.True(t.IsV7OrLater));
+    }
+
+    [Fact]
+    public async Task RouterOs7AtTarget_ReportsAlreadyAtTarget_WithoutPackageStageOrReboot()
     {
         StageTrackingOps ops = new("AP01.POP001.001.access") { InitialVersion = "7.23.8" };
+        CountingBackup backup = new();
+        CountingPackageResolver packages = CreateCountingResolver();
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, backup, packages.FirmwareRoot, packageResolver: packages);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "AP01.POP001.001.access",
+                version: "7.23.8",
+                architecture: "mipsbe"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "7.23.8"),
+            CreateAssessment(DeviceAssessmentStatus.AlreadyAtTarget),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.SkippedAlreadyAtTarget, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.False(result.RebootInitiated);
+        Assert.Equal(0, ops.RebootCount);
+        Assert.Empty(ops.FetchedFiles);
+        Assert.Empty(packages.ResolvedTargets);
+        Assert.Equal(
+            (ScheduledJobTerminalState.AlreadyUpToDate, true),
+            RouterJobExecutor.MapUpgradeOutcome(result.Outcome));
+    }
+
+    [Fact]
+    public async Task UpgradeDisabled_DoesNotMutate_AndIsNeverReportedAsSuccess()
+    {
+        StageTrackingOps ops = new("Mikrotik") { InitialVersion = "6.49.19", VersionsAfterReboot = ["6.49.23"] };
         CountingBackup backup = new();
         CountingPackageResolver packages = CreateCountingResolver();
         CountingV7TargetProvider v7 = new("7.23.8");
@@ -227,41 +290,65 @@ public sealed class V6SteppingOnlyExecutionModeTests
             backup,
             packages.FirmwareRoot,
             packageResolver: packages,
-            v7TargetProvider: v7);
-
-        CommandRecordingConnection recording = new(
-            FakeMikrotikConnections.CreateFullyPopulated(
-                identity: "AP01.POP001.001.access",
-                version: "7.23.8",
-                architecture: "mipsbe"));
+            v7TargetProvider: v7,
+            enabled: false);
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
-            recording,
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
-            CreateDevice("AP01.POP001.001.access", "7.23.8"),
-            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade),
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "Mikrotik",
+                version: "6.49.19",
+                architecture: "mipsbe"),
+            CreateJob(),
+            CreateDevice("Mikrotik", "6.49.19"),
+            CreateAssessment(),
             "admin",
             "secret",
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.SkippedStageNotApplicable, result.Outcome);
-        Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, result.ExecutionMode);
+        Assert.Equal(UpgradeOutcome.SkippedUpgradeDisabled, result.Outcome);
         Assert.Equal(UpgradeCompletedStages.None, result.CompletedStage);
-        Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal("mipsbe", result.PostUpgradeArchitecture);
-        Assert.Contains("not applicable", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("administratively disabled", result.Detail, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(0, backup.CallCount);
         Assert.Equal(0, ops.RebootCount);
+        Assert.Equal(0, ops.SchedulerCountCalls);
         Assert.Empty(ops.FetchedFiles);
         Assert.Empty(packages.ResolvedTargets);
         Assert.Equal(0, v7.CaptureCount);
-        AssertNoV7Mutation(ops);
-        AssertNoRouterboardUpgrade(recording);
+
+        (ScheduledJobTerminalState terminal, bool success) = RouterJobExecutor.MapUpgradeOutcome(result.Outcome);
+        Assert.Equal(ScheduledJobTerminalState.Failed, terminal);
+        Assert.False(success);
     }
 
     [Fact]
-    public async Task V6SteppingOnly_VerificationFailure_DoesNotClaimSuccessOrCompletedStage()
+    public async Task UnsupportedRouterOsMajor_IsBlocked_WithoutMutation()
+    {
+        StageTrackingOps ops = new("Mikrotik") { InitialVersion = "5.26" };
+        CountingBackup backup = new();
+        CountingPackageResolver packages = CreateCountingResolver();
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, backup, packages.FirmwareRoot, packageResolver: packages);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "Mikrotik", version: "5.26", architecture: "mipsbe"),
+            CreateJob(),
+            CreateDevice("Mikrotik", "5.26"),
+            CreateAssessment(),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.PolicyBlocked, result.Outcome);
+        Assert.Contains("Unsupported RouterOS major version", result.Detail, StringComparison.Ordinal);
+        Assert.Equal(0, backup.CallCount);
+        Assert.Equal(0, ops.RebootCount);
+        Assert.Empty(ops.FetchedFiles);
+        Assert.Equal(ScheduledJobTerminalState.Blocked, RouterJobExecutor.MapUpgradeOutcome(result.Outcome).Terminal);
+    }
+
+    [Fact]
+    public async Task SteppingVerificationFailure_DoesNotContinueToRouterOs7_OrClaimSuccess()
     {
         StageTrackingOps ops = new("Mikrotik")
         {
@@ -288,7 +375,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 identity: "Mikrotik",
                 version: "6.49.19",
                 architecture: "mipsbe"),
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob(),
             CreateDevice("Mikrotik", "6.49.19"),
             CreateAssessment(),
             "admin",
@@ -297,18 +384,17 @@ public sealed class V6SteppingOnlyExecutionModeTests
             CancellationToken.None);
 
         Assert.Equal(UpgradeOutcome.UpgradeVersionMismatch, result.Outcome);
-        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
         Assert.Equal(UpgradeCompletedStages.None, result.CompletedStage);
-        Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, result.ExecutionMode);
         Assert.Equal(1, backup.CallCount);
         Assert.Equal(1, ops.RebootCount);
         Assert.Equal(0, v7.CaptureCount);
         Assert.DoesNotContain(packages.ResolvedTargets, static t => t.IsV7OrLater);
         AssertNoV7Mutation(ops);
+        Assert.Equal(ScheduledJobTerminalState.Failed, RouterJobExecutor.MapUpgradeOutcome(result.Outcome).Terminal);
     }
 
     [Fact]
-    public async Task V6SteppingOnly_RebootTimeout_PreservesTimeoutOutcome()
+    public async Task SteppingRebootTimeout_PreservesTimeoutOutcome_AndDoesNotContinue()
     {
         FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 10, 12, 0, 0, TimeSpan.Zero));
         StageTrackingOps ops = new("Mikrotik")
@@ -334,7 +420,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 identity: "Mikrotik",
                 version: "6.49.19",
                 architecture: "mipsbe"),
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob(),
             CreateDevice("Mikrotik", "6.49.19"),
             CreateAssessment(),
             "admin",
@@ -348,12 +434,11 @@ public sealed class V6SteppingOnlyExecutionModeTests
 
         Assert.Equal(UpgradeOutcome.UpgradeTimedOut, result.Outcome);
         Assert.Equal(UpgradeCompletedStages.None, result.CompletedStage);
-        Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, result.ExecutionMode);
         AssertNoV7Mutation(ops);
     }
 
     [Fact]
-    public async Task V6SteppingOnly_Cancellation_PreservesInterruptedOutcome()
+    public async Task Cancellation_DuringSteppingVerification_PreservesInterruptedOutcome()
     {
         StageTrackingOps ops = new("Mikrotik")
         {
@@ -383,7 +468,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 identity: "Mikrotik",
                 version: "6.49.19",
                 architecture: "mipsbe"),
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob(),
             CreateDevice("Mikrotik", "6.49.19"),
             CreateAssessment(),
             "admin",
@@ -398,63 +483,11 @@ public sealed class V6SteppingOnlyExecutionModeTests
         Assert.Equal(UpgradeOutcome.UpgradeInterrupted, result.Outcome);
         Assert.Equal(UpgradeCompletedStages.None, result.CompletedStage);
         AssertNoV7Mutation(ops);
+        Assert.Equal(ScheduledJobTerminalState.Cancelled, RouterJobExecutor.MapUpgradeOutcome(result.Outcome).Terminal);
     }
 
     [Fact]
-    public async Task FullUpgrade_UnknownIdentity_StillRunsTwoStage()
-    {
-        StageTrackingOps ops = new("Mikrotik")
-        {
-            InitialVersion = "6.49.19",
-            VersionsAfterReboot = ["6.49.23", "7.23.8"],
-        };
-        CountingBackup backup = new();
-        CountingPackageResolver packages = CreateCountingResolver();
-        CountingV7TargetProvider v7 = new("7.23.8");
-        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
-            FakeMikrotikConnections.CreateFullyPopulated(
-                identity: "Mikrotik",
-                version: "6.49.23",
-                architecture: "mipsbe"));
-        RouterOsV6UpgradeExecutor executor = CreateExecutor(
-            ops,
-            backup,
-            packages.FirmwareRoot,
-            reconnect,
-            packages,
-            v7);
-
-        UpgradeExecutionResult result = await executor.ExecuteAsync(
-            FakeMikrotikConnections.CreateFullyPopulated(
-                identity: "Mikrotik",
-                version: "6.49.19",
-                architecture: "mipsbe"),
-            CreateJob(UpgradeExecutionMode.FullUpgrade),
-            CreateDevice("Mikrotik", "6.49.19"),
-            CreateAssessment(),
-            "admin",
-            "secret",
-            static () => true,
-            CancellationToken.None);
-
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
-        Assert.Equal(UpgradeExecutionMode.FullUpgrade, result.ExecutionMode);
-        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
-        Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal(3, backup.CallCount);
-        Assert.Equal(2, ops.RebootCount);
-        Assert.Equal(1, v7.CaptureCount);
-        Assert.True(ops.SchedulerCountCalls > 0);
-        Assert.Contains(packages.ResolvedTargets, static t => t.IsV6);
-        Assert.Contains(packages.ResolvedTargets, static t => t.IsV7OrLater);
-        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
-        Assert.DoesNotContain(
-            ops.FetchedFiles,
-            f => f.Equals("FleetUpgradeInstall.rsc", StringComparison.OrdinalIgnoreCase));
-    }
-
-    [Fact]
-    public async Task V6SteppingOnly_LegacyCleanupFailure_SkipsFirmwareMutation()
+    public async Task LegacyCleanupFailure_SkipsFirmwareMutation()
     {
         StageTrackingOps ops = new("Mikrotik")
         {
@@ -478,7 +511,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 identity: "Mikrotik",
                 version: "6.49.19",
                 architecture: "mipsbe"),
-            CreateJob(UpgradeExecutionMode.V6SteppingOnly),
+            CreateJob(),
             CreateDevice("Mikrotik", "6.49.19"),
             CreateAssessment(),
             "admin",
@@ -496,62 +529,14 @@ public sealed class V6SteppingOnlyExecutionModeTests
     }
 
     [Fact]
-    public async Task FullUpgrade_Ace_ProceedsToV7_WithoutStageCap()
+    public async Task CsvWithoutExecutionMode_ImportsAndRunsAutomaticPath()
     {
-        StageTrackingOps ops = new("ACE01.POP001.001.core")
-        {
-            InitialVersion = "6.49.19",
-            VersionsAfterReboot = ["6.49.23", "7.23.8"],
-        };
-        CountingBackup backup = new();
-        CountingPackageResolver packages = CreateCountingResolver();
-        CountingV7TargetProvider v7 = new("7.23.8");
-        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
-            FakeMikrotikConnections.CreateFullyPopulated(
-                identity: "ACE01.POP001.001.core",
-                version: "6.49.23",
-                architecture: "mipsbe"));
-        RouterOsV6UpgradeExecutor executor = CreateExecutor(
-            ops,
-            backup,
-            packages.FirmwareRoot,
-            reconnect,
-            packages,
-            v7);
-
-        UpgradeExecutionResult result = await executor.ExecuteAsync(
-            FakeMikrotikConnections.CreateFullyPopulated(
-                identity: "ACE01.POP001.001.core",
-                version: "6.49.19",
-                architecture: "mipsbe"),
-            CreateJob(UpgradeExecutionMode.FullUpgrade),
-            CreateDevice("ACE01.POP001.001.core", "6.49.19"),
-            CreateAssessment(),
-            "admin",
-            "secret",
-            static () => true,
-            CancellationToken.None);
-
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
-        Assert.Equal(UpgradeExecutionMode.FullUpgrade, result.ExecutionMode);
-        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
-        Assert.Equal("7.23.8", result.PostUpgradeVersion);
-        Assert.Equal(3, backup.CallCount);
-        Assert.Equal(2, ops.RebootCount);
-        Assert.True(v7.CaptureCount >= 1);
-        Assert.Contains(packages.ResolvedTargets, static t => t.IsV7OrLater);
-        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task ExecutionMode_SurvivesCsvImportIntoExecutor()
-    {
-        string path = Path.Combine(Path.GetTempPath(), $"v6only-import-{Guid.NewGuid():N}.csv");
+        string path = Path.Combine(Path.GetTempPath(), $"auto-path-import-{Guid.NewGuid():N}.csv");
         await File.WriteAllTextAsync(
             path,
             """
-            datestart,datestop,routername,routerip,executionmode
-            01/12/2026 08:00:00,02/12/2026 18:00:00,Mikrotik,198.18.240.11,V6SteppingOnly
+            datestart,datestop,routername,routerip
+            01/12/2026 08:00:00,02/12/2026 18:00:00,Mikrotik,198.18.240.11
             """);
 
         try
@@ -569,22 +554,20 @@ public sealed class V6SteppingOnlyExecutionModeTests
                     ],
                 })));
 
-            Guid importId = Guid.NewGuid();
             MikrotikScheduledJob? accepted = null;
-            await foreach (MikrotikScheduledJob job in parser.EnumerateJobsAsync(path, importId, CancellationToken.None))
+            await foreach (MikrotikScheduledJob job in parser.EnumerateJobsAsync(path, Guid.NewGuid(), CancellationToken.None))
             {
                 accepted = job;
             }
 
             Assert.NotNull(accepted);
-            Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, accepted.ExecutionMode);
 
             CountingPackageResolver packages = CreateCountingResolver();
             CountingV7TargetProvider v7 = new("7.23.8");
             StageTrackingOps ops = new("Mikrotik")
             {
                 InitialVersion = "6.49.19",
-                VersionsAfterReboot = ["6.49.23"],
+                VersionsAfterReboot = ["6.49.23", "7.23.8"],
             };
             CountingBackup backup = new();
             ScriptedMikrotikConnectionFactory reconnect = new(_ =>
@@ -609,7 +592,6 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 RouterIp = accepted.RouterIp,
                 DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
                 DateStopUtc = DateTime.UtcNow.AddHours(1),
-                ExecutionMode = accepted.ExecutionMode,
             };
 
             UpgradeExecutionResult result = await executor.ExecuteAsync(
@@ -625,11 +607,10 @@ public sealed class V6SteppingOnlyExecutionModeTests
                 static () => true,
                 CancellationToken.None);
 
-            Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-            Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
-            Assert.Equal(0, v7.CaptureCount);
-            Assert.DoesNotContain(packages.ResolvedTargets, static t => t.IsV7OrLater);
-            AssertNoV7Mutation(ops);
+            Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+            Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+            Assert.Equal(1, v7.CaptureCount);
+            Assert.Contains(packages.ResolvedTargets, static t => t.IsV7OrLater);
         }
         finally
         {
@@ -666,7 +647,8 @@ public sealed class V6SteppingOnlyExecutionModeTests
         IRouterOsV7TargetProvider? v7TargetProvider = null,
         TimeSpan? rebootTimeout = null,
         TimeSpan? postUpgradeVerifyTimeout = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        bool enabled = true)
     {
         TimeSpan reboot = rebootTimeout ?? TimeSpan.FromSeconds(5);
         TimeSpan verify = postUpgradeVerifyTimeout ?? reboot;
@@ -685,7 +667,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
             connectionFactory ?? new ThrowingMikrotikConnectionFactory(new IOException("no reconnect"));
         IOptions<FirmwareUpgradeOptions> upgradeOptions = Options.Create(new FirmwareUpgradeOptions
         {
-            Enabled = true,
+            Enabled = enabled,
             AdvertisedBaseUrl = "http://198.18.0.66:8080/firmware_files",
             FetchTimeout = TimeSpan.FromSeconds(5),
             ReconnectInterval = TimeSpan.FromMilliseconds(10),
@@ -720,7 +702,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
 
-    private static MikrotikScheduledJob CreateJob(UpgradeExecutionMode mode) =>
+    private static MikrotikScheduledJob CreateJob() =>
         new()
         {
             ImportId = Guid.NewGuid(),
@@ -730,7 +712,6 @@ public sealed class V6SteppingOnlyExecutionModeTests
             RouterIp = IPAddress.Parse("10.0.0.50"),
             DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
             DateStopUtc = DateTime.UtcNow.AddHours(1),
-            ExecutionMode = mode,
         };
 
     private static MikrotikDeviceInfo CreateDevice(string identity, string version) =>
@@ -882,7 +863,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
 
         public int CleanupInspectionCount => SchedulerCountCalls + ScriptCountCalls;
 
-        public int LastBundledComponentCount { get; private set; }
+        public int MaxBundledComponentCount { get; private set; }
 
         public Dictionary<string, long> FileSizes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -940,11 +921,7 @@ public sealed class V6SteppingOnlyExecutionModeTests
                     packages.Add(new InstalledPackageInfo(component, numeric, false, "routeros-mipsbe"));
                 }
 
-                LastBundledComponentCount = LabBundledComponents.Length;
-            }
-            else
-            {
-                LastBundledComponentCount = 0;
+                MaxBundledComponentCount = Math.Max(MaxBundledComponentCount, LabBundledComponents.Length);
             }
 
             return Task.FromResult<IReadOnlyList<InstalledPackageInfo>>(packages);

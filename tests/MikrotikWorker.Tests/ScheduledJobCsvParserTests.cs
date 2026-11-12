@@ -1,8 +1,8 @@
 using System.Globalization;
+using System.Net;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
-using MikrotikWorker.Upgrade;
 
 public sealed class ScheduledJobCsvParserTests
 {
@@ -126,7 +126,7 @@ public sealed class ScheduledJobCsvParserTests
     }
 
     [Fact]
-    public async Task MissingExecutionModeColumn_DefaultsToFullUpgrade()
+    public async Task CsvWithoutExecutionMode_IsAccepted()
     {
         string path = await WriteTempCsvAsync(
             """
@@ -146,7 +146,8 @@ public sealed class ScheduledJobCsvParserTests
             }
 
             MikrotikScheduledJob single = Assert.Single(jobs);
-            Assert.Equal(UpgradeExecutionMode.FullUpgrade, single.ExecutionMode);
+            Assert.Equal("CORE-01", single.RouterName);
+            Assert.Equal(IPAddress.Parse("192.168.1.1"), single.RouterIp);
         }
         finally
         {
@@ -155,85 +156,25 @@ public sealed class ScheduledJobCsvParserTests
     }
 
     [Theory]
-    [InlineData("FullUpgrade", UpgradeExecutionMode.FullUpgrade)]
-    [InlineData("fullupgrade", UpgradeExecutionMode.FullUpgrade)]
-    [InlineData(" FullUpgrade ", UpgradeExecutionMode.FullUpgrade)]
-    [InlineData("V6SteppingOnly", UpgradeExecutionMode.V6SteppingOnly)]
-    [InlineData("v6steppingonly", UpgradeExecutionMode.V6SteppingOnly)]
-    [InlineData(" V6SteppingOnly ", UpgradeExecutionMode.V6SteppingOnly)]
-    public async Task ExplicitExecutionMode_IsAccepted(string raw, UpgradeExecutionMode expected)
+    [InlineData("executionmode")]
+    [InlineData("EXECUTIONMODE")]
+    [InlineData("ExecutionMode")]
+    public async Task LegacyExecutionModeColumn_IsRejected(string header)
     {
         string path = await WriteTempCsvAsync(
             $"""
-            datestart,datestop,routername,routerip,executionmode
-            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1,{raw}
-            """);
-
-        try
-        {
-            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
-            Assert.True(result.IsAccepted, string.Join("; ", result.Errors));
-
-            List<MikrotikScheduledJob> jobs = [];
-            await foreach (MikrotikScheduledJob job in CreateParser().EnumerateJobsAsync(path, Guid.NewGuid(), CancellationToken.None))
-            {
-                jobs.Add(job);
-            }
-
-            Assert.Equal(expected, Assert.Single(jobs).ExecutionMode);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    [Fact]
-    public async Task ExecutionModeHeader_IsCaseInsensitive()
-    {
-        string path = await WriteTempCsvAsync(
-            """
-            datestart,datestop,routername,routerip,EXECUTIONMODE
-            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1,V6SteppingOnly
-            """);
-
-        try
-        {
-            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
-            Assert.True(result.IsAccepted);
-
-            List<MikrotikScheduledJob> jobs = [];
-            await foreach (MikrotikScheduledJob job in CreateParser().EnumerateJobsAsync(path, Guid.NewGuid(), CancellationToken.None))
-            {
-                jobs.Add(job);
-            }
-
-            Assert.Equal(UpgradeExecutionMode.V6SteppingOnly, Assert.Single(jobs).ExecutionMode);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    [InlineData("PartialUpgrade")]
-    [InlineData("v6")]
-    public async Task InvalidOrEmptyExecutionMode_IsRejected(string raw)
-    {
-        string path = await WriteTempCsvAsync(
-            $"""
-            datestart,datestop,routername,routerip,executionmode
-            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1,{raw}
+            datestart,datestop,routername,routerip,{header}
+            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1,FullUpgrade
             """);
 
         try
         {
             CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
             Assert.False(result.IsAccepted);
-            Assert.Contains(result.Errors, static e => e.ColumnName == "executionmode");
+            Assert.Contains(
+                result.Errors,
+                static e => e.ColumnName == "executionmode"
+                    && e.Reason.Contains("no longer supported", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {
@@ -332,8 +273,32 @@ public sealed class ScheduledJobCsvParserTests
     }
 
     [Fact]
-    public async Task PastDateStart_IsRejected()
+    public async Task FutureStart_FutureStop_IsAccepted()
     {
+        // UtcNow = 2026-01-01 00:00Z; both bounds are later.
+        string path = await WriteTempCsvAsync(
+            """
+            datestart,datestop,routername,routerip
+            01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.True(result.IsAccepted, string.Join("; ", result.Errors.Select(static e => e.Reason)));
+            Assert.Equal(new DateTime(2026, 12, 1, 6, 0, 0, DateTimeKind.Utc), result.DateStartUtc);
+            Assert.Equal(new DateTime(2026, 12, 2, 16, 0, 0, DateTimeKind.Utc), result.DateStopUtc);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task PastStart_FutureStop_IsAccepted_AsActiveWindow()
+    {
+        // Start 2020 (past), stop Dec 2026 (future) relative to UtcNow 2026-01-01.
         string path = await WriteTempCsvAsync(
             """
             datestart,datestop,routername,routerip
@@ -343,8 +308,81 @@ public sealed class ScheduledJobCsvParserTests
         try
         {
             CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.True(result.IsAccepted, string.Join("; ", result.Errors.Select(static e => e.Reason)));
+            Assert.True(result.DateStartUtc <= UtcNow);
+            Assert.True(UtcNow < result.DateStopUtc);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task StartEqualToNow_FutureStop_IsAccepted()
+    {
+        // UtcNow 2026-01-01 00:00Z = 01/01/2026 02:00 Africa/Johannesburg.
+        string path = await WriteTempCsvAsync(
+            """
+            datestart,datestop,routername,routerip
+            01/01/2026 02:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.True(result.IsAccepted, string.Join("; ", result.Errors.Select(static e => e.Reason)));
+            Assert.Equal(UtcNow, result.DateStartUtc);
+            Assert.True(UtcNow < result.DateStopUtc);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task PastStart_StopEqualToNow_IsRejectedAsExpired()
+    {
+        // Stop exactly UtcNow (exclusive end → expired); start earlier the same local day.
+        string path = await WriteTempCsvAsync(
+            """
+            datestart,datestop,routername,routerip
+            01/01/2026 01:00:00,01/01/2026 02:00:00,CORE-01,192.168.1.1
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
             Assert.False(result.IsAccepted);
-            Assert.Contains(result.Errors, static e => e.ColumnName == "datestart");
+            Assert.Contains(
+                result.Errors,
+                static e => e.ColumnName == "datestop"
+                    && e.Reason.Contains("expired", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task PastStart_PastStop_IsRejectedAsExpired()
+    {
+        string path = await WriteTempCsvAsync(
+            """
+            datestart,datestop,routername,routerip
+            01/12/2020 08:00:00,02/12/2020 18:00:00,CORE-01,192.168.1.1
+            """);
+
+        try
+        {
+            CsvParseResult result = await CreateParser().ValidateAsync(path, UtcNow, CancellationToken.None);
+            Assert.False(result.IsAccepted);
+            Assert.Contains(
+                result.Errors,
+                static e => e.ColumnName == "datestop"
+                    && e.Reason.Contains("expired", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {
@@ -372,7 +410,6 @@ public sealed class ScheduledJobCsvParserTests
             File.Delete(path);
         }
     }
-
     [Fact]
     public async Task InconsistentWindowsAcrossRows_AreRejected()
     {

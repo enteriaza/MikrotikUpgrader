@@ -63,9 +63,10 @@ Required columns (case-insensitive, any order):
 | `datestop` | When jobs must stop starting |
 | `routername` | Router identity/name |
 | `routerip` | IPv4 or IPv6 address (not a hostname) |
-| `executionmode` | Optional per-job stage cap. Omit for production default `FullUpgrade`. |
 
-Example:
+These four columns are the **only** supported columns. Every eligible device is upgraded automatically — there is no per-job mode or stage cap. A CSV that still contains the removed `executionmode` column (any letter case) is **rejected** with a validation error; delete the column and re-submit.
+
+Example (also available as [`samples/scheduled-jobs-sample.csv`](samples/scheduled-jobs-sample.csv)):
 
 ```csv
 datestart,datestop,routername,routerip
@@ -73,30 +74,20 @@ datestart,datestop,routername,routerip
 01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-02,192.168.1.2
 ```
 
-#### Execution mode (`executionmode`)
+#### Automatic upgrade path
 
-Per-job stage cap, independent of device-identity classification:
+The worker always picks the path from the device's current RouterOS version. Nothing in the CSV changes it:
 
-| Value | Behaviour |
+| Current RouterOS | Path |
 |---|---|
-| `FullUpgrade` | Production default: v6 stepping when required, then RouterOS 7 when identity policy allows |
-| `V6SteppingOnly` | Complete (or skip) v6 stepping verification, then stop with `UpgradeSucceededV6Only`. Never enters the RouterOS 7 stage |
+| 6.x older than `6.49.23` | Step to `6.49.23`, verify, then upgrade to the configured RouterOS 7 target |
+| 6.x at or above `6.49.23` | Upgrade directly to the configured RouterOS 7 target |
+| 7.x older than the target | Upgrade directly to the target |
+| 7.x equal to the target | Nothing to upgrade → `AlreadyUpToDate` (OSPF reconciliation and RouterBOARD check still run) |
+| 7.x newer than the target | Never downgrades → `Blocked` |
+| Unsupported major version / unreadable version | `Blocked` with the reason |
 
-Rules:
-
-- Column is optional. **Absence defaults to `FullUpgrade`** — existing CSVs keep current behaviour.
-- Header and values are case-insensitive; whitespace is trimmed.
-- Empty or unknown values are rejected (do not omit the value if the column is present).
-- Mode is captured immutably when the job is accepted; there is no global “v6-only” setting.
-- **Identity policy does not override the stage cap.** A `V6SteppingOnly` job never proceeds to v7 even when the identity is Unknown/AP/DCL (v7-eligible under `FullUpgrade`).
-- **Deliberately select `V6SteppingOnly` only for controlled lab/stepping work.** Do not make it the fleet default.
-
-Lab-only example (no credentials):
-
-```csv
-datestart,datestop,routername,routerip,executionmode
-01/12/2026 08:00:00,02/12/2026 18:00:00,Mikrotik,198.18.240.11,V6SteppingOnly
-```
+After the package stage the worker reconciles OSPF, takes a backup and checks RouterBOARD firmware. The RouterOS 7 target comes from `FirmwareFiles/mikrotik/version`.
 
 Excel CSV exports depend on regional settings. Configure the application culture to match the exported date representation.
 
@@ -126,10 +117,14 @@ Excel CSV exports depend on regional settings. Configure the application culture
 ### Validation rules
 
 - Required headers present
+- The removed `executionmode` header is rejected (`ExecutionMode is no longer supported`)
 - Non-empty required values
 - Valid IPv4/IPv6 literals only
-- `datestart` / `datestop` both in the future at submission time
-- `datestop` later than `datestart`
+- `datestop` later than `datestart` (invalid window rejected)
+- Maintenance window vs submission time (`DateStartUtc` inclusive, `DateStopUtc` exclusive, matching the scheduler):
+  - Future window (`datestart` after now): accepted; jobs wait until start
+  - Active window (`datestart` ≤ now &lt; `datestop`): accepted; jobs are eligible immediately
+  - Expired window (`datestop` ≤ now): rejected
 - Identical scheduling window on every row of a file
 - Configurable max file size, max record count, and max retained validation error details
 
@@ -150,12 +145,15 @@ Incoming CSV
 
 Terminal outcomes:
 
-- **Succeeded** — API connect and disconnect completed cleanly (no upgrade claimed)
-- **Failed** — credential resolution, connect, or disconnect failed
+- **Succeeded** — the device was upgraded and verified on the configured RouterOS 7 target (including any applicable OSPF migration and RouterBOARD step)
+- **AlreadyUpToDate** — the device already ran the RouterOS 7 target and was verified; no package upgrade was needed (success-like)
+- **Failed** — credential resolution, connect, disconnect, backup, upgrade, verification or OSPF step failed; also used when `FirmwareUpgrade:Enabled=false` (upgrade administratively disabled) or when no upgrade was attempted
+- **Blocked** — a prerequisite or policy prevented the upgrade (assessment blocked, outside window, unsupported/unparseable version, RouterOS 7 target file unavailable, device newer than target — no downgrade). The device was **not** upgraded
+- **Skipped** — reserved for documented non-upgrade cases; never used for disabled upgrades
 - **Expired** — window ended before execution (`DateStopUtc` exclusive)
-- **Cancelled** — abort/shutdown cancelled the job
+- **Cancelled** — abort/shutdown cancelled or interrupted the job
 
-`Completed` means all associated in-memory jobs are terminal, **not** that routers were upgraded.
+Only **Succeeded** and **AlreadyUpToDate** mean the device is on the target. `Completed` (the file moved to `Completed/`) means all associated in-memory jobs are terminal, **not** that routers were upgraded — check the per-job outcome in the logs.
 
 ### Scheduler vs execution workers
 
@@ -200,7 +198,7 @@ All routers use the **same** username and password from `appsettings.json`. CSV 
 
 Set real credentials only on the deployment host. Keep placeholders in the repository copy of `appsettings.json` — do not commit production passwords.
 
-The shared account must be allowed to open the RouterOS API (port 8728) and SFTP (port 22 by default) from the worker host. With `FirmwareUpgrade:Enabled=false` (default), jobs perform connect → assessment → disconnect only. With upgrades enabled, eligible devices continue through the two-stage backup → fetch → reboot → verify workflow.
+The shared account must be allowed to open the RouterOS API (port 8728) and SFTP (port 22 by default) from the worker host. `FirmwareUpgrade:Enabled` defaults to `true` in the shipped `appsettings.json`, so eligible devices continue through the automatic backup → fetch → reboot → verify workflow. Setting it to `false` is an explicit administrative kill-switch: no firmware is fetched or installed, the log states that upgrades are administratively disabled, and every job ends as **Failed** (never Succeeded).
 
 Local overrides (gitignored): place `appsettings.Development.local.json` beside the appsettings files with real credentials for development/live testing. Do not commit that file.
 
@@ -236,16 +234,7 @@ Removed configuration keys (do not restore them):
 
 #### Device identity policy
 
-Standard identity: `[ACE|AP|BR|DCL]dd.POPddd.ddd.sss`.
-
-| Classification | RouterOS 7 |
-|---|---|
-| ACE | Excluded |
-| BR | Excluded |
-| AP / DCL | Eligible |
-| Unknown / empty / unavailable | Eligible |
-
-Only positively identified ACE or BR devices are excluded. Identity retrieval failure must not interrupt the workflow and must not produce a manual-review outcome.
+Standard identity: `[ACE|AP|BR|DCL]dd.POPddd.ddd.sss`. Classification is logged for diagnostics. **All device types — including ACE and BR — are eligible for the configured RouterOS 7 target.** Identity retrieval failure must not interrupt the workflow and must not produce a manual-review outcome.
 
 **Package matching** uses the FirmwareFiles catalog and the live `/system/package/print` `bundle` field:
 
@@ -292,15 +281,15 @@ Input CSV columns (case-insensitive, order-independent):
 | `routerip` | Yes | IPv4/IPv6 only (no hostnames) |
 | `routername` | No | Display name in reports |
 
-Defaults: `MaxConcurrentConnections=5`; per-router timeout falls back to `Mikrotik:ConnectionTimeout`. RouterOS commands used: `/system/identity/print`, `/system/resource/print`, `/system/package/print`, and optionally `/system/routerboard/print`. Timestamped CSV/JSON reports are written locally (not served by Kestrel). The live audit uses a dedicated minimal host (no upgrade scheduler, backup, fetch, or reboot services). Fleet completion is based on whether every valid router reached a natural terminal result — a `TotalAuditTimeout` that fires after successful completion cannot retroactively mark the run cancelled. Firmware upgrades remain controlled solely by `FirmwareUpgrade:Enabled` (default `false`).
+Defaults: `MaxConcurrentConnections=5`; per-router timeout falls back to `Mikrotik:ConnectionTimeout`. RouterOS commands used: `/system/identity/print`, `/system/resource/print`, `/system/package/print`, and optionally `/system/routerboard/print`. Timestamped CSV/JSON reports are written locally (not served by Kestrel). The live audit uses a dedicated minimal host (no upgrade scheduler, backup, fetch, or reboot services). Fleet completion is based on whether every valid router reached a natural terminal result — a `TotalAuditTimeout` that fires after successful completion cannot retroactively mark the run cancelled. The live audit never upgrades anything regardless of `FirmwareUpgrade:Enabled`.
 
 ### Automated two-stage upgrade
 
-Enable with `FirmwareUpgrade:Enabled=true` and set `AdvertisedBaseUrl` to an HTTP URL **reachable from routers** (not localhost), ending in `/firmware_files`. Place matching architecture packages for **6.49.23** and for the version-file RouterOS 7 target under `FirmwareFiles`.
+`FirmwareUpgrade:Enabled` is `true` by default (administrative kill-switch: `false` makes every job end `Failed` with an "administratively disabled" log entry). Set `AdvertisedBaseUrl` to an HTTP URL **reachable from routers** (not localhost), ending in `/firmware_files`. Place matching architecture packages for **6.49.23** and for the version-file RouterOS 7 target under `FirmwareFiles`.
 
 **Live proof (single test router, earlier milestone):** `198.18.0.83` was upgraded 6.49.19 → 6.49.23 using only `routeros-mipsbe-6.49.23.npk` (verified immediately post-reconnect). Evidence is retained under local `OperationalEvidence/` (gitignored).
 
-High-level sequence for an eligible device older than 6.49.23 (`FullUpgrade`):
+High-level sequence for an eligible device older than 6.49.23:
 
 1. Inventory installed packages (`/system/package/print`, including `bundle`)
 2. **Mandatory pre-upgrade backup** for the v6 stepping stage (blocking)
@@ -308,7 +297,7 @@ High-level sequence for an eligible device older than 6.49.23 (`FullUpgrade`):
 4. Classify identity (informational; ACE/BR/AP/DCL/Unknown are all eligible for RouterOS 7)
 5. Capture/validate OSPF migration plan (fail-closed); backup again; resolve packages for the **job’s immutable v7 snapshot**; fetch/stage; reboot; verify exact target + package inventory; apply and verify OSPF; RouterBOARD stage per policy
 
-For `V6SteppingOnly`, steps 1–3 run when v6 stepping is required; after successful v6 verification the executor logs `UpgradeStageCapReached: V6SteppingOnly` and returns `UpgradeSucceededV6Only` with `CompletedStage=v6-stepping`. If the device is already at/above 6.49.23, the same outcome is returned with `CompletedStage=none` (no upgrade performed). Never starts second-stage backup, v7 snapshot/resolution, fetch, or reboot. A RouterOS 7 device in this mode is a deliberate no-op (`SkippedStageNotApplicable`, `CompletedStage=none`).
+The worker never stops at the v6 stage: a device that verifies on 6.49.23 always continues to RouterOS 7. If the RouterOS 7 target file is unavailable after stepping, the job ends `Blocked` (`CompletedStage=v6-stepping`), never `Succeeded`. `CompletedStage` (`none`, `v6-stepping`, `routeros7`, `ospf-migration`, `routerboard-firmware`) is internal progress tracking only.
 
 Devices already on 6.49.23 or newer RouterOS 6 skip steps 2–3 and never receive 6.49.23 packages. Devices already on RouterOS 7 never receive RouterOS 6 packages.
 
@@ -478,7 +467,13 @@ Console output goes to the service journal when running under systemd. Prefer th
 
 ## Build / test / publish
 
+Requires the .NET 10 SDK. `global.json` pins `10.0.403` with `rollForward: latestPatch`, so install **10.0.403 or any later 10.0.4xx patch** into the **system** location (`C:\Program Files\dotnet` on Windows). A user-profile SDK under `%USERPROFILE%\.dotnet` alone is not enough for Visual Studio / Rider MSBuild resolution when `PATH` points at the system `dotnet`.
+
 ```powershell
+# Example (Windows):
+winget install --id Microsoft.DotNet.SDK.10 --exact
+
+dotnet --list-sdks
 dotnet restore
 dotnet clean
 dotnet build --no-restore

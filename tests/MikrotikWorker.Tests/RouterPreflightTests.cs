@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
+using MikrotikWorker.Upgrade;
 using tik4net;
 using tik4net.Testing;
 
@@ -21,7 +22,8 @@ public sealed class RouterPreflightTests
         await using PreflightHarness harness = await PreflightHarness.CreateAsync(
             time,
             FakeMikrotikConnections.CreateFullyPopulated(),
-            executorLogger: logs.CreateLogger("RouterJobExecutor"));
+            executorLogger: logs.CreateLogger("RouterJobExecutor"),
+            upgradeExecutor: new StubUpgradeExecutor(UpgradeOutcome.UpgradeSucceeded));
 
         await harness.RunSingleJobAsync("192.168.10.1");
 
@@ -36,10 +38,11 @@ public sealed class RouterPreflightTests
                 && m.Contains("ReadyForUpgrade", StringComparison.Ordinal));
         Assert.Contains(logs.Messages, static m => m.Contains("Connection disconnect started", StringComparison.Ordinal));
         Assert.Contains(logs.Messages, static m => m.Contains("Connection disconnected successfully", StringComparison.Ordinal));
+        // Stub reports a verified target (UpgradeSucceeded). SkippedUpgradeDisabled → Failed is covered by
+        // UpgradeOutcome_IsReportedTruthfullyAsJobOutcome.
         Assert.Contains(
             logs.Messages,
-            static m => m.Contains("Final job outcome", StringComparison.Ordinal)
-                && m.Contains("Succeeded", StringComparison.Ordinal));
+            static m => m.Contains("Final job outcome: Succeeded", StringComparison.Ordinal));
         Assert.DoesNotContain(
             logs.Messages,
             static m => m.Contains(SharedPassword, StringComparison.Ordinal));
@@ -48,6 +51,36 @@ public sealed class RouterPreflightTests
             static m => m.Contains("Password=", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Theory]
+    [InlineData(UpgradeOutcome.SkippedUpgradeDisabled, "Failed")]
+    [InlineData(UpgradeOutcome.SkippedAlreadyAtTarget, "AlreadyUpToDate")]
+    [InlineData(UpgradeOutcome.SkippedNewerThanTarget, "Blocked")]
+    [InlineData(UpgradeOutcome.PolicyBlocked, "Blocked")]
+    [InlineData(UpgradeOutcome.UpgradeInterrupted, "Cancelled")]
+    [InlineData(UpgradeOutcome.NotAttempted, "Failed")]
+    public async Task UpgradeOutcome_IsReportedTruthfullyAsJobOutcome(UpgradeOutcome outcome, string expectedJobOutcome)
+    {
+        FakeTimeProvider time = CreateTime();
+        RecordingLoggerProvider logs = new();
+        await using PreflightHarness harness = await PreflightHarness.CreateAsync(
+            time,
+            FakeMikrotikConnections.CreateFullyPopulated(),
+            executorLogger: logs.CreateLogger("RouterJobExecutor"),
+            upgradeExecutor: new StubUpgradeExecutor(outcome));
+
+        await harness.RunSingleJobAsync("192.168.10.2");
+
+        Assert.False(harness.Scheduler.IsTracked(harness.LastImportId));
+        Assert.Contains(
+            logs.Messages,
+            m => m.Contains("Final job outcome: " + expectedJobOutcome + " ", StringComparison.Ordinal));
+        if (expectedJobOutcome != "Succeeded")
+        {
+            Assert.DoesNotContain(
+                logs.Messages,
+                static m => m.Contains("Final job outcome: Succeeded", StringComparison.Ordinal));
+        }
+    }
     [Fact]
     public async Task MissingOptionalRouterboardFields_StillSucceed()
     {
@@ -438,7 +471,8 @@ public sealed class RouterPreflightTests
             ITikConnection? connection = null,
             IMikrotikConnectionFactory? connectionFactory = null,
             IMikrotikDeviceInfoReader? deviceInfoReader = null,
-            ILogger? executorLogger = null)
+            ILogger? executorLogger = null,
+            IRouterOsV6UpgradeExecutor? upgradeExecutor = null)
         {
             string root = TestHostFactory.CreateScheduledJobsRoot();
             ScheduledJobsOptions options = new()
@@ -478,6 +512,7 @@ public sealed class RouterPreflightTests
                     time,
                     connectionFactory: factory,
                     deviceInfoReader: deviceInfoReader,
+                    upgradeExecutor: upgradeExecutor,
                     mikroTikEnabled: true,
                     mikroTikOptions: mikroTik,
                     executorLogger: logger);

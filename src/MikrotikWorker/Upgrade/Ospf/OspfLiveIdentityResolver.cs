@@ -263,10 +263,12 @@ internal static class OspfLiveIdentityResolver
                     NetworkCidr = s.NetworkCidr,
                     Comment = s.Comment,
                     Passive = s.Passive,
-                    CapturedSemantics = s.CapturedSemantics,
+                    CapturedSemantics = RemapCapturedSemantics(s.CapturedSemantics, binding.LiveInstanceName),
                 })
                 .ToList(),
-            SupersededTemplates = plan.SupersededTemplates,
+            SupersededTemplates = plan.SupersededTemplates
+                .Select(s => RemapSupersededIdentity(s, MapArea, binding.LiveInstanceName))
+                .ToList(),
             RemoveAllRoutingFilters = plan.RemoveAllRoutingFilters,
             ClearAllRedistribution = plan.ClearAllRedistribution,
             RemoveAllOspfV3 = plan.RemoveAllOspfV3,
@@ -416,6 +418,77 @@ internal static class OspfLiveIdentityResolver
         }
 
         return names;
+    }
+
+    private static OspfSupersededTemplateIdentity RemapSupersededIdentity(
+        OspfSupersededTemplateIdentity source,
+        Func<string, string> mapArea,
+        string liveInstanceName) =>
+        new()
+        {
+            AreaName = mapArea(source.AreaName),
+            Interfaces = source.Interfaces,
+            NetworkCidr = source.NetworkCidr,
+            Passive = source.Passive,
+            Disabled = source.Disabled,
+            Type = source.Type,
+            Cost = source.Cost,
+            Auth = source.Auth,
+            AuthId = source.AuthId,
+            AuthKeyFingerprint = source.AuthKeyFingerprint,
+            AuthKeyPresent = source.AuthKeyPresent,
+            AuthKeyAmbiguous = source.AuthKeyAmbiguous,
+            Priority = source.Priority,
+            UseBfd = source.UseBfd,
+            HelloInterval = source.HelloInterval,
+            DeadInterval = source.DeadInterval,
+            RetransmitInterval = source.RetransmitInterval,
+            TransmitDelay = source.TransmitDelay,
+            InstanceId = source.InstanceId,
+            // Align area→instance with the live ROS7 instance so provenance matches inventory rows.
+            AreaInstanceName = string.IsNullOrWhiteSpace(liveInstanceName)
+                ? source.AreaInstanceName
+                : liveInstanceName,
+            PrefixList = source.PrefixList,
+            VlinkNeighborId = source.VlinkNeighborId,
+            VlinkTransitArea = source.VlinkTransitArea,
+            Comment = source.Comment,
+        };
+
+    private static OspfCapturedTemplateSemantics? RemapCapturedSemantics(
+        OspfCapturedTemplateSemantics? source,
+        string liveInstanceName)
+    {
+        if (source is null)
+        {
+            return null;
+        }
+
+        return new OspfCapturedTemplateSemantics
+        {
+            Disabled = source.Disabled,
+            Type = source.Type,
+            Cost = source.Cost,
+            Auth = source.Auth,
+            AuthId = source.AuthId,
+            AuthKeyFingerprint = source.AuthKeyFingerprint,
+            AuthKeyPresent = source.AuthKeyPresent,
+            AuthKeyAmbiguous = source.AuthKeyAmbiguous,
+            Priority = source.Priority,
+            UseBfd = source.UseBfd,
+            HelloInterval = source.HelloInterval,
+            DeadInterval = source.DeadInterval,
+            RetransmitInterval = source.RetransmitInterval,
+            TransmitDelay = source.TransmitDelay,
+            InstanceId = source.InstanceId,
+            AreaInstanceName = string.IsNullOrWhiteSpace(liveInstanceName)
+                ? source.AreaInstanceName
+                : liveInstanceName,
+            PrefixList = source.PrefixList,
+            VlinkNeighborId = source.VlinkNeighborId,
+            VlinkTransitArea = source.VlinkTransitArea,
+            Comment = source.Comment,
+        };
     }
 
     private static OspfLiveIdentityResolutionResult Failed(string error) => Failed([error]);

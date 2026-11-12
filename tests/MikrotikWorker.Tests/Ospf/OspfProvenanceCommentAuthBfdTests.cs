@@ -19,12 +19,21 @@ public sealed class OspfProvenanceCommentAuthBfdTests
     [Theory]
     [InlineData(null, "added")]
     [InlineData("original", "changed")]
-    [InlineData("original", null)]
-    public void CommentMutation_IsUnknown(string? captured, string? liveComment)
+    public void CommentMutation_AwayFromDesired_IsUnknown(string? captured, string? liveComment)
     {
         OspfSupersededTemplateIdentity provenance = Provenance(comment: captured);
         OspfTemplateInventoryRow live = LiveFrom(provenance) with { Comment = liveComment };
         AssertUnknown(ClassifyExpectThrow(provenance, live));
+    }
+
+    [Fact]
+    public void CommentClearedUnderConsolidatedPrefix_IsKnownLegacy()
+    {
+        // Under a planned consolidated prefix, attribute-only differences (including comment)
+        // do not block obsolete-template removal.
+        OspfSupersededTemplateIdentity provenance = ProvenanceUnderMgmt(comment: "original");
+        OspfTemplateInventoryRow live = LiveFrom(provenance) with { Comment = null };
+        AssertKnownLegacy(Classify(provenance, live));
     }
 
     [Fact]
@@ -86,7 +95,6 @@ public sealed class OspfProvenanceCommentAuthBfdTests
     [Theory]
     [InlineData("add")]
     [InlineData("change")]
-    [InlineData("remove")]
     public void AuthKeyLifecycle_IsUnknown(string change)
     {
         OspfSupersededTemplateIdentity provenance = change == "add"
@@ -105,10 +113,23 @@ public sealed class OspfProvenanceCommentAuthBfdTests
                 AuthKeyPresent = true,
                 AuthKeyFingerprint = OspfTemplateSemanticIdentity.FingerprintAuthKey("changed-secret"),
             },
-            _ => LiveFrom(provenance) with { AuthKeyPresent = false, AuthKeyFingerprint = null },
+            _ => throw new ArgumentOutOfRangeException(nameof(change)),
         };
 
         AssertUnknown(ClassifyExpectThrow(provenance, live));
+    }
+
+    [Fact]
+    public void AuthKeyRemovedUnderConsolidatedPrefix_IsKnownLegacy()
+    {
+        OspfSupersededTemplateIdentity provenance = ProvenanceUnderMgmt(authKey: "original-secret");
+        OspfTemplateInventoryRow live = LiveFrom(provenance) with
+        {
+            AuthKeyPresent = false,
+            AuthKeyFingerprint = null,
+            Auth = null,
+        };
+        AssertKnownLegacy(Classify(provenance, live));
     }
 
     [Fact]
@@ -297,10 +318,25 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         string? auth = null,
         string? authKey = null,
         string? type = null) =>
+        ProvenanceWithNetworks("10.99.99.0/27", comment, auth, authKey, type);
+
+    private static OspfSupersededTemplateIdentity ProvenanceUnderMgmt(
+        string? comment = null,
+        string? auth = null,
+        string? authKey = null,
+        string? type = null) =>
+        ProvenanceWithNetworks("10.16.11.0/27", comment, auth, authKey, type);
+
+    private static OspfSupersededTemplateIdentity ProvenanceWithNetworks(
+        string networks,
+        string? comment = null,
+        string? auth = null,
+        string? authKey = null,
+        string? type = null) =>
         OspfTemplateSemanticIdentity.FromCaptured(
             "site",
             "vlan10",
-            "10.16.11.0/27",
+            networks,
             passive: true,
             new OspfCapturedTemplateSemantics
             {
@@ -479,7 +515,7 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         [".id"] = "*L",
         ["area"] = "site",
         ["interfaces"] = "vlan10",
-        ["networks"] = "10.16.11.0/27",
+        ["networks"] = "10.99.99.0/27",
         ["passive"] = "",
         ["disabled"] = "false",
         ["type"] = "broadcast",

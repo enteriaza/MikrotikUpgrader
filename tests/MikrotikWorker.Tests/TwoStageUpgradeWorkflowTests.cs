@@ -16,7 +16,7 @@ public sealed class TwoStageUpgradeWorkflowTests
     [Theory]
     [InlineData("ACE01.POP001.001.core", DeviceType.Ace)]
     [InlineData("BR12.POP123.456.edge", DeviceType.Br)]
-    public async Task AceOrBr_RunsFullUpgradeThroughV7AndRouterboard(string identity, DeviceType expectedType)
+    public async Task AceOrBr_RunsThroughV7AndRouterboard(string identity, DeviceType expectedType)
     {
         StageTrackingOps ops = new(identity)
         {
@@ -435,9 +435,9 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task AlreadyAtV6Stepping_FullUpgrade_SkipsV6Fetch_VerifiesV7PackageName()
+    public async Task AlreadyAtV6Stepping_SkipsV6Fetch_VerifiesV7PackageName()
     {
-        // Live regression: 6.49.23 Unknown → FullUpgrade → routeros/7.23.8 (not routeros-mipsbe).
+        // Live regression: 6.49.23 Unknown → automatic RouterOS 7 upgrade → routeros/7.23.8 (not routeros-mipsbe).
         StageTrackingOps ops = new("Mikrotik")
         {
             VersionsAfterReboot = ["7.23.8"],
@@ -469,7 +469,6 @@ public sealed class TwoStageUpgradeWorkflowTests
 
         Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
         Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
-        Assert.Equal(UpgradeExecutionMode.FullUpgrade, result.ExecutionMode);
         Assert.Equal("7.23.8", result.PostUpgradeVersion);
         Assert.Equal("mipsbe", result.PostUpgradeArchitecture);
         Assert.Equal(2, backup.CallCount);
@@ -534,7 +533,7 @@ public sealed class TwoStageUpgradeWorkflowTests
             CancellationToken.None);
 
         // Already on ROS7 target: OSPF reconcile + backup + RouterBOARD; no package fetch/reboot.
-        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeOutcome.SkippedAlreadyAtTarget, result.Outcome);
         Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
         Assert.Equal(1, backup.CallCount);
         Assert.Equal(0, ops.RebootCount);
@@ -634,7 +633,7 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task FullUpgrade_RouterboardUpgradeRequired_IssuesCommandAndExtraReboot()
+    public async Task RouterboardUpgradeRequired_IssuesCommandAndExtraReboot()
     {
         StageTrackingOps ops = new("AP01.POP001.001.access")
         {
@@ -670,7 +669,7 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task FullUpgrade_LegacyCleanupFailure_SkipsFirmwareMutation()
+    public async Task LegacyCleanupFailure_SkipsFirmwareMutation()
     {
         StageTrackingOps ops = new("AP01.POP001.001.access")
         {
@@ -705,7 +704,7 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task FullUpgrade_RouterboardInconclusive_DoesNotUpgrade()
+    public async Task RouterboardInconclusive_DoesNotUpgrade()
     {
         StageTrackingOps ops = new("AP01.POP001.001.access")
         {
@@ -922,7 +921,7 @@ public sealed class TwoStageUpgradeWorkflowTests
 
         public int? FailOnPostRebootDeviceInfoReadNumber { get; init; }
 
-        /// <summary>Defaults equal so FullUpgrade success needs no RouterBOARD upgrade/reboot.</summary>
+        /// <summary>Defaults equal so a successful upgrade needs no RouterBOARD upgrade/reboot.</summary>
         public string RouterboardCurrentFirmware { get; set; } = "7.23.8";
 
         public string RouterboardUpgradeFirmware { get; set; } = "7.23.8";

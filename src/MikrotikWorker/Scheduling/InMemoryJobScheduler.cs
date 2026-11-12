@@ -676,6 +676,41 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
                         nameof(ScheduledJobTerminalState.Succeeded));
                     break;
 
+                case ScheduledJobTerminalState.AlreadyUpToDate:
+                    _logger.LogInformation(
+                        "Job terminal AlreadyUpToDate. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        executionDuration,
+                        nameof(ScheduledJobTerminalState.AlreadyUpToDate));
+                    break;
+
+                case ScheduledJobTerminalState.Blocked:
+                    _logger.LogWarning(
+                        error,
+                        "Job terminal Blocked (device was not upgraded). ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        executionDuration,
+                        nameof(ScheduledJobTerminalState.Blocked));
+                    break;
+
+                case ScheduledJobTerminalState.Skipped:
+                    _logger.LogWarning(
+                        error,
+                        "Job terminal Skipped. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ExecutionDuration={ExecutionDuration}, JobOutcome={JobOutcome}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterName,
+                        job.RouterIp,
+                        executionDuration,
+                        nameof(ScheduledJobTerminalState.Skipped));
+                    break;
+
                 case ScheduledJobTerminalState.Failed:
                     _logger.LogError(
                         error,

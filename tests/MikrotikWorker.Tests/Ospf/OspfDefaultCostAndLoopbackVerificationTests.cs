@@ -138,6 +138,7 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
 
     private static OspfV7Inventory InventoryWithArea(string? defaultCost, string? loopbackType = null)
     {
+        OspfMigrationPlan plan = ValidPlan(defaultCost);
         const string site = "AP01-v2";
         const string backbone = "backbone-v2";
         return new OspfV7Inventory
@@ -187,7 +188,7 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
                     Id = "*s",
                     Area = site,
                     Interfaces = "all",
-                    Networks = "10.10.0.0/16",
+                    Networks = plan.PassiveSiteNetworks[0].NetworkCidr,
                     Passive = true,
                 },
             ],

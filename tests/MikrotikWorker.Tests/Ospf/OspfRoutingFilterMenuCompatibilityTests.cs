@@ -478,7 +478,7 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
                     Id = "*s",
                     Area = plan.TargetSiteAreaName,
                     Interfaces = "all",
-                    Networks = "10.10.0.0/16",
+                    Networks = plan.PassiveSiteNetworks[0].NetworkCidr,
                     Passive = true,
                 },
             ],

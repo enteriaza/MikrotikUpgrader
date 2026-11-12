@@ -20,7 +20,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         cancellationToken.ThrowIfCancellationRequested();
 
         List<OspfIpAddressRow> addresses = (await ReadIpAddressInventoryAsync(connection, cancellationToken)
-                .ConfigureAwait(false)).ToList();
+            .ConfigureAwait(false)).ToList();
 
         // Version-specific filter inventory: never issue the v6 menu on RouterOS 7 (or vice versa).
         List<OspfRoutingFilterRow> filters = request.SourceKind == OspfCaptureSourceKind.RouterOsV7
@@ -185,7 +185,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             catch (Exception ex) when (IsAbsentMenuException(ex))
             {
                 // Unsupported or absent submenu is empty for that path only; keep scanning siblings.
-                logger.LogInformation("OSPFv3 menu {Path} absent or unsupported on RouterOS v6; treating path as empty", path);
+                logger.LogInformation("OSPFv3 menu {Path} absent or unsupported on RouterOS v6; treating path as empty",
+                    path);
                 continue;
             }
             catch (Exception ex)
@@ -235,7 +236,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
                     Networks = Field(row, "networks") ?? Field(row, "network"),
                     Type = Field(row, "type"),
                     Cost = Field(row, "cost"),
-                    Passive = IsTruthy(Field(row, "passive")),
+                    // Match cleanup inventory mapping: ROS flag properties may print as present/empty.
+                    Passive = IsFlagPresent(Field(row, "passive")) || IsTruthy(Field(row, "passive")),
                     Disabled = IsTruthy(Field(row, "disabled")),
                     Comment = Field(row, "comment"),
                     Auth = Field(row, "auth"),
@@ -264,10 +266,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .Where(static i => string.Equals(i.Version, "3", StringComparison.OrdinalIgnoreCase))
             .Select(static i => new OspfV3ObjectRef
             {
-                Path = "/routing/ospf/instance",
-                Id = i.Id,
-                Name = i.Name,
-                Kind = "instance-v3",
+                Path = "/routing/ospf/instance", Id = i.Id, Name = i.Name, Kind = "instance-v3",
             })
             .ToList();
 
@@ -627,7 +626,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .Where(r =>
                 string.Equals(Field(r, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(Field(r, "interfaces"), template.Interface, StringComparison.Ordinal)
-                && string.Equals(NormalizeCidr(Field(r, "networks")), NormalizeCidr(template.NetworkCidr), StringComparison.Ordinal))
+                && string.Equals(NormalizeCidr(Field(r, "networks")), NormalizeCidr(template.NetworkCidr),
+                    StringComparison.Ordinal))
             .ToList();
 
         if (matches.Count > 1)
@@ -640,7 +640,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         {
             ITikReSentence existing = matches[0];
             string id = Field(existing, ".id")
-                ?? throw new OspfBackboneMutationGuardException("Backhaul template .id missing.");
+                        ?? throw new OspfBackboneMutationGuardException("Backhaul template .id missing.");
 
             // CRITICAL: passive on interface-template is a flag (()). Presence enables it.
             // NEVER send =passive=… on an active backhaul set/add. Clear only via /unset.
@@ -648,7 +648,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             bool disabled = IsTruthy(Field(existing, "disabled"));
             string? type = Field(existing, "type");
             bool typeOk = string.Equals(type, "ptp", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(type, "point-to-point", StringComparison.OrdinalIgnoreCase);
+                          || string.Equals(type, "point-to-point", StringComparison.OrdinalIgnoreCase);
             bool costOk = string.Equals(
                 Field(existing, "cost"),
                 template.Cost.ToString(CultureInfo.InvariantCulture),
@@ -729,7 +729,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         {
             ITikReSentence existing = matches[0];
             string id = Field(existing, ".id")
-                ?? throw new OspfBackboneMutationGuardException("Loopback template .id missing.");
+                        ?? throw new OspfBackboneMutationGuardException("Loopback template .id missing.");
             ForbidProtectedBackhaulMutation(id, existing, protectedBackhauls, "loopback ensure");
 
             string? currentType = Field(existing, "type");
@@ -738,8 +738,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             // Make-before-break is NOT used: overlapping interface-template matchers (interfaces=/networks=)
             // can apply concurrently under OR-style matching, and AssertLoopback requires exactly one row.
             bool forcedPtp = !string.IsNullOrWhiteSpace(currentType)
-                && (currentType.Equals("ptp", StringComparison.OrdinalIgnoreCase)
-                    || currentType.Equals("point-to-point", StringComparison.OrdinalIgnoreCase));
+                             && (currentType.Equals("ptp", StringComparison.OrdinalIgnoreCase)
+                                 || currentType.Equals("point-to-point", StringComparison.OrdinalIgnoreCase));
             if (forcedPtp)
             {
                 await RecreateLoopbackWithoutForcedPtpAsync(
@@ -1067,7 +1067,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
 
             OspfClassifiedTemplate candidate = candidates[0];
             string currentId = candidate.Row.Id
-                ?? throw new InvalidOperationException("Known-legacy template missing .id after refresh; aborting.");
+                               ?? throw new InvalidOperationException(
+                                   "Known-legacy template missing .id after refresh; aborting.");
 
             if (protectedIds.Contains(currentId)
                 || candidate.Classification != OspfTemplateClassification.KnownLegacy)
@@ -1358,7 +1359,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
                 template.Interfaces);
             bool networksOk = OspfNetworkList.SetsEqual(Field(existing, "networks"), template.NetworkCidr);
             bool commentOk = string.IsNullOrWhiteSpace(template.Comment)
-                || string.Equals(Field(existing, "comment"), template.Comment, StringComparison.Ordinal);
+                             || string.Equals(Field(existing, "comment"), template.Comment, StringComparison.Ordinal);
 
             if (disabled || !passiveOk || !interfacesOk || !networksOk || !commentOk)
             {
@@ -1460,7 +1461,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
     {
         foreach (OspfPlanBackhaulTemplate bh in plan.ActiveBackhauls)
         {
-            await AssertBackhaulTemplateActiveAsync(connection, bh, expectedId: null, cancellationToken)
+            // Apply/Verify remap logical ROS6 area names (e.g. backbone) onto live ROS7
+            // names (backbone-v2). Post-verify callers may still pass the unmapped plan;
+            // match the intended live backbone area rather than requiring the capture name.
+            OspfPlanBackhaulTemplate assertBh = RemapBackhaulAreaToLiveTarget(plan, bh);
+            await AssertBackhaulTemplateActiveAsync(connection, assertBh, expectedId: null, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -1551,7 +1556,10 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             (expectedId is null || string.Equals(Field(r, ".id"), expectedId, StringComparison.Ordinal))
             && string.Equals(Field(r, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase)
             && string.Equals(Field(r, "interfaces"), template.Interface, StringComparison.Ordinal)
-            && string.Equals(NormalizeCidr(Field(r, "networks")), NormalizeCidr(template.NetworkCidr), StringComparison.Ordinal));
+            && string.Equals(
+                NormalizeCidr(ReadNetworksField(r)),
+                NormalizeCidr(template.NetworkCidr),
+                StringComparison.Ordinal));
 
         if (live is null)
         {
@@ -1567,15 +1575,16 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
 
         string? disabled = Field(live, "disabled");
         bool isDisabled = disabled is not null
-            && !string.Equals(disabled, "no", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(disabled, "false", StringComparison.OrdinalIgnoreCase);
+                          && !string.Equals(disabled, "no", StringComparison.OrdinalIgnoreCase)
+                          && !string.Equals(disabled, "false", StringComparison.OrdinalIgnoreCase);
         if (isDisabled)
         {
             throw new OspfBackboneMutationGuardException(
                 $"Backbone safety failure: backhaul .id={Field(live, ".id")} is disabled after ensure.");
         }
 
-        if (!string.Equals(Field(live, "cost"), template.Cost.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal))
+        if (!string.Equals(Field(live, "cost"), template.Cost.ToString(CultureInfo.InvariantCulture),
+                StringComparison.Ordinal))
         {
             throw new OspfBackboneMutationGuardException(
                 $"Backbone safety failure: backhaul cost is '{Field(live, "cost")}', expected {template.Cost}.");
@@ -1591,7 +1600,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         foreach (OspfPlanBackhaulTemplate bh in protectedBackhauls)
         {
             if (string.Equals(Field(row, "interfaces"), bh.Interface, StringComparison.Ordinal)
-                && string.Equals(NormalizeCidr(Field(row, "networks")), NormalizeCidr(bh.NetworkCidr), StringComparison.Ordinal))
+                && string.Equals(NormalizeCidr(Field(row, "networks")), NormalizeCidr(bh.NetworkCidr),
+                    StringComparison.Ordinal))
             {
                 throw new OspfBackboneMutationGuardException(
                     $"Refusing {operation} on .id={id}: matches protected active backhaul '{bh.Interface}' {bh.NetworkCidr}.");
@@ -2017,9 +2027,9 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
     {
         Id = Field(row, ".id"),
         Name = Field(row, "chain")
-            ?? Field(row, "name")
-            ?? Field(row, "rule")
-            ?? Field(row, ".id"),
+               ?? Field(row, "name")
+               ?? Field(row, "rule")
+               ?? Field(row, ".id"),
     };
 
     private static async Task<List<T>> PrintMappedAsync<T>(
@@ -2059,11 +2069,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             IsDefault = IsTruthy(Field(row, "default")),
             RedistributeProperties = redistribute,
             InFilter = NullIfWhiteSpace(Field(row, "in-filter"))
-                ?? NullIfWhiteSpace(Field(row, "in-filter-chain")),
+                       ?? NullIfWhiteSpace(Field(row, "in-filter-chain")),
             // ROS7 outbound filters are out-filter-chain / out-filter-select (not ambiguous "out-filter").
             OutFilter = NullIfWhiteSpace(Field(row, "out-filter-chain"))
-                ?? NullIfWhiteSpace(Field(row, "out-filter-select"))
-                ?? NullIfWhiteSpace(Field(row, "out-filter")),
+                        ?? NullIfWhiteSpace(Field(row, "out-filter-select"))
+                        ?? NullIfWhiteSpace(Field(row, "out-filter")),
         };
     }
 
@@ -2105,6 +2115,49 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
     private static string? ReadAreaRangePrefix(ITikReSentence row) =>
         Field(row, "prefix") ?? Field(row, "range");
 
+    /// <summary>
+    /// Inventory mapping accepts either <c>networks</c> or legacy <c>network</c>; assert must too.
+    /// </summary>
+    private static string? ReadNetworksField(ITikReSentence row) =>
+        Field(row, "networks") ?? Field(row, "network");
+
+    /// <summary>
+    /// Maps a planned backhaul onto the live ROS7 backbone area name when the plan still
+    /// carries the logical capture name (e.g. <c>backbone</c> → <c>backbone-v2</c>).
+    /// Does not alter interface/network/cost — only the area identity used for lookup.
+    /// </summary>
+    private static OspfPlanBackhaulTemplate RemapBackhaulAreaToLiveTarget(
+        OspfMigrationPlan plan,
+        OspfPlanBackhaulTemplate backhaul)
+    {
+        string target = string.IsNullOrWhiteSpace(plan.TargetBackboneAreaName)
+            ? OspfFleetNaming.Ros7BackboneAreaName
+            : plan.TargetBackboneAreaName;
+        if (string.Equals(backhaul.AreaName, target, StringComparison.OrdinalIgnoreCase))
+        {
+            return backhaul;
+        }
+
+        bool plannedAsBackbone = plan.Areas.Any(a =>
+            a.IsBackbone
+            && string.Equals(a.Name, backhaul.AreaName, StringComparison.OrdinalIgnoreCase));
+        if (!plannedAsBackbone)
+        {
+            return backhaul;
+        }
+
+        return new OspfPlanBackhaulTemplate
+        {
+            AreaName = target,
+            Interface = backhaul.Interface,
+            NetworkCidr = backhaul.NetworkCidr,
+            Cost = backhaul.Cost,
+            Type = backhaul.Type,
+            Passive = backhaul.Passive,
+            SourceCost = backhaul.SourceCost,
+        };
+    }
+
     private static string? Field(ITikReSentence? row, string name) =>
         row?.GetResponseFieldOrDefault(name, null);
 
@@ -2140,8 +2193,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
     {
         string message = ex.Message ?? string.Empty;
         return message.Contains("no such command", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("unknown command", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("bad command name", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("no such command prefix", StringComparison.OrdinalIgnoreCase);
+               || message.Contains("unknown command", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("bad command name", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("no such command prefix", StringComparison.OrdinalIgnoreCase);
     }
 }

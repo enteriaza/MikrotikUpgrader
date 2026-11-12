@@ -43,6 +43,66 @@ public sealed class ScheduledJobsLifecycleTests
     }
 
     [Fact]
+    public async Task ActiveWindowCsv_IsAccepted_AndDispatchedImmediately()
+    {
+        // Clock fixed at 2026-11-12 06:52Z (08:52 Africa/Johannesburg).
+        // CSV window 08:32–18:00 local → already active; must import and dispatch without advancing time.
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 11, 12, 6, 52, 0, TimeSpan.Zero));
+        string jobsRoot = TestHostFactory.CreateScheduledJobsRoot();
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot();
+        RecordingLoggerProvider logs = new();
+        await using SchedulerHost host = await SchedulerHost.CreateAsync(
+            firmwareRoot,
+            jobsRoot,
+            time,
+            configureLogging: logging =>
+            {
+                logging.AddProvider(logs);
+                logging.SetMinimumLevel(LogLevel.Information);
+            });
+        try
+        {
+            string incoming = Path.Combine(jobsRoot, "active-window.csv");
+            await File.WriteAllTextAsync(
+                incoming,
+                """
+                datestart,datestop,routername,routerip
+                12/11/2026 08:32:00,12/11/2026 18:00:00,CORE-01,192.168.1.1
+                """);
+
+            await host.Processor.ProcessIncomingAsync(incoming, CancellationToken.None).WaitAsync(TestTimeout);
+
+            Assert.False(
+                Directory.EnumerateFiles(Path.Combine(jobsRoot, "Rejected"), "*.csv").Any(),
+                "Active-window CSV must not be rejected.");
+            Assert.True(
+                Directory.EnumerateFiles(Path.Combine(jobsRoot, "Accepted"), "active-window.csv").Any()
+                || Directory.EnumerateFiles(Path.Combine(jobsRoot, "Completed"), "*.csv").Any(),
+                "Active-window CSV should be Accepted (or already Completed).");
+
+            // Do not advance the clock — eligibility must already hold at import time.
+            await WaitForAsync(
+                () => logs.Messages.Any(static m =>
+                    m.Contains("dispatched to execution queue", StringComparison.Ordinal)
+                    && m.Contains("192.168.1.1", StringComparison.Ordinal)),
+                TestTimeout);
+            await WaitForAsync(
+                () => Directory.EnumerateFiles(Path.Combine(jobsRoot, "Completed"), "*.csv").Any(),
+                TestTimeout);
+
+            Assert.Equal(0, host.Scheduler.PendingCount);
+            Assert.Contains(
+                logs.Messages,
+                static m => m.Contains("CSV accepted for scheduling", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(jobsRoot, true);
+            Directory.Delete(firmwareRoot, true);
+        }
+    }
+
+    [Fact]
     public async Task InvalidCsv_MovesToRejected_WithErrorReport()
     {
         string jobsRoot = TestHostFactory.CreateScheduledJobsRoot();
@@ -467,9 +527,15 @@ public sealed class ScheduledJobsLifecycleTests
             string firmwareRoot,
             string jobsRoot,
             FakeTimeProvider? timeProvider = null,
-            IDictionary<string, string?>? additionalConfiguration = null)
+            IDictionary<string, string?>? additionalConfiguration = null,
+            Action<ILoggingBuilder>? configureLogging = null)
         {
-            WebApplication app = CreateFullApp(firmwareRoot, jobsRoot, timeProvider, additionalConfiguration: additionalConfiguration);
+            WebApplication app = CreateFullApp(
+                firmwareRoot,
+                jobsRoot,
+                timeProvider,
+                configureLogging: configureLogging,
+                additionalConfiguration: additionalConfiguration);
             IInMemoryJobScheduler scheduler = app.Services.GetRequiredService<IInMemoryJobScheduler>();
             ScheduledJobFileProcessor processor = app.Services.GetRequiredService<ScheduledJobFileProcessor>();
             RouterJobExecutionService execution = app.Services

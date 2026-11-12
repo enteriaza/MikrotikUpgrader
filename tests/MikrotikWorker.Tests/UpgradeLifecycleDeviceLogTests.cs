@@ -121,8 +121,6 @@ public sealed class UpgradeLifecycleDeviceLogTests
             RouterIp = IPAddress.Parse("198.18.0.83"),
             DateStartUtc = time.GetUtcNow().UtcDateTime.AddMinutes(-5),
             DateStopUtc = time.GetUtcNow().UtcDateTime.AddHours(1),
-            // Cap at v6 so this lifecycle log test stays single-stage after ACE/BR became v7-eligible.
-            ExecutionMode = UpgradeExecutionMode.V6SteppingOnly,
         };
 
         MikrotikDeviceInfo before = new()
@@ -191,7 +189,9 @@ public sealed class UpgradeLifecycleDeviceLogTests
             }
         }
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        // No RouterOS 7 target is configured: the v6 stage completes and the job stops as TargetUnavailable (never success).
+        Assert.Equal(UpgradeOutcome.TargetUnavailable, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
         Assert.True(ops.RebootCalled);
         Assert.True(ops.FetchCalled);
 
@@ -236,7 +236,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
             "RouterBOARD RouterBOOT fields before v6-stepping",
             "RouterBOARD RouterBOOT fields after upgrade",
             "Final upgrade outcome",
-            "UpgradeSucceededV6Only",
+            "TargetUnavailable",
         ];
 
         foreach (string fragment in requiredFragments)
@@ -263,8 +263,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
         string appLog = await File.ReadAllTextAsync(appLogs[0]);
         Assert.Contains("Router job started", appLog, StringComparison.Ordinal);
         Assert.Contains("ImportId=", appLog, StringComparison.Ordinal);
-        Assert.Contains("Final upgrade outcome", appLog, StringComparison.Ordinal);
-        Assert.Contains("UpgradeSucceededV6Only", appLog, StringComparison.Ordinal);
+        Assert.Contains("No validated RouterOS 7 target is available", appLog, StringComparison.Ordinal);
         // Device-detail lines must not flood the service log.
         Assert.DoesNotContain("Creating RouterOS export", appLog, StringComparison.Ordinal);
         Assert.DoesNotContain("Staged package verified", appLog, StringComparison.Ordinal);

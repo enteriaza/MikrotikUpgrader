@@ -149,7 +149,6 @@ internal static class OspfOnlyLabRecoveryRunner
             RouterIp = targetIp,
             DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
             DateStopUtc = DateTime.UtcNow.AddHours(4),
-            ExecutionMode = UpgradeExecutionMode.FullUpgrade,
         };
 
         string evidenceDir = Path.Combine(

@@ -115,5 +115,11 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
             _worker.Value.HeartbeatInterval,
             _serilog.Value.GetAbsoluteLogDirectory(),
             _serilog.Value.DeviceLogEnabled);
+
+        if (!_firmwareUpgrade.Value.Enabled)
+        {
+            _logger.LogWarning(
+                "Firmware upgrades are administratively disabled (FirmwareUpgrade:Enabled=false). No device will be upgraded and every scheduled job will be reported as Failed until this is set to true.");
+        }
     }
 }

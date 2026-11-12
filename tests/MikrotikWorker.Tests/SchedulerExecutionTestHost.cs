@@ -73,7 +73,7 @@ internal static class SchedulerExecutionTestHost
                 new FixedRouterOsV7TargetProvider("7.23.8"));
 
         IRouterOsV6UpgradeExecutor upgrades = upgradeExecutor
-            ?? new DisabledUpgradeExecutor();
+            ?? new StubUpgradeExecutor();
 
         RouterJobExecutor executor = new(
             connections,
@@ -142,7 +142,11 @@ internal static class SchedulerExecutionTestHost
     }
 }
 
-internal sealed class DisabledUpgradeExecutor : IRouterOsV6UpgradeExecutor
+/// <summary>
+/// Fake upgrade executor for scheduler/preflight tests. Defaults to a verified-target success so those tests
+/// exercise the connect/assess/disconnect path; pass another outcome to test job-outcome mapping.
+/// </summary>
+internal sealed class StubUpgradeExecutor(UpgradeOutcome outcome = UpgradeOutcome.UpgradeSucceeded) : IRouterOsV6UpgradeExecutor
 {
     public Task<UpgradeExecutionResult> ExecuteAsync(
         ITikConnection connection,
@@ -153,7 +157,7 @@ internal sealed class DisabledUpgradeExecutor : IRouterOsV6UpgradeExecutor
         string password,
         Func<bool> isWithinScheduleWindow,
         CancellationToken cancellationToken) =>
-        Task.FromResult(new UpgradeExecutionResult { Outcome = UpgradeOutcome.SkippedUpgradeDisabled });
+        Task.FromResult(new UpgradeExecutionResult { Outcome = outcome, Detail = $"Stub outcome {outcome}" });
 }
 
 internal sealed class StaticFirmwarePackageCatalog(string root) : IFirmwarePackageCatalog

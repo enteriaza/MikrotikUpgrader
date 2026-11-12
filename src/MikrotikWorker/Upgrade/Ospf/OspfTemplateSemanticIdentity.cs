@@ -157,7 +157,12 @@ internal static class OspfTemplateSemanticIdentity
             return $"invalid:{priority.Trim()}";
         }
 
-        return value == 128 ? DefaultPriorityToken : value.ToString(CultureInfo.InvariantCulture);
+        // RouterOS 7 interface-template default priority is 1. Some captures/fixtures still emit 128
+        // (legacy broadcast default). Treat both as the unset/default token so ROS6↔ROS7 default
+        // equivalence does not create false semantic mismatches for otherwise identical templates.
+        return value is 1 or 128
+            ? DefaultPriorityToken
+            : value.ToString(CultureInfo.InvariantCulture);
     }
 
     public static string NormalizeAuth(string? auth)
@@ -616,6 +621,9 @@ internal static class OspfTemplateSemanticIdentity
             VlinkTransitArea = NormalizeOptionalName(vlinkTransitArea),
             Comment = NormalizeComment(comment),
         };
+
+    public static bool HasInvalidSemanticTokens(OspfSupersededTemplateIdentity identity) =>
+        HasInvalidToken(identity);
 
     private static bool HasInvalidToken(OspfSupersededTemplateIdentity identity) =>
         StartsInvalid(identity.Cost)

@@ -138,7 +138,7 @@ public sealed class OspfMultiTemplateTopologyTests
     }
 
     [Fact]
-    public async Task ProvenanceLegacy_Deleted_OperatorCoveredPrefix_NotDeleted()
+    public async Task ProvenanceLegacy_Deleted_UnrelatedPrefix_NotDeleted()
     {
         OspfMigrationPlan plan = ClonePlan(
             MultiBackhaulPlan(1, 1),
@@ -154,7 +154,7 @@ public sealed class OspfMultiTemplateTopologyTests
 
         MutableStore store = MutableStore.WithPlan(plan);
         store.Templates.Add(LegacyRow("*L", "vlan-legacy", "10.16.11.0/27"));
-        store.Templates.Add(LegacyRow("*OP", "VLAN-200", "10.16.11.128/26"));
+        store.Templates.Add(LegacyRow("*OP", "VLAN-200", "192.0.2.0/24"));
         CapturingConnection capturing = store.Connect();
 
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -186,7 +186,8 @@ public sealed class OspfMultiTemplateTopologyTests
         Assert.Equal(["*L"], capturing.RemovedIds);
 
         capturing.RemovedIds.Clear();
-        store.Templates.Add(Row("*U", "site", "operator", "10.16.11.64/27", passive: true));
+        // Outside management boundary and outside planned site membership — must abort.
+        store.Templates.Add(Row("*U", "site", "operator", "192.0.2.0/24", passive: true));
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
@@ -264,6 +265,7 @@ public sealed class OspfMultiTemplateTopologyTests
             ContentHash = plan.ContentHash,
             InstanceName = plan.InstanceName,
             RouterId = plan.RouterId,
+            DerivedManagementCidr = plan.DerivedManagementCidr,
             Areas = plan.Areas,
             AreaRanges = plan.AreaRanges,
             ActiveBackhauls = plan.ActiveBackhauls,

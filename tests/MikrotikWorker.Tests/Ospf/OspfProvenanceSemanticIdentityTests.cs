@@ -14,7 +14,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     {
         OspfSupersededTemplateIdentity provenance = Provenance(
             interfaces: "vlan10",
-            networks: "10.16.11.0/27",
+            networks: "10.99.99.0/27",
             type: "broadcast",
             cost: "1",
             authId: null,
@@ -30,8 +30,8 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Theory]
     [InlineData("cost", "10")]
     [InlineData("auth-id", "1")]
-    [InlineData("priority", "1")]
-    [InlineData("type", "ptp")]
+    [InlineData("priority", "50")]
+    [InlineData("type", "nbma")]
     [InlineData("auth", "md5")]
     [InlineData("hello-interval", "1s")]
     [InlineData("dead-interval", "3s")]
@@ -44,7 +44,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [InlineData("vlink-transit-area", "transit")]
     public void SinglePropertyDifference_IsUnknown(string property, string value)
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L");
         live = property switch
         {
@@ -71,7 +71,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public void AuthKeyOnlyDifference_IsUnknown()
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with
         {
             AuthKeyPresent = true,
@@ -84,7 +84,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public void BfdOnlyDifference_IsUnknown()
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with { UseBfd = "true" };
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
@@ -92,17 +92,21 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public void PassiveStateDifference_IsUnknown()
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with { Passive = false };
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
     [Fact]
-    public void DisabledStateDifference_IsUnknown()
+    public void DisabledLeftoverUnderManagement_IsKnownLegacyViaConsolidatedPrefix()
     {
+        // Disabled leftovers under a planned consolidated prefix are obsolete by containment,
+        // even when recorded provenance fingerprints differ.
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with { Disabled = true };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        Assert.Equal(
+            OspfTemplateClassification.KnownLegacy,
+            Assert.Single(Classify(provenance, live).KnownLegacy).Classification);
     }
 
     [Fact]
@@ -110,10 +114,10 @@ public sealed class OspfProvenanceSemanticIdentityTests
     {
         OspfSupersededTemplateIdentity provenance = Provenance(
             "vlan10",
-            "10.16.11.0/27,10.16.11.32/27");
+            "10.99.99.0/27,10.99.99.32/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with
         {
-            Networks = "10.16.11.32/27,10.16.11.0/27",
+            Networks = "10.99.99.32/27,10.99.99.0/27",
         };
         Assert.Equal(
             OspfTemplateClassification.KnownLegacy,
@@ -123,7 +127,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public void InterfaceListOrderDifference_StillMatches()
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan-b,vlan-a", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan-b,vlan-a", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with { Interfaces = "vlan-a,vlan-b" };
         Assert.Equal(
             OspfTemplateClassification.KnownLegacy,
@@ -133,7 +137,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public void TimerDefaultRepresentations_AreEquivalent()
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with
         {
             HelloInterval = "10s",
@@ -148,7 +152,27 @@ public sealed class OspfProvenanceSemanticIdentityTests
     }
 
     [Fact]
-    public void MissingProvenance_IsUnknown()
+    public void MissingProvenance_CompatibleManagementSubdivision_IsKnownLegacyViaDesiredState()
+    {
+        OspfMigrationPlan plan = BasePlan(superseded: []);
+        OspfTemplateClassificationReport report = OspfTemplateCleanupClassifier.ClassifyOrThrow(
+            plan,
+            [
+                PlannedBackhaul(),
+                PlannedLoopback(),
+                PlannedSite(),
+                LiveRow("*L", "site", "vlan10", "10.16.11.0/27", passive: true),
+            ]);
+        Assert.Single(report.KnownLegacy);
+        Assert.Empty(report.Unknown);
+        Assert.Contains(
+            "Consolidated-prefix replacement",
+            report.KnownLegacy[0].Reason,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MissingProvenance_UnrelatedPrefix_IsUnknown()
     {
         OspfMigrationPlan plan = BasePlan(superseded: []);
         InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
@@ -158,10 +182,10 @@ public sealed class OspfProvenanceSemanticIdentityTests
                     PlannedBackhaul(),
                     PlannedLoopback(),
                     PlannedSite(),
-                    LiveRow("*L", "site", "vlan10", "10.16.11.0/27", passive: true),
+                    LiveRow("*L", "site", "vlan10", "192.0.2.0/24", passive: true),
                 ]));
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("provenance", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("consolidated-prefix replacement", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -174,7 +198,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [InlineData("instance-id", "999")]
     public void MalformedProperty_IsUnknown(string property, string value)
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L");
         live = property switch
         {
@@ -193,7 +217,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public void DifferentId_SameSemantics_Matches()
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         Assert.Equal(
             OspfTemplateClassification.KnownLegacy,
             Assert.Single(Classify(provenance, LiveFrom(provenance, "*OTHER")).KnownLegacy).Classification);
@@ -202,14 +226,14 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public async Task ConfigurationModifiedAfterProvenance_AbortsCleanupWithZeroDeletes()
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfMigrationPlan plan = BasePlan([provenance]);
         var store = new List<Dictionary<string, string>>
         {
             DictBackhaul(),
             DictLoopback(),
             DictSite(),
-            DictLegacy("vlan10", "10.16.11.0/27"),
+            DictLegacy("vlan10", "10.99.99.0/27"),
         };
 
         // Mutate cost after "capture" so live no longer matches provenance.
@@ -251,14 +275,14 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [InlineData("instance-id", "7")]
     public async Task TimerOrInstanceModifiedAfterProvenance_AbortsWithZeroDeletes(string property, string value)
     {
-        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.16.11.0/27");
+        OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfMigrationPlan plan = BasePlan([provenance]);
         var store = new List<Dictionary<string, string>>
         {
             DictBackhaul(),
             DictLoopback(),
             DictSite(),
-            DictLegacy("vlan10", "10.16.11.0/27"),
+            DictLegacy("vlan10", "10.99.99.0/27"),
         };
         store[^1][property] = value;
 
@@ -293,8 +317,8 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [Fact]
     public void MultipleSupersededIdentities_MatchIndependently()
     {
-        OspfSupersededTemplateIdentity a = Provenance("vlan10", "10.16.11.0/27");
-        OspfSupersededTemplateIdentity b = Provenance("vlan20", "10.16.11.32/27");
+        OspfSupersededTemplateIdentity a = Provenance("vlan10", "10.99.99.0/27");
+        OspfSupersededTemplateIdentity b = Provenance("vlan20", "10.99.99.32/27");
         OspfTemplateClassificationReport report = Classify(
             [a, b],
             LiveFrom(a, "*L1"),
@@ -320,31 +344,31 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [InlineData("vlink-transit-area", "ta")]
     [InlineData("passive", "false")]
     [InlineData("disabled", "true")]
-    [InlineData("type", "ptp")]
+    [InlineData("type", "nbma")]
     public void PlanHash_ChangesWhenSemanticProvenancePropertyChanges(string property, string value)
     {
-        OspfMigrationPlan basePlan = BasePlan([Provenance("vlan10", "10.16.11.0/27")]);
+        OspfMigrationPlan basePlan = BasePlan([Provenance("vlan10", "10.99.99.0/27")]);
         string hash1 = OspfMigrationPlanner.ComputeContentHash(basePlan);
 
         OspfSupersededTemplateIdentity changed = property switch
         {
-            "cost" => Provenance("vlan10", "10.16.11.0/27", cost: value),
-            "auth" => Provenance("vlan10", "10.16.11.0/27", auth: value),
-            "auth-id" => Provenance("vlan10", "10.16.11.0/27", authId: value),
-            "priority" => Provenance("vlan10", "10.16.11.0/27", priority: value),
-            "use-bfd" => Provenance("vlan10", "10.16.11.0/27", useBfd: true),
-            "hello-interval" => Provenance("vlan10", "10.16.11.0/27", helloInterval: value),
-            "dead-interval" => Provenance("vlan10", "10.16.11.0/27", deadInterval: value),
-            "retransmit-interval" => Provenance("vlan10", "10.16.11.0/27", retransmitInterval: value),
-            "transmit-delay" => Provenance("vlan10", "10.16.11.0/27", transmitDelay: value),
-            "instance-id" => Provenance("vlan10", "10.16.11.0/27", instanceId: value),
-            "area-instance" => Provenance("vlan10", "10.16.11.0/27", areaInstanceName: value),
-            "prefix-list" => Provenance("vlan10", "10.16.11.0/27", prefixList: value),
-            "vlink-neighbor-id" => Provenance("vlan10", "10.16.11.0/27", vlinkNeighborId: value),
-            "vlink-transit-area" => Provenance("vlan10", "10.16.11.0/27", vlinkTransitArea: value),
-            "passive" => Provenance("vlan10", "10.16.11.0/27", passive: false),
-            "disabled" => Provenance("vlan10", "10.16.11.0/27", disabled: true),
-            "type" => Provenance("vlan10", "10.16.11.0/27", type: value),
+            "cost" => Provenance("vlan10", "10.99.99.0/27", cost: value),
+            "auth" => Provenance("vlan10", "10.99.99.0/27", auth: value),
+            "auth-id" => Provenance("vlan10", "10.99.99.0/27", authId: value),
+            "priority" => Provenance("vlan10", "10.99.99.0/27", priority: value),
+            "use-bfd" => Provenance("vlan10", "10.99.99.0/27", useBfd: true),
+            "hello-interval" => Provenance("vlan10", "10.99.99.0/27", helloInterval: value),
+            "dead-interval" => Provenance("vlan10", "10.99.99.0/27", deadInterval: value),
+            "retransmit-interval" => Provenance("vlan10", "10.99.99.0/27", retransmitInterval: value),
+            "transmit-delay" => Provenance("vlan10", "10.99.99.0/27", transmitDelay: value),
+            "instance-id" => Provenance("vlan10", "10.99.99.0/27", instanceId: value),
+            "area-instance" => Provenance("vlan10", "10.99.99.0/27", areaInstanceName: value),
+            "prefix-list" => Provenance("vlan10", "10.99.99.0/27", prefixList: value),
+            "vlink-neighbor-id" => Provenance("vlan10", "10.99.99.0/27", vlinkNeighborId: value),
+            "vlink-transit-area" => Provenance("vlan10", "10.99.99.0/27", vlinkTransitArea: value),
+            "passive" => Provenance("vlan10", "10.99.99.0/27", passive: false),
+            "disabled" => Provenance("vlan10", "10.99.99.0/27", disabled: true),
+            "type" => Provenance("vlan10", "10.99.99.0/27", type: value),
             _ => throw new InvalidOperationException(property),
         };
 
@@ -563,6 +587,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
             SourceKind = OspfCaptureSourceKind.RouterOsV7,
             InstanceName = "default-v2",
             RouterId = "10.16.0.11",
+            DerivedManagementCidr = "10.16.11.0/24",
             Areas =
             [
                 new OspfPlanArea { Name = "backbone-v2", AreaId = "0.0.0.0", TargetType = "default", IsBackbone = true },

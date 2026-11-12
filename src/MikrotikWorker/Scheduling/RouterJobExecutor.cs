@@ -296,9 +296,8 @@ internal sealed class RouterJobExecutor(
                 using (DeviceLogging.BeginServiceSummary())
                 {
                     logger.LogInformation(
-                        "Final upgrade outcome: {UpgradeOutcome} (executionMode={ExecutionMode}, completedStage={CompletedStage}, version={PostUpgradeVersion}, detail={UpgradeDetail}, enabled={FirmwareUpgradeEnabled})",
+                        "Final upgrade outcome: {UpgradeOutcome} (completedStage={CompletedStage}, version={PostUpgradeVersion}, detail={UpgradeDetail}, enabled={FirmwareUpgradeEnabled})",
                         upgradeResult.Outcome,
-                        upgradeResult.ExecutionMode,
                         upgradeResult.CompletedStage,
                         upgradeResult.PostUpgradeVersion,
                         upgradeResult.Detail,
@@ -308,11 +307,10 @@ internal sealed class RouterJobExecutor(
                 using (DeviceLogging.BeginServiceOnly())
                 {
                     logger.LogInformation(
-                        "Upgrade outcome correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, ExecutionMode={ExecutionMode}, UpgradeOutcome={UpgradeOutcome}",
+                        "Upgrade outcome correlation. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, UpgradeOutcome={UpgradeOutcome}",
                         job.ImportId,
                         job.JobId,
                         job.RouterIp,
-                        job.ExecutionMode,
                         upgradeResult.Outcome);
                 }
 
@@ -584,16 +582,31 @@ internal sealed class RouterJobExecutor(
             elapsed);
     }
 
-    private static (ScheduledJobTerminalState Terminal, bool Success) MapUpgradeOutcome(UpgradeOutcome outcome) =>
+    /// <summary>
+    /// Maps an upgrade outcome to a truthful terminal job state. Only a verified RouterOS 7 target
+    /// (<see cref="ScheduledJobTerminalState.Succeeded"/>) or an already-verified target
+    /// (<see cref="ScheduledJobTerminalState.AlreadyUpToDate"/>) count as success.
+    /// </summary>
+    internal static (ScheduledJobTerminalState Terminal, bool Success) MapUpgradeOutcome(UpgradeOutcome outcome) =>
         outcome switch
         {
-            UpgradeOutcome.SkippedUpgradeDisabled => (ScheduledJobTerminalState.Succeeded, true),
-            UpgradeOutcome.SkippedAlreadyAtTarget => (ScheduledJobTerminalState.Succeeded, true),
-            UpgradeOutcome.NotAttempted => (ScheduledJobTerminalState.Succeeded, true),
+            // True success: verified on (or completed workflow for) the configured ROS7 target.
             UpgradeOutcome.UpgradeSucceeded => (ScheduledJobTerminalState.Succeeded, true),
-            UpgradeOutcome.UpgradeSucceededV6Only => (ScheduledJobTerminalState.Succeeded, true),
-            UpgradeOutcome.SkippedNewerThanTarget => (ScheduledJobTerminalState.Succeeded, true),
-            UpgradeOutcome.SkippedStageNotApplicable => (ScheduledJobTerminalState.Succeeded, true),
+
+            // Already on target — success-like, distinct from an upgrade that ran.
+            UpgradeOutcome.SkippedAlreadyAtTarget => (ScheduledJobTerminalState.AlreadyUpToDate, true),
+
+            // Admin kill-switch: never report success when the upgrade did not run.
+            UpgradeOutcome.SkippedUpgradeDisabled => (ScheduledJobTerminalState.Failed, false),
+
+            // Prerequisites / policy / no-downgrade.
+            UpgradeOutcome.PolicyBlocked => (ScheduledJobTerminalState.Blocked, false),
+            UpgradeOutcome.SkippedNewerThanTarget => (ScheduledJobTerminalState.Blocked, false),
+            UpgradeOutcome.TargetUnavailable => (ScheduledJobTerminalState.Blocked, false),
+
+            // No upgrade was attempted: must never look like success.
+            UpgradeOutcome.NotAttempted => (ScheduledJobTerminalState.Failed, false),
+
             UpgradeOutcome.UpgradeInterrupted => (ScheduledJobTerminalState.Cancelled, false),
             _ => (ScheduledJobTerminalState.Failed, false),
         };

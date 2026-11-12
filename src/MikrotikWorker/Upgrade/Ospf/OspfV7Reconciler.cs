@@ -55,8 +55,12 @@ internal sealed class OspfV7Reconciler(
         }
 
         OspfMigrationPlan livePlan = OspfLiveIdentityResolver.RemapPlan(plan, identity.Binding);
+        // Desired-state notes: discover live templates superseded by the remapped plan before mutation.
+        // Cleanup classification also evaluates desired-state replacement directly against the live
+        // inventory, so ROS7 auto-converted subdivisions do not depend on ROS6 capture provenance.
+        livePlan = OspfLiveSupersededProvenance.EnrichFromLiveInventory(livePlan, liveInventory);
         logger.LogInformation(
-            "OSPF live identity resolved. LogicalInstance={LogicalInstance}, LiveInstance={LiveInstance}, LiveInstanceId={LiveInstanceId}, LoopbackRid={LoopbackRid}, LoopbackIf={LoopbackIf}, AreaMaps={AreaMaps}",
+            "OSPF live identity resolved. LogicalInstance={LogicalInstance}, LiveInstance={LiveInstance}, LiveInstanceId={LiveInstanceId}, LoopbackRid={LoopbackRid}, LoopbackIf={LoopbackIf}, AreaMaps={AreaMaps}, SupersededProvenance={Superseded}",
             identity.Binding.LogicalInstanceName,
             identity.Binding.LiveInstanceName,
             identity.Binding.LiveInstanceId ?? "<none>",
@@ -64,7 +68,8 @@ internal sealed class OspfV7Reconciler(
             identity.Binding.LoopbackInterfaceName ?? "<none>",
             string.Join(
                 ", ",
-                identity.Binding.Areas.Values.Select(static a => $"{a.LogicalName}->{a.LiveName}")));
+                identity.Binding.Areas.Values.Select(static a => $"{a.LogicalName}->{a.LiveName}")),
+            livePlan.SupersededTemplates.Count);
 
         OspfManagementPlaneBaseline baseline = await ops
             .CaptureManagementPlaneBaselineAsync(
@@ -349,6 +354,8 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
+        errors.AddRange(VerifyManagementSummarisationPostconditions(livePlan, inventory));
+
         // Final acceptance requires exactly the planned templates — disabled clutter also fails.
         IReadOnlyList<OspfInterfaceTemplateRow> allTemplates = inventory.Templates;
         List<OspfInterfaceTemplateRow> enabled = allTemplates.Where(static t => !t.Disabled).ToList();
@@ -532,7 +539,13 @@ internal sealed class OspfV7MigrationVerifier(
         {
             if (errors.Count == 0)
             {
-                logger.LogInformation("OSPF v7 configuration verification succeeded");
+                logger.LogInformation(
+                    "OSPF v7 configuration verification succeeded. "
+                    + "Management summarisation configuration is reconciled "
+                    + "(site coverage of DerivedManagementCidr, advertised MGMT area-range, "
+                    + "no obsolete more-specific management templates). "
+                    + "Limitation: Type-3/LSA summary advertisement content is not independently "
+                    + "inspected by this worker — summarisation advertisement is therefore not claimed.");
             }
             else
             {
@@ -545,6 +558,106 @@ internal sealed class OspfV7MigrationVerifier(
             Succeeded = errors.Count == 0,
             Errors = errors,
         };
+    }
+
+    /// <summary>
+    /// Verifies management summarisation <b>configuration</b> postconditions:
+    /// planned site coverage of the derived <c>/24</c> (exact or broader covering aggregate),
+    /// advertised MGMT area-range present, and no conflicting more-specific management templates.
+    /// Does <b>not</b> independently verify Type-3 LSA advertisement content — that limitation is
+    /// reported by the caller; configuration presence alone is not treated as advertisement proof.
+    /// </summary>
+    internal static IReadOnlyList<string> VerifyManagementSummarisationPostconditions(
+        OspfMigrationPlan livePlan,
+        OspfV7Inventory inventory)
+    {
+        List<string> errors = [];
+        if (string.IsNullOrWhiteSpace(livePlan.DerivedManagementCidr)
+            || !OspfIpPrefix.TryParse(livePlan.DerivedManagementCidr, out OspfIpPrefix mgmt))
+        {
+            errors.Add(
+                "OSPF management summarisation postcondition failed: plan is missing DerivedManagementCidr.");
+            return errors;
+        }
+
+        OspfPlanSiteNetworkTemplate? siteWithMgmt = livePlan.PassiveSiteNetworks.FirstOrDefault(s =>
+            OspfNetworkList.TryParseAll(s.NetworkCidr, out List<OspfIpPrefix> nets, out _)
+            && nets.Any(n => n.Equals(mgmt) || n.Contains(mgmt)));
+        if (siteWithMgmt is null)
+        {
+            errors.Add(
+                $"OSPF management summarisation postcondition failed: planned site matchers do not cover "
+                + $"derived management summary '{livePlan.DerivedManagementCidr}'.");
+        }
+        else if (!OspfSiteMatcherConsolidation.IsAllInterfaces(siteWithMgmt.Interfaces))
+        {
+            errors.Add(
+                $"OSPF management summarisation postcondition failed: management coverage "
+                + $"'{livePlan.DerivedManagementCidr}' is not on interfaces=all "
+                + $"(interfaces='{siteWithMgmt.Interfaces}').");
+        }
+
+        OspfPlanAreaRange? plannedMgmtRange = livePlan.AreaRanges.FirstOrDefault(r =>
+            string.Equals(Normalize(r.RangeCidr), mgmt.ToCidrString(), StringComparison.Ordinal)
+            && (string.Equals(r.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(r.Comment)));
+        OspfAreaRangeRow? liveMgmtRange = inventory.AreaRanges.FirstOrDefault(r =>
+            string.Equals(Normalize(r.Range), mgmt.ToCidrString(), StringComparison.Ordinal)
+            && (string.IsNullOrWhiteSpace(r.Area)
+                || siteWithMgmt is null
+                || string.Equals(r.Area, siteWithMgmt.AreaName, StringComparison.OrdinalIgnoreCase)));
+        if (plannedMgmtRange is null || liveMgmtRange is null)
+        {
+            errors.Add(
+                $"OSPF management summarisation postcondition failed: MGMT area range "
+                + $"'{livePlan.DerivedManagementCidr}' is missing "
+                + $"(plan-range={plannedMgmtRange is not null}, live-range={liveMgmtRange is not null}).");
+        }
+        else if (liveMgmtRange.Advertise == false)
+        {
+            errors.Add(
+                $"OSPF management summarisation postcondition failed: MGMT area range "
+                + $"'{livePlan.DerivedManagementCidr}' has advertise=no.");
+        }
+
+        foreach (OspfInterfaceTemplateRow template in inventory.Templates.Where(static t => !t.Disabled))
+        {
+            if (siteWithMgmt is not null
+                && OspfSiteMatcherConsolidation.MatchesPlannedSite(
+                    template.Area,
+                    template.Interfaces,
+                    template.Networks,
+                    template.Passive,
+                    template.Disabled,
+                    siteWithMgmt))
+            {
+                continue;
+            }
+
+            if (!OspfNetworkList.TryParseAll(template.Networks, out List<OspfIpPrefix> liveNets, out _))
+            {
+                continue;
+            }
+
+            bool conflicts = liveNets.Any(n => mgmt.Contains(n) && !n.Equals(mgmt));
+            if (!conflicts)
+            {
+                continue;
+            }
+
+            if (siteWithMgmt is not null
+                && !string.Equals(template.Area, siteWithMgmt.AreaName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            errors.Add(
+                $"OSPF management summarisation postcondition failed: obsolete more-specific management "
+                + $"template remains area={template.Area} interfaces={template.Interfaces} "
+                + $"networks={template.Networks} under summary '{livePlan.DerivedManagementCidr}'.");
+        }
+
+        return errors;
     }
 
     private static string Normalize(string? cidr) =>

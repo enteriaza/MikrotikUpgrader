@@ -132,7 +132,13 @@ public sealed class OspfMigrationPlannerTests
         Assert.Single(result.Plan.PassiveLoopbacks);
         OspfPlanSiteNetworkTemplate site = Assert.Single(result.Plan.PassiveSiteNetworks);
         Assert.Equal("all", site.Interfaces);
-        Assert.Equal("10.10.0.0/16,100.64.0.0/10", site.NetworkCidr);
+        // Derived MGMT /24 is the most-specific summarisation boundary; subdivided /27 matchers
+        // fold into it rather than the broader /16 regardless of area-range ordering.
+        Assert.Equal("10.10.0.0/24", result.Plan.DerivedManagementCidr);
+        Assert.Equal("10.10.0.0/24,100.64.0.0/10", site.NetworkCidr);
+        Assert.Contains(
+            result.Plan.AreaRanges,
+            r => r.RangeCidr == "10.10.0.0/24" && r.Comment == "MGMT");
     }
 
     [Fact]

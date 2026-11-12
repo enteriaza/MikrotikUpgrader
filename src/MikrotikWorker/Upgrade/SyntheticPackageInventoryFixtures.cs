@@ -27,7 +27,7 @@ internal static class SyntheticPackageInventoryFixtures
         X86ArchlessMain(),
         PowerPcAlias(),
         AmbiguousDuplicateMainCandidates(),
-        LabV6SteppingOnlyMikrotik1981824011(),
+        LabV6SteppingMikrotik1981824011(),
         LabV7PostUpgradeMikrotik1981824011(),
     ];
 
@@ -188,13 +188,12 @@ internal static class SyntheticPackageInventoryFixtures
 
     /// <summary>
     /// Synthetic lab mirror of 198.18.240.11 (identity Mikrotik, 6.49.19 mipsbe, main-only with
-    /// ten bundled components). Not a live router observation. Use CSV
-    /// <c>executionmode=V6SteppingOnly</c> for controlled stepping — identity remains Unknown/v7-eligible
-    /// under FullUpgrade.
+    /// ten bundled components). Not a live router observation. Identity remains Unknown/v7-eligible;
+    /// a v6 device below the stepping release is stepped to 6.49.23 before the RouterOS 7 stage.
     /// </summary>
-    public static PackageCompatibilityAuditDevice LabV6SteppingOnlyMikrotik1981824011() =>
+    public static PackageCompatibilityAuditDevice LabV6SteppingMikrotik1981824011() =>
         Device(
-            "lab-v6-stepping-only-198.18.240.11",
+            "lab-v6-stepping-198.18.240.11",
             "Mikrotik",
             "198.18.240.11",
             "6.49.19",
