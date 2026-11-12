@@ -26,6 +26,50 @@ public sealed class MikrotikScheduledJob
     /// Stable identifier for structured logging (import + row).
     /// </summary>
     public string JobId => $"{ImportId:N}:{RowNumber}";
+
+    /// <summary>
+    /// Unsuccessful connection attempts for this job in the current process.
+    /// Independent of <see cref="AuthenticationFailureCount"/>.
+    /// </summary>
+    public int ConnectionFailureCount { get; set; }
+
+    /// <summary>
+    /// Unsuccessful authentication attempts for this job in the current process.
+    /// Independent of <see cref="ConnectionFailureCount"/>.
+    /// </summary>
+    public int AuthenticationFailureCount { get; set; }
+
+    /// <summary>Last transient failure category that triggered a retry or terminal fail.</summary>
+    public JobRetryFailureCategory? LastRetryFailureCategory { get; set; }
+
+    /// <summary>Last transient failure reason (never contains credentials).</summary>
+    public string? LastRetryFailureReason { get; set; }
+
+    /// <summary>UTC timestamp of the last transient connect/login failure.</summary>
+    public DateTimeOffset? LastRetryFailureUtc { get; set; }
+
+    /// <summary>
+    /// When set, the scheduler will not dispatch this job until this time
+    /// (subject also to <see cref="DateStartUtc"/> / <see cref="DateStopUtc"/>).
+    /// </summary>
+    public DateTimeOffset? NextRetryUtc { get; set; }
+
+    /// <summary>
+    /// Effective earliest dispatch time for the priority queue (max of schedule start and retry delay).
+    /// </summary>
+    public DateTime EffectiveEligibleUtc
+    {
+        get
+        {
+            if (NextRetryUtc is { } retry)
+            {
+                DateTime retryUtc = retry.UtcDateTime;
+                return retryUtc > DateStartUtc ? retryUtc : DateStartUtc;
+            }
+
+            return DateStartUtc;
+        }
+    }
 }
 
 /// <summary>

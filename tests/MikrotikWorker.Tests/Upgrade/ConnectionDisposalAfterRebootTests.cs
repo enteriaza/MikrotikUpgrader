@@ -572,6 +572,13 @@ public sealed class ConnectionDisposalAfterRebootTests
 
         public bool TryRequeueDispatchedJob(object entryToken) => false;
 
+        public bool TryScheduleTransientRetry(
+            object entryToken,
+            JobRetryFailureCategory category,
+            string reason,
+            Exception? error = null) =>
+            false;
+
         public void CompleteDispatchedJob(
             object entryToken,
             ScheduledJobTerminalState state,

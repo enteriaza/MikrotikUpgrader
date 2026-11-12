@@ -155,12 +155,14 @@ public sealed class SharedRouterCredentialTests
     {
         FakeTimeProvider time = new(new DateTimeOffset(2026, 12, 1, 12, 0, 0, TimeSpan.Zero));
         ThrowingMikrotikConnectionFactory failing = new(new IOException("connect refused"));
+        // Retry disabled (max 0): first unsuccessful attempt is terminal — preserves credential-path coverage.
         await using ExecutionHost host = await ExecutionHost.CreateAsync(
             time,
             failing,
             enabled: true,
             username: SharedUsername,
-            password: SharedPassword);
+            password: SharedPassword,
+            jobRetryOptions: new JobRetryOptions { MaximumUnsuccessfulAttempts = 0 });
 
         Guid importId = Guid.NewGuid();
         host.Scheduler.RegisterImport(importId, 1);
@@ -413,7 +415,8 @@ public sealed class SharedRouterCredentialTests
             string username,
             string password,
             int port = 8728,
-            ILogger? executorLogger = null)
+            ILogger? executorLogger = null,
+            JobRetryOptions? jobRetryOptions = null)
         {
             string root = TestHostFactory.CreateScheduledJobsRoot();
             ScheduledJobsOptions options = new()
@@ -451,7 +454,8 @@ public sealed class SharedRouterCredentialTests
                     connectionFactory: connectionFactory,
                     mikroTikEnabled: enabled,
                     mikroTikOptions: mikroTik,
-                    executorLogger: logger);
+                    executorLogger: logger,
+                    jobRetryOptions: jobRetryOptions);
 
             return Task.FromResult(new ExecutionHost(
                 scheduler,

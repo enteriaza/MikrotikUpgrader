@@ -171,9 +171,29 @@ internal sealed class RouterJobExecutor(
             ITikConnection? connection = null;
             try
             {
-                connection = await connectionFactory
-                    .CreateAsync(connectionOptions, cancellationToken)
-                    .ConfigureAwait(false);
+                // Connect/login only — transient retry applies exclusively to this boundary.
+                // Upgrade-stage reconnects are owned by the upgrade executor and are not retried here.
+                try
+                {
+                    connection = await connectionFactory
+                        .CreateAsync(connectionOptions, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception connectEx)
+                {
+                    if (connectEx is OperationCanceledException && cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+
+                    HandleConnectFailure(connectEx, workItem, completer, stopwatch, job);
+                    return;
+                }
+
+                // Authenticated session established — clear both per-job retry counters.
+                job.ConnectionFailureCount = 0;
+                job.AuthenticationFailureCount = 0;
+                job.NextRetryUtc = null;
 
                 logger.LogInformation("Connected successfully");
 
@@ -404,13 +424,15 @@ internal sealed class RouterJobExecutor(
                     }
                 }
 
+                // Post-connect failures (device info, upgrade, disconnect) are not transient
+                // connect/login retries — preserve existing terminal failure behaviour.
                 stopwatch.Stop();
-                logger.LogError(ex, "Router connection failed");
+                logger.LogError(ex, "Router job execution failed after connect");
                 using (DeviceLogging.BeginServiceOnly())
                 {
                     logger.LogError(
                         ex,
-                        "Router connection failed. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                        "Router job execution failed after connect. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
                         job.ImportId,
                         job.JobId,
                         job.RouterName,
@@ -447,6 +469,113 @@ internal sealed class RouterJobExecutor(
                 stopwatch.Elapsed,
                 ex);
         }
+    }
+
+    /// <summary>
+    /// Classifies a CreateAsync failure. Retryable outcomes requeue without holding a worker slot;
+    /// cancellation does not consume a retry attempt; other failures are terminal.
+    /// </summary>
+    private void HandleConnectFailure(
+        Exception connectEx,
+        RouterJobWorkItem workItem,
+        IRouterJobExecutionCompleter completer,
+        Stopwatch stopwatch,
+        MikrotikScheduledJob job)
+    {
+        stopwatch.Stop();
+        MikrotikConnectFailureClassifier.Kind kind = MikrotikConnectFailureClassifier.Classify(connectEx);
+
+        if (kind == MikrotikConnectFailureClassifier.Kind.Cancellation)
+        {
+            CompleteCancelled(workItem, completer, stopwatch.Elapsed, job);
+            return;
+        }
+
+        if (kind is MikrotikConnectFailureClassifier.Kind.RetryableConnection
+            or MikrotikConnectFailureClassifier.Kind.RetryableAuthentication)
+        {
+            JobRetryFailureCategory category = kind == MikrotikConnectFailureClassifier.Kind.RetryableAuthentication
+                ? JobRetryFailureCategory.Authentication
+                : JobRetryFailureCategory.Connection;
+
+            // Never include credentials; prefer exception type + safe message.
+            string reason = $"{connectEx.GetType().Name}: {connectEx.Message}";
+
+            logger.LogWarning(
+                connectEx,
+                "Router {FailureCategory} failure during connect/login. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ConnectionFailures={ConnectionFailures}, AuthenticationFailures={AuthenticationFailures}",
+                category,
+                job.ImportId,
+                job.JobId,
+                job.RouterName,
+                job.RouterIp,
+                job.ConnectionFailureCount,
+                job.AuthenticationFailureCount);
+
+            if (completer.TryScheduleTransientRetry(workItem.EntryToken, category, reason, connectEx))
+            {
+                using (DeviceLogging.BeginServiceSummary())
+                {
+                    logger.LogInformation(
+                        "Job delayed for retry after {FailureCategory} failure (nextRetryUtc={NextRetryUtc}, connectionFailures={ConnectionFailures}, authenticationFailures={AuthenticationFailures})",
+                        category,
+                        job.NextRetryUtc,
+                        job.ConnectionFailureCount,
+                        job.AuthenticationFailureCount);
+                }
+
+                return;
+            }
+
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogError(
+                    connectEx,
+                    "Router {FailureCategory} failure is terminal. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ConnectionFailures={ConnectionFailures}, AuthenticationFailures={AuthenticationFailures}, JobOutcome={JobOutcome}",
+                    category,
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterName,
+                    job.RouterIp,
+                    job.ConnectionFailureCount,
+                    job.AuthenticationFailureCount,
+                    nameof(ScheduledJobTerminalState.Failed));
+            }
+
+            using (DeviceLogging.BeginServiceSummary())
+            {
+                logger.LogInformation(
+                    "Final job outcome: {JobOutcome} (exhausted {FailureCategory} retries)",
+                    nameof(ScheduledJobTerminalState.Failed),
+                    category);
+            }
+
+            completer.CompleteDispatchedJob(
+                workItem.EntryToken,
+                ScheduledJobTerminalState.Failed,
+                stopwatch.Elapsed,
+                connectEx);
+            return;
+        }
+
+        logger.LogError(connectEx, "Router connect/login failed permanently");
+        using (DeviceLogging.BeginServiceOnly())
+        {
+            logger.LogError(
+                connectEx,
+                "Router connect/login failed permanently. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, JobOutcome={JobOutcome}",
+                job.ImportId,
+                job.JobId,
+                job.RouterName,
+                job.RouterIp,
+                nameof(ScheduledJobTerminalState.Failed));
+        }
+
+        completer.CompleteDispatchedJob(
+            workItem.EntryToken,
+            ScheduledJobTerminalState.Failed,
+            stopwatch.Elapsed,
+            connectEx);
     }
 
     private void LogFinding(AssessmentFinding finding)

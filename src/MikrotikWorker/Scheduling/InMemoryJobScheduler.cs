@@ -49,6 +49,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<InMemoryJobScheduler> _logger;
     private readonly RouterJobExecutionQueue _executionQueue;
+    private readonly JobRetryOptions _retryOptions;
     private readonly SemaphoreSlim _capacity;
     private readonly object _gate = new();
     private readonly PriorityQueue<JobEntry, JobPriority> _queue = new();
@@ -69,7 +70,8 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         IScheduledJobFileMover fileMover,
         RouterJobExecutionQueue executionQueue,
         TimeProvider timeProvider,
-        ILogger<InMemoryJobScheduler> logger)
+        ILogger<InMemoryJobScheduler> logger,
+        IOptions<JobRetryOptions>? retryOptions = null)
     {
         MaximumPendingJobs = options.Value.MaximumPendingJobs;
         _capacity = new SemaphoreSlim(MaximumPendingJobs, MaximumPendingJobs);
@@ -78,6 +80,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         _executionQueue = executionQueue;
         _timeProvider = timeProvider;
         _logger = logger;
+        _retryOptions = retryOptions?.Value ?? new JobRetryOptions();
     }
 
     public int MaximumPendingJobs { get; }
@@ -265,7 +268,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
                 JobEntry entry = new(job);
                 int sequence = ++_sequence;
                 _entries[key] = entry;
-                _queue.Enqueue(entry, new JobPriority(job.DateStartUtc, sequence));
+                _queue.Enqueue(entry, new JobPriority(job.EffectiveEligibleUtc, sequence));
                 capacityHeld = false;
             }
 
@@ -614,10 +617,89 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             _dispatched.Remove(key);
             _entries[key] = entry;
             int sequence = ++_sequence;
-            _queue.Enqueue(entry, new JobPriority(entry.Job.DateStartUtc, sequence));
+            _queue.Enqueue(entry, new JobPriority(entry.Job.EffectiveEligibleUtc, sequence));
         }
 
         SignalWake();
+        return true;
+    }
+
+    public bool TryScheduleTransientRetry(
+        object entryToken,
+        JobRetryFailureCategory category,
+        string reason,
+        Exception? error = null)
+    {
+        if (entryToken is not JobEntry entry)
+        {
+            throw new ArgumentException("Invalid scheduler entry token.", nameof(entryToken));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        MikrotikScheduledJob job = entry.Job;
+        DateTimeOffset now = _timeProvider.GetUtcNow();
+        int attempt;
+        int maximum = _retryOptions.MaximumUnsuccessfulAttempts;
+        TimeSpan delay;
+        switch (category)
+        {
+            case JobRetryFailureCategory.Connection:
+                attempt = ++job.ConnectionFailureCount;
+                delay = _retryOptions.ConnectionRetryDelay;
+                break;
+            case JobRetryFailureCategory.Authentication:
+                attempt = ++job.AuthenticationFailureCount;
+                delay = _retryOptions.AuthenticationRetryDelay;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(category), category, "Unknown retry failure category.");
+        }
+
+        job.LastRetryFailureCategory = category;
+        job.LastRetryFailureReason = reason;
+        job.LastRetryFailureUtc = now;
+
+        if (attempt > maximum)
+        {
+            job.NextRetryUtc = null;
+            _logger.LogError(
+                error,
+                "Transient {FailureCategory} failure exhausted retries; job will fail permanently. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, Attempt={Attempt}, MaximumUnsuccessfulAttempts={MaximumUnsuccessfulAttempts}, Reason={Reason}",
+                category,
+                job.ImportId,
+                job.JobId,
+                job.RouterName,
+                job.RouterIp,
+                attempt,
+                maximum,
+                reason);
+            return false;
+        }
+
+        DateTimeOffset nextRetry = now + delay;
+        job.NextRetryUtc = nextRetry;
+
+        _logger.LogWarning(
+            error,
+            "Transient {FailureCategory} failure; requeueing job. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, Attempt={Attempt}, MaximumUnsuccessfulAttempts={MaximumUnsuccessfulAttempts}, RetryDelay={RetryDelay}, NextRetryUtc={NextRetryUtc}, Reason={Reason}",
+            category,
+            job.ImportId,
+            job.JobId,
+            job.RouterName,
+            job.RouterIp,
+            attempt,
+            maximum,
+            delay,
+            nextRetry,
+            reason);
+
+        if (!TryRequeueDispatchedJob(entry))
+        {
+            job.NextRetryUtc = null;
+            return false;
+        }
+
         return true;
     }
 

@@ -104,6 +104,12 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<IValidateOptions<ScheduledJobsOptions>, ScheduledJobsOptionsValidator>();
 
         builder.Services
+            .AddOptions<JobRetryOptions>()
+            .BindConfiguration(JobRetryOptions.SectionName)
+            .ValidateOnStart();
+        builder.Services.AddSingleton<IValidateOptions<JobRetryOptions>, JobRetryOptionsValidator>();
+
+        builder.Services
             .AddOptions<SerilogOptions>()
             .BindConfiguration(SerilogOptions.SectionName)
             .ValidateOnStart();

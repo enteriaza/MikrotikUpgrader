@@ -135,10 +135,12 @@ public sealed class RouterPreflightTests
         FakeTimeProvider time = CreateTime();
         CountingThrowingFactory failing = new(new IOException("tcp refused"));
         RecordingLoggerProvider logs = new();
+        // Retry disabled so this preflight regression still proves a single terminal attempt.
         await using PreflightHarness harness = await PreflightHarness.CreateAsync(
             time,
             connectionFactory: failing,
-            executorLogger: logs.CreateLogger("RouterJobExecutor"));
+            executorLogger: logs.CreateLogger("RouterJobExecutor"),
+            jobRetryOptions: new JobRetryOptions { MaximumUnsuccessfulAttempts = 0 });
 
         await harness.RunSingleJobAsync("10.0.0.11");
         Assert.False(harness.Scheduler.IsTracked(harness.LastImportId));
@@ -146,14 +148,17 @@ public sealed class RouterPreflightTests
         Assert.Contains(logs.Messages, static m => m.Contains("Connection attempt started", StringComparison.Ordinal));
         Assert.Contains(
             logs.Messages,
-            static m => m.Contains("Router connection failed", StringComparison.Ordinal)
-                && m.Contains("Failed", StringComparison.Ordinal));
+            static m => m.Contains("Failed", StringComparison.Ordinal)
+                && (m.Contains("terminal", StringComparison.OrdinalIgnoreCase)
+                    || m.Contains("exhausted", StringComparison.OrdinalIgnoreCase)
+                    || m.Contains("connect/login failed", StringComparison.OrdinalIgnoreCase)));
     }
 
     [Fact]
     public async Task AuthenticationFailure_FailsJob_WithoutDuplicateAttempts()
     {
         FakeTimeProvider time = CreateTime();
+        // InvalidOperationException is permanent (not a tik4net login refusal) — still a single attempt.
         CountingThrowingFactory failing = new(new InvalidOperationException("cannot log in"));
         RecordingLoggerProvider logs = new();
         await using PreflightHarness harness = await PreflightHarness.CreateAsync(
@@ -166,7 +171,7 @@ public sealed class RouterPreflightTests
         Assert.Equal(1, failing.CreateCount);
         Assert.Contains(
             logs.Messages,
-            static m => m.Contains("Router connection failed", StringComparison.Ordinal)
+            static m => m.Contains("connect/login failed permanently", StringComparison.OrdinalIgnoreCase)
                 && m.Contains("Failed", StringComparison.Ordinal));
         Assert.DoesNotContain(logs.Messages, static m => m.Contains(SharedPassword, StringComparison.Ordinal));
     }
@@ -471,7 +476,8 @@ public sealed class RouterPreflightTests
             IMikrotikConnectionFactory? connectionFactory = null,
             IMikrotikDeviceInfoReader? deviceInfoReader = null,
             ILogger? executorLogger = null,
-            IRouterOsV6UpgradeExecutor? upgradeExecutor = null)
+            IRouterOsV6UpgradeExecutor? upgradeExecutor = null,
+            JobRetryOptions? jobRetryOptions = null)
         {
             string root = TestHostFactory.CreateScheduledJobsRoot();
             ScheduledJobsOptions options = new()
@@ -514,7 +520,8 @@ public sealed class RouterPreflightTests
                     upgradeExecutor: upgradeExecutor,
                     mikroTikEnabled: true,
                     mikroTikOptions: mikroTik,
-                    executorLogger: logger);
+                    executorLogger: logger,
+                    jobRetryOptions: jobRetryOptions);
 
             return Task.FromResult(new PreflightHarness(
                 scheduler,

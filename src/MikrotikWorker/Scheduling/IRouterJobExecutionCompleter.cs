@@ -20,6 +20,18 @@ internal interface IRouterJobExecutionCompleter
     bool TryRequeueDispatchedJob(object entryToken);
 
     /// <summary>
+    /// Records a transient connection/authentication failure on the job. When the per-category
+    /// attempt count is still within the configured maximum, requeues the same job for later
+    /// eligibility without holding a worker slot. Returns <c>false</c> when the caller must
+    /// mark the job permanently failed (attempt limit exhausted or scheduler stopping).
+    /// </summary>
+    bool TryScheduleTransientRetry(
+        object entryToken,
+        JobRetryFailureCategory category,
+        string reason,
+        Exception? error = null);
+
+    /// <summary>
     /// True when the import was aborted or the scheduler is stopping.
     /// </summary>
     bool IsImportAbortedOrStopping(Guid importId);

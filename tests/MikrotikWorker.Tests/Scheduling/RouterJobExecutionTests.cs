@@ -65,31 +65,44 @@ public sealed class RouterJobExecutionTests
     }
 
     [Fact]
-    public async Task ConnectionFailure_MarksFailed_DoesNotStopOtherJobs()
+    public async Task ConnectionFailure_RequeuesFailingJob_DoesNotStopOtherJobs()
     {
         FakeTimeProvider time = new(new DateTimeOffset(2026, 12, 1, 12, 0, 0, TimeSpan.Zero));
-        ThrowingMikrotikConnectionFactory failing = new(new IOException("connect failed"));
+        HostSelectiveConnectionFactory factory = new(failHost: "192.168.1.1");
         await using ExecutionHarness harness = await ExecutionHarness.CreateAsync(
             time,
             mikroTikEnabled: true,
-            connectionFactory: failing);
+            connectionFactory: factory);
 
         Guid importId = Guid.NewGuid();
         harness.Scheduler.RegisterImport(importId, 2);
-        await harness.Scheduler.ScheduleAsync(
-            CreateJob(importId, 2, time.GetUtcNow().UtcDateTime.AddMinutes(-1), time.GetUtcNow().UtcDateTime.AddHours(1), "A"),
-            CancellationToken.None);
-        await harness.Scheduler.ScheduleAsync(
-            CreateJob(importId, 3, time.GetUtcNow().UtcDateTime.AddMinutes(-1), time.GetUtcNow().UtcDateTime.AddHours(1), "B"),
-            CancellationToken.None);
+        MikrotikScheduledJob failingJob = CreateJob(
+            importId,
+            2,
+            time.GetUtcNow().UtcDateTime.AddMinutes(-1),
+            time.GetUtcNow().UtcDateTime.AddHours(1),
+            "A",
+            "192.168.1.1");
+        MikrotikScheduledJob okJob = CreateJob(
+            importId,
+            3,
+            time.GetUtcNow().UtcDateTime.AddMinutes(-1),
+            time.GetUtcNow().UtcDateTime.AddHours(1),
+            "B",
+            "192.168.1.2");
+        await harness.Scheduler.ScheduleAsync(failingJob, CancellationToken.None);
+        await harness.Scheduler.ScheduleAsync(okJob, CancellationToken.None);
         harness.Scheduler.SetAcceptedPath(importId, harness.AcceptedCsv);
 
-        await WaitForAsync(() => harness.Scheduler.PendingCount == 0, TimeSpan.FromSeconds(5));
-        await WaitForAsync(() => !harness.Scheduler.IsTracked(importId), TimeSpan.FromSeconds(5));
-        await WaitForAsync(
-            () => Directory.EnumerateFiles(harness.CompletedDir, "*.csv").Any(),
-            TimeSpan.FromSeconds(5));
-        Assert.False(harness.Scheduler.IsTracked(importId));
+        await WaitForAsync(() => factory.SuccessCount >= 1, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => failingJob.ConnectionFailureCount >= 1, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => failingJob.NextRetryUtc is not null, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, failingJob.ConnectionFailureCount);
+        Assert.Equal(0, failingJob.AuthenticationFailureCount);
+        Assert.True(failingJob.NextRetryUtc >= time.GetUtcNow().AddMinutes(10).AddSeconds(-1));
+        Assert.Equal(1, harness.Scheduler.QueuedCount);
+        Assert.True(harness.Scheduler.IsTracked(importId));
     }
 
     [Fact]
@@ -259,7 +272,8 @@ public sealed class RouterJobExecutionTests
             FakeTimeProvider time,
             bool mikroTikEnabled = true,
             IMikrotikConnectionFactory? connectionFactory = null,
-            int maxConcurrentRouterJobs = 12)
+            int maxConcurrentRouterJobs = 12,
+            JobRetryOptions? jobRetryOptions = null)
         {
             string root = TestHostFactory.CreateScheduledJobsRoot();
             ScheduledJobsOptions options = new()
@@ -284,7 +298,8 @@ public sealed class RouterJobExecutionTests
                     time,
                     connectionFactory: tracking,
                     mikroTikEnabled: mikroTikEnabled,
-                    executionWorkers: maxConcurrentRouterJobs);
+                    executionWorkers: maxConcurrentRouterJobs,
+                    jobRetryOptions: jobRetryOptions);
 
             return Task.FromResult(new ExecutionHarness(
                 scheduler,
@@ -348,6 +363,30 @@ public sealed class RouterJobExecutionTests
             }
 
             return FakeMikrotikConnections.CreateFullyPopulated();
+        }
+    }
+
+    private sealed class HostSelectiveConnectionFactory : RecordingConnectionFactory
+    {
+        private readonly string _failHost;
+        private int _successCount;
+
+        public HostSelectiveConnectionFactory(string failHost) => _failHost = failHost;
+
+        public int SuccessCount => Volatile.Read(ref _successCount);
+
+        public override Task<ITikConnection> CreateAsync(
+            MikrotikConnectionOptions connection,
+            CancellationToken cancellationToken)
+        {
+            Connections.Add(connection);
+            if (string.Equals(connection.Host, _failHost, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("connect failed");
+            }
+
+            Interlocked.Increment(ref _successCount);
+            return Task.FromResult<ITikConnection>(FakeMikrotikConnections.CreateFullyPopulated());
         }
     }
 

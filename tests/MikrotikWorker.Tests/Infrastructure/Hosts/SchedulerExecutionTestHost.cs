@@ -32,7 +32,8 @@ internal static class SchedulerExecutionTestHost
         int executionWorkers = 12,
         MikroTikOptions? mikroTikOptions = null,
         ILogger<RouterJobExecutor>? executorLogger = null,
-        string? firmwareRoot = null)
+        string? firmwareRoot = null,
+        JobRetryOptions? jobRetryOptions = null)
     {
         options.MaxConcurrentRouterJobs = Math.Max(12, executionWorkers);
         RouterJobExecutionQueue queue = new(Options.Create(options));
@@ -42,7 +43,8 @@ internal static class SchedulerExecutionTestHost
             fileMover,
             queue,
             time,
-            schedulerLogger ?? NullLogger<InMemoryJobScheduler>.Instance);
+            schedulerLogger ?? NullLogger<InMemoryJobScheduler>.Instance,
+            Options.Create(jobRetryOptions ?? new JobRetryOptions()));
 
         MikroTikOptions mikroTik = mikroTikOptions ?? new MikroTikOptions
         {
