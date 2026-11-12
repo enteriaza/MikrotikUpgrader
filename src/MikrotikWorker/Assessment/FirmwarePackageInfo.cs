@@ -1,8 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: FirmwarePackageInfo.cs
+//
+// Description:
+// Parsed *.npk catalogue entry plus FirmwarePackageFileNameParser, which maps
+// v6/v7 RouterOS and optional package filename shapes onto package name,
+// architecture, and RouterOsVersion.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Assessment;
 
 /// <summary>
 /// Parsed RouterOS package discovered under FirmwareFiles.
 /// </summary>
+/// <param name="PackageName">Logical package name (e.g. <c>routeros</c>, <c>routing</c>).</param>
+/// <param name="FileName">File name only (no directory).</param>
+/// <param name="FullPath">Absolute path on disk.</param>
+/// <param name="Architecture">Normalised architecture token when present in the file name.</param>
+/// <param name="Version">Parsed numeric RouterOS package version.</param>
+/// <param name="SizeBytes">File length in bytes.</param>
+/// <param name="Sha256Hex">Lowercase hex SHA-256 of file contents.</param>
 public sealed record FirmwarePackageInfo(
     string PackageName,
     string FileName,
@@ -12,8 +29,14 @@ public sealed record FirmwarePackageInfo(
     long SizeBytes,
     string Sha256Hex);
 
+/// <summary>
+/// Parses MikroTik <c>.npk</c> file names into package identity fields.
+/// </summary>
 internal static class FirmwarePackageFileNameParser
 {
+    /// <summary>
+    /// Lower-case architecture names that can appear in firmware package file names.
+    /// </summary>
     private static readonly HashSet<string> ArchitectureTokens = new(StringComparer.Ordinal)
     {
         "arm", "arm64", "mipsbe", "mmips", "smips", "tile", "x86", "powerpc", "ppc",
@@ -57,6 +80,9 @@ internal static class FirmwarePackageFileNameParser
         return TryParseNamedPackage(parts, out packageName, out architecture, out version);
     }
 
+    /// <summary>
+    /// Lowercases and maps <c>ppc</c> → <c>powerpc</c>.
+    /// </summary>
     public static string NormalizeArchitecture(string architecture)
     {
         string trimmed = architecture.Trim().ToLowerInvariant();
@@ -68,6 +94,9 @@ internal static class FirmwarePackageFileNameParser
         };
     }
 
+    /// <summary>
+    /// True when both architectures normalise to the same non-empty token.
+    /// </summary>
     public static bool ArchitecturesMatch(string? deviceArchitecture, string? packageArchitecture)
     {
         if (string.IsNullOrWhiteSpace(deviceArchitecture) || string.IsNullOrWhiteSpace(packageArchitecture))
@@ -81,12 +110,21 @@ internal static class FirmwarePackageFileNameParser
             StringComparison.Ordinal);
     }
 
+    /// <summary>True when <paramref name="token"/> is a known architecture name.</summary>
     public static bool IsArchitectureToken(string token)
     {
         string n = token.Trim().ToLowerInvariant();
         return ArchitectureTokens.Contains(n);
     }
 
+    /// <summary>
+    /// Parses the main <c>routeros</c> package in either the v6 (<c>routeros-{arch}-{version}</c>) or v7 (<c>routeros-{version}[-{arch}]</c>) naming style.
+    /// </summary>
+    /// <param name="parts">File name without extension, split on hyphens; the first part is <c>routeros</c>.</param>
+    /// <param name="packageName">Receives <c>routeros</c>.</param>
+    /// <param name="architecture">Receives the normalised architecture, or null when the name carries none.</param>
+    /// <param name="version">Receives the parsed version.</param>
+    /// <returns><see langword="true"/> when the parts match a main package name.</returns>
     private static bool TryParseRouterOsMain(
         string[] parts,
         out string packageName,
@@ -125,6 +163,9 @@ internal static class FirmwarePackageFileNameParser
         return false;
     }
 
+    /// <summary>
+    /// Parses non-main packages by locating the right-most version token and optional trailing arch.
+    /// </summary>
     private static bool TryParseNamedPackage(
         string[] parts,
         out string packageName,

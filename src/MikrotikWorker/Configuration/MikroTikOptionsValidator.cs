@@ -1,9 +1,22 @@
+// -----------------------------------------------------------------------------
+// File: MikroTikOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for MikroTikOptions. Always validates port and timeouts;
+// username/password are required only when Mikrotik:Enabled is true.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="MikroTikOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class MikroTikOptionsValidator : IValidateOptions<MikroTikOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, MikroTikOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

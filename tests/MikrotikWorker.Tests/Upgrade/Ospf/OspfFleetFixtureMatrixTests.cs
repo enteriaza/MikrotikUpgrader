@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfFleetFixtureMatrixTests.cs
+//
+// Description:
+// Regression matrix derived from the five authoritative C:\Temp RouterOS
+// exports. Snapshots mirror captured inventory fields (not live API).
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using MikrotikWorker.Upgrade.Ospf;
 
@@ -8,6 +17,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfFleetFixtureMatrixTests
 {
+    /// <summary>
+    /// Scenario: plan the Tommy fixture (identity BR01.POP011.016.Tommy, Loopback 10.16.0.11/32, one backhaul, ACS and PPPoE networks).
+    /// Expected: v6/v7 instance and area names, router-id 10.16.0.11, a stub site area with default cost 1, one cost-10 ptp backhaul on eth-01_BH01.Tommy-Shylock, MGMT 10.16.11.0/24 plus the 100.99.76.16/28 and 172.26.197.4/30 ranges, and a single passive 'all' matcher that folds ACS/PPPoE into 100.64.0.0/10 and includes 172.16.0.0/12.
+    /// Invariant: the full plan (identity, topology and MGMT /24) is derived deterministically from the captured fixture.
+    /// </summary>
     [Fact]
     public void Tommy_DerivesDeterministicIdentityTopologyAndMgmt24()
     {
@@ -55,6 +69,11 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Contains("172.16.0.0/12", siteNet.NetworkCidr, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: the Kopefontein fixture whose v6 site area uses an underscore (BR01.POP009.016_Kopefontein) while /system identity uses a dot.
+    /// Expected: the source area name keeps the underscore, the target site area is BR01.POP009.016.Kopefontein-v2, MGMT is 10.16.9.0/24, two backhauls are planned and a note records that the area differs from the identity.
+    /// Invariant: source names are preserved as captured but the v7 target is always derived from the identity.
+    /// </summary>
     [Fact]
     public void Kopefontein_PreservesUnderscoreSiteArea_ButTargetsIdentityV2()
     {
@@ -70,6 +89,11 @@ public sealed class OspfFleetFixtureMatrixTests
             n => n.Contains("differs from /system identity", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: the ThirstyFalls fixture with one backhaul.
+    /// Expected: router-id 10.16.0.10, MGMT 10.16.10.0/24, a single backhaul on eth-01_BH01.ThirstyFalls-Koperfontein and target area BR01.POP010.016.ThirstyFalls-v2.
+    /// Invariant: single-backhaul sites derive identity-based names and the MGMT /24 correctly.
+    /// </summary>
     [Fact]
     public void ThirstyFalls_SingleBackhaul_AndMgmt24()
     {
@@ -82,6 +106,11 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Equal("BR01.POP010.016.ThirstyFalls-v2", result.Plan.TargetSiteAreaName);
     }
 
+    /// <summary>
+    /// Scenario: the Hekpoort fixture with three backhauls and a Loopback-OSPF interface.
+    /// Expected: loopback 10.16.0.14/32 on Loopback-OSPF, MGMT 10.16.14.0/24, three cost-10 backhauls (10.16.248.16/30, .68/30, .0/30), the MGMT and 100.99.72.0/26 ranges, and target area BR01.POP014.016.HekpoortTPA-v2.
+    /// Invariant: the loopback interface name is taken from the router and every backhaul is normalised to the fleet cost.
+    /// </summary>
     [Fact]
     public void Hekpoort_MultipleBackhauls_LoopbackOspf_AndMgmt24()
     {
@@ -102,6 +131,11 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Equal("BR01.POP014.016.HekpoortTPA-v2", result.Plan.TargetSiteAreaName);
     }
 
+    /// <summary>
+    /// Scenario: a RouterOS 7 Loopback holding 172.16.150.253, 102.66.242.100 and 10.16.254.1.
+    /// Expected: router-id 10.16.254.1 is chosen, two outside-range addresses are recorded as ignored, and the v2 naming helpers return default-v2, backbone-v2 and '&lt;identity&gt;-v2'.
+    /// Invariant: only the in-scope 10/8 loopback address can become the router-id; extras are ignored rather than fatal.
+    /// </summary>
     [Fact]
     public void RustenburgRos7_MultipleLoopbackAddresses_SelectsInScopeIdentity()
     {
@@ -123,6 +157,11 @@ public sealed class OspfFleetFixtureMatrixTests
             OspfFleetNaming.Ros7SiteAreaName("BR01.POP001.016.RustenburgKantoorServers"));
     }
 
+    /// <summary>
+    /// Scenario: plan the Rustenburg fixture whose Loopback carries out-of-range addresses besides 10.16.254.1.
+    /// Expected: the plan succeeds with router-id 10.16.254.1, loopback 10.16.254.1/32, instance default-v2, target area BR01.POP001.016.RustenburgKantoorServers-v2, two ignored addresses and an 'Ignored outside-range Loopback' note.
+    /// Invariant: extra loopback addresses are noted but do not fail planning.
+    /// </summary>
     [Fact]
     public void RustenburgRos7_PlannerSelectsInScopeLoopbackWithoutFailingOnExtras()
     {
@@ -139,6 +178,11 @@ public sealed class OspfFleetFixtureMatrixTests
             n => n.Contains("Ignored outside-range Loopback", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: a VLAN-99_MGMT host address of 10.16.11.30/27, 10.16.11.70/26 or 10.16.11.126/26, alongside the loopback and a backhaul /30.
+    /// Expected: derivation succeeds and the management CIDR is 10.16.11.0/24.
+    /// Invariant: any subdivision of the management /24 maps back to that same /24.
+    /// </summary>
     [Theory]
     [InlineData("10.16.11.30/27", "10.16.11.0/24")]
     [InlineData("10.16.11.70/26", "10.16.11.0/24")]
@@ -177,6 +221,11 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Equal(expected24, mgmt.ManagementCidr);
     }
 
+    /// <summary>
+    /// Scenario: two interfaces (vlan99 in 10.16.11.0/27 and vlan12 in 10.16.12.0/24) both qualify and there is no other evidence.
+    /// Expected: derivation fails with a 'Multiple distinct' error.
+    /// Invariant: an ambiguous management /24 is rejected rather than guessed.
+    /// </summary>
     [Fact]
     public void Management24_Fails_WhenMultipleDistinctEligible24s()
     {
@@ -194,6 +243,11 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Contains(mgmt.Errors, e => e.Contains("Multiple distinct", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: the same two candidate /24s as the ambiguous case, but 10.16.11.0/24 is supplied as corroborating MGMT evidence.
+    /// Expected: derivation succeeds with 10.16.11.0/24.
+    /// Invariant: explicit MGMT evidence resolves an otherwise ambiguous candidate set.
+    /// </summary>
     [Fact]
     public void Management24_ResolvesMultipleCandidates_UsingMgmtCorroboration()
     {
@@ -212,6 +266,11 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Equal("10.16.11.0/24", mgmt.ManagementCidr);
     }
 
+    /// <summary>
+    /// Scenario: a pppoe-out1 interface holds 10.99.1.1/24, inside 10/8, next to the VLAN-99_MGMT address.
+    /// Expected: the management CIDR is 10.16.11.0/24 and the pppoe-out1 address is listed in IgnoredPppoeAddresses.
+    /// Invariant: PPPoE interfaces never contribute to management derivation, whatever their address range.
+    /// </summary>
     [Fact]
     public void Management24_IgnoresPppoeRoleInterface_EvenInsideTenSlash8()
     {
@@ -230,6 +289,11 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Contains(mgmt.IgnoredPppoeAddresses, a => a.Contains("pppoe-out1", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: an ether-mgmt-overlay interface holds 198.18.240.11/24, outside the fleet 10/8 range, and is not a PPPoE interface.
+    /// Expected: the management CIDR is 10.16.11.0/24 and the overlay address is recorded in IgnoredOutsideRangeAddresses.
+    /// Invariant: outside-range addresses are ignored and reported, never treated as an error or something to delete.
+    /// </summary>
     [Fact]
     public void Management24_IgnoresOutsideRangeNonPppoeWithoutDeleting()
     {
@@ -248,6 +312,9 @@ public sealed class OspfFleetFixtureMatrixTests
         Assert.Contains(mgmt.IgnoredOutsideRangeAddresses, a => a.Contains("198.18.240.11", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Builds the ROS6 capture for BR01.POP011.016.Tommy: one backhaul to Shylock, loopback 10.16.0.11/32, management 10.16.11.0/24 and ACS/PPPoE networks with HEROTEL pool ranges.
+    /// </summary>
     private static OspfCaptureSnapshot TommySnapshot() => Ros6(
         identity: "BR01.POP011.016.Tommy",
         routerId: "10.16.0.11",
@@ -284,6 +351,9 @@ public sealed class OspfFleetFixtureMatrixTests
             Range("BR01.POP011.016.Tommy", "172.26.197.4/30", "HEROTEL_INACTIVE_POOL"),
         ]);
 
+    /// <summary>
+    /// Builds the ROS6 capture for BR01.POP009.016.Kopefontein: two point-to-point backhauls (Shylock and ThirstyFalls), loopback 10.16.0.9/32 and management 10.16.9.0/24.
+    /// </summary>
     private static OspfCaptureSnapshot KopefonteinSnapshot() => Ros6(
         identity: "BR01.POP009.016.Kopefontein",
         routerId: "10.16.0.9",
@@ -321,6 +391,9 @@ public sealed class OspfFleetFixtureMatrixTests
             Range("BR01.POP009.016_Kopefontein", "10.16.9.0/24", "MGMT"),
         ]);
 
+    /// <summary>
+    /// Builds the ROS6 capture for BR01.POP010.016.ThirstyFalls: a single backhaul to Kopefontein, loopback 10.16.0.10/32 and an already-aggregated 100.64.0.0/10 site network.
+    /// </summary>
     private static OspfCaptureSnapshot ThirstyFallsSnapshot() => Ros6(
         identity: "BR01.POP010.016.ThirstyFalls",
         routerId: "10.16.0.10",
@@ -355,6 +428,9 @@ public sealed class OspfFleetFixtureMatrixTests
             Range("BR01.POP010.016.ThirstyFalls", "172.26.197.0/30", "HEROTEL_INACTIVE_POOL"),
         ]);
 
+    /// <summary>
+    /// Builds the ROS6 capture for BR01.POP014.016.HekpoortTPA: three backhauls including a temporary VLAN backhaul, loopback on <c>Loopback-OSPF</c>, extra legacy site networks, and a site area with no type or default cost configured.
+    /// </summary>
     private static OspfCaptureSnapshot HekpoortSnapshot() => Ros6(
         identity: "BR01.POP014.016.HekpoortTPA",
         routerId: "10.16.0.14",
@@ -398,6 +474,10 @@ public sealed class OspfFleetFixtureMatrixTests
             Range("BR01.POP014.016.HekpoortTPA", "10.16.14.0/24", "MGMT"),
         ]);
 
+    /// <summary>
+    /// Builds a RouterOS 7.16.2 capture snapshot modelled on the Rustenburg Kantoor Servers router, with its
+    /// instance, areas, area range, templates and loopback and management addresses.
+    /// </summary>
     private static OspfCaptureSnapshot RustenburgSnapshot() =>
         new()
         {
@@ -481,6 +561,20 @@ public sealed class OspfFleetFixtureMatrixTests
             ],
         };
 
+    /// <summary>
+    /// Builds a RouterOS 6.49.18 (mipsbe) capture snapshot from the supplied fixture fields, with a <c>backbone</c> area and a site area named after <paramref name="siteArea"/>.
+    /// <param name="identity">System identity of the router.</param>
+    /// <param name="routerId">Router id, also used as the router IP and site area id.</param>
+    /// <param name="loopbackIface">Name of the loopback interface.</param>
+    /// <param name="siteArea">Name of the site area.</param>
+    /// <param name="siteDefaultCost">Site area default cost as captured; <see langword="null"/> when unset.</param>
+    /// <param name="networks">Captured OSPF network rows.</param>
+    /// <param name="interfaces">Captured OSPF interface rows.</param>
+    /// <param name="addresses">Captured IP address rows.</param>
+    /// <param name="ranges">Captured area range rows.</param>
+    /// <param name="areasExtra">Optional additional areas.</param>
+    /// <param name="siteType">Site area type as captured; <see langword="null"/> when unset.</param>
+    /// </summary>
     private static OspfCaptureSnapshot Ros6(
         string identity,
         string routerId,
@@ -522,15 +616,39 @@ public sealed class OspfFleetFixtureMatrixTests
             IpAddresses = addresses,
         };
 
+    /// <summary>
+    /// Creates an OSPF network row.
+    /// <param name="area">Area the network belongs to.</param>
+    /// <param name="network">Network in CIDR notation.</param>
+    /// <param name="comment">Optional comment.</param>
+    /// </summary>
     private static OspfNetworkRow Net(string area, string network, string? comment = null) =>
         new() { Area = area, Network = network, Comment = comment };
 
+    /// <summary>
+    /// Creates a non-passive OSPF interface row.
+    /// <param name="name">Interface name.</param>
+    /// <param name="type">OSPF network type, for example <c>point-to-point</c>.</param>
+    /// <param name="cost">Interface cost.</param>
+    /// </summary>
     private static OspfInterfaceRow Iface(string name, string type, string cost = "10") =>
         new() { Interface = name, NetworkType = type, Cost = cost, Passive = false };
 
+    /// <summary>
+    /// Creates an IP address row.
+    /// <param name="address">Address, with or without prefix length.</param>
+    /// <param name="network">Network the address belongs to.</param>
+    /// <param name="iface">Interface the address is assigned to.</param>
+    /// </summary>
     private static OspfIpAddressRow Addr(string address, string network, string iface) =>
         new() { Address = address, Network = network, Interface = iface };
 
+    /// <summary>
+    /// Creates an OSPF area range row.
+    /// <param name="area">Area the range belongs to.</param>
+    /// <param name="range">Range in CIDR notation.</param>
+    /// <param name="comment">Optional comment.</param>
+    /// </summary>
     private static OspfAreaRangeRow Range(string area, string range, string? comment = null) =>
         new() { Area = area, Range = range, Comment = comment };
 }

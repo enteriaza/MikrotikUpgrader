@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfManagementSummarisationSupersessionTests.cs
+//
+// Description:
+// Generic regression coverage for management-network summarisation provenance,
+// cleanup classification, and verification postconditions. Fixtures are
+// sanitised — no device-specific harnesses.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Upgrade.Ospf;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
@@ -8,6 +18,9 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfManagementSummarisationSupersessionTests
 {
+    /// <summary>
+    /// Subdivided management prefixes (/27 and /26 blocks) that sit strictly inside the consolidated 10.16.11.0/24 and are expected to be superseded.
+    /// </summary>
     private static readonly string[] SubdividedMgmt =
     [
         "10.16.11.0/27",
@@ -17,6 +30,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         "10.16.11.192/26",
     ];
 
+    /// <summary>
+    /// Scenario: the plan already holds the consolidated management /24, and the live inventory has five more-specific management subdivision templates in the site area.
+    /// Expected: enrichment records five superseded templates, and classifying the enriched plan reports five known legacy rows and none unknown.
+    /// Invariant: subdivisions covered by the consolidated prefix are recognised as obsolete without prior provenance.
+    /// </summary>
     [Fact]
     public void Enrich_FiveSubdividedMgmtPrefixes_BecomeKnownLegacy()
     {
@@ -33,6 +51,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: two live subdivisions of the management /24 sit on different interfaces (Bridge-VLAN-99_MGMT and Bridge-VLAN-197_MGMT).
+    /// Expected: both are recorded as superseded templates, each keeping its own interface name.
+    /// Invariant: supersession does not depend on the interface; all subdivisions of the consolidated prefix are covered.
+    /// </summary>
     [Fact]
     public void Enrich_MultipleInterfaces_SameMgmt24_AreSuperseded()
     {
@@ -50,6 +73,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Contains(enriched.SupersededTemplates, s => s.Interfaces == "Bridge-VLAN-197_MGMT");
     }
 
+    /// <summary>
+    /// Scenario: the live inventory contains only the planned templates, including the consolidated management /24 site template.
+    /// Expected: no superseded templates are recorded, nothing is known legacy or unknown, and the consolidated template is reported as the single site matcher.
+    /// Invariant: the consolidated template itself is never marked for deletion.
+    /// </summary>
     [Fact]
     public void Enrich_ExistingConsolidated24_IsNotSuperseded()
     {
@@ -67,6 +95,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Single(report.SiteMatchers);
     }
 
+    /// <summary>
+    /// Scenario: an extra 192.0.2.0/24 template on Bridge-OTHER in the site area lies outside every planned aggregate.
+    /// Expected: enrichment records no superseded templates, and classification throws <c>InvalidOperationException</c> mentioning "unknown/unrelated" and "No deletion was attempted".
+    /// Invariant: templates outside the consolidated prefixes are never treated as obsolete.
+    /// </summary>
     [Fact]
     public void Enrich_UnrelatedOutsideAggregate_RemainsUnknown()
     {
@@ -84,6 +117,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: a live 10.16.11.0/27 template lies inside the management /24 but belongs to a different area (<c>other-site-v2</c>).
+    /// Expected: enrichment records nothing, and classification throws <c>InvalidOperationException</c> mentioning "unknown/unrelated".
+    /// Invariant: containment only supersedes templates in the same area as the consolidated template.
+    /// </summary>
     [Fact]
     public void Enrich_SamePrefixUnrelatedArea_RemainsUnknown()
     {
@@ -100,6 +138,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Contains("unknown/unrelated", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Scenario: a live 10.16.11.0/27 template under the consolidated prefix is active (<c>passive=false</c>, type ptp).
+    /// Expected: enrichment records one superseded template.
+    /// Invariant: a more-specific template under a consolidated prefix is obsolete whether or not it is passive.
+    /// </summary>
     [Fact]
     public void Enrich_ActiveMoreSpecificUnderConsolidated_IsSuperseded()
     {
@@ -116,6 +159,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Single(enriched.SupersededTemplates);
     }
 
+    /// <summary>
+    /// Scenario: a plan is enriched against an inventory with five subdivisions, and the enriched plan is enriched again against the same inventory.
+    /// Expected: both results hold exactly five superseded templates.
+    /// Invariant: re-running enrichment does not duplicate superseded entries.
+    /// </summary>
     [Fact]
     public void Enrich_IsIdempotent_WhenAlreadyEnriched()
     {
@@ -129,6 +177,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Equal(5, twice.SupersededTemplates.Count);
     }
 
+    /// <summary>
+    /// Scenario: a plan with logical area "SITE.Logical" and a superseded template under instance "default" is remapped with a live binding to "SITE.Logical-v2" and instance "default-v2".
+    /// Expected: the single superseded template gets area "SITE.Logical-v2" and instance "default-v2", and the passive site network also uses "SITE.Logical-v2".
+    /// Invariant: remapping to live names covers superseded identities as well as planned templates.
+    /// </summary>
     [Fact]
     public void RemapPlan_RemapsSupersededAreaAndInstance()
     {
@@ -183,6 +236,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Equal("SITE.Logical-v2", remapped.PassiveSiteNetworks[0].AreaName);
     }
 
+    /// <summary>
+    /// Scenario: the plan's site matcher lists only 100.64.0.0/10 and 172.16.0.0/12, so it does not cover the derived management /24.
+    /// Expected: verification returns an error containing "do not cover derived management summary".
+    /// Invariant: verification requires the consolidated site template to cover the derived management summary.
+    /// </summary>
     [Fact]
     public void Verification_Fails_WhenMgmtSummaryAbsentFromSiteMatcher()
     {
@@ -207,6 +265,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
             e => e.Contains("do not cover derived management summary", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: the site matcher uses a broader 10.16.0.0/16 aggregate (plus 100.64.0.0/10 and 172.16.0.0/12) and the live inventory mirrors it.
+    /// Expected: verification returns no errors.
+    /// Invariant: a broader aggregate that contains the management /24 satisfies the summary coverage check.
+    /// </summary>
     [Fact]
     public void Verification_AcceptsBroaderSiteCoverage_WithMgmtAreaRange()
     {
@@ -256,6 +319,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Empty(OspfV7Reconciler_Verify(plan, inventory));
     }
 
+    /// <summary>
+    /// Scenario: the planned site matcher includes the 10.16.0.0/16 aggregate, and a live 10.16.50.0/24 template exists in the same area.
+    /// Expected: enrichment records one superseded template, and classification reports one known legacy row and none unknown.
+    /// Invariant: same-area more-specific prefixes under a planned broader aggregate are obsolete by containment.
+    /// </summary>
     [Fact]
     public void Enrich_BroaderPlannedAggregate_RemovesContainedMoreSpecific()
     {
@@ -286,6 +354,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: a single candidate template is checked in several variants: legitimate, different cost, type, authentication, blank interfaces, active, or extra hello interval (all contained), versus a different area or a prefix outside the consolidation.
+    /// Expected: contained candidates are superseded and classified as one known legacy row with nothing unknown; the others are not superseded and classification throws mentioning "unknown/unrelated" and "No deletion was attempted".
+    /// Invariant: area and prefix containment, not attribute equality, decide supersession.
+    /// </summary>
     [Theory]
     [InlineData("legitimate_auto_converted_ptp_subdivision", true)]
     [InlineData("different_cost", true)]
@@ -321,6 +394,10 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Builds the candidate template for a named case, varying one attribute (cost, type, auth, interface, passive
+    /// state, hello interval, area or prefix) from a baseline management template.
+    /// </summary>
     private static OspfInterfaceTemplateRow CreateSemanticCaseCandidate(string caseName)
     {
         const string area = "site-v2";
@@ -351,6 +428,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         };
     }
 
+    /// <summary>
+    /// Scenario: a ROS6 capture whose site network 10.16.96.0/19 already covers the derived management /24 (10.16.99.0/24) but not the backhaul /30.
+    /// Expected: the plan succeeds, derived management is 10.16.99.0/24, the site networks contain 10.16.96.0/19 without a duplicate 10.16.99.0/24, a normalisation note says "not injecting a duplicate /24", and a MGMT area range for 10.16.99.0/24 exists.
+    /// Invariant: the planner does not add a redundant management /24 when a broader matcher already covers it.
+    /// </summary>
     [Fact]
     public void Planner_DoesNotInjectMgmt24_WhenBroaderSiteMatcherAlreadyCoversIt()
     {
@@ -408,6 +490,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
             r => r.RangeCidr == "10.16.99.0/24" && r.Comment == "MGMT");
     }
 
+    /// <summary>
+    /// Scenario: the live inventory still holds the five subdivided management templates beside the planned ones.
+    /// Expected: verification returns an error mentioning "obsolete more-specific management".
+    /// Invariant: verification fails while obsolete subdivisions remain.
+    /// </summary>
     [Fact]
     public void Verification_Fails_WhenObsoleteMgmtTemplatesRemain()
     {
@@ -421,6 +508,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
             e => e.Contains("obsolete more-specific management", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: the live inventory contains exactly the planned templates with the consolidated management summary.
+    /// Expected: verification returns no errors.
+    /// Invariant: a fully summarised configuration passes verification.
+    /// </summary>
     [Fact]
     public void Verification_Succeeds_WhenSummarisationConfigured()
     {
@@ -429,6 +521,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Empty(OspfV7Reconciler_Verify(plan, inventory));
     }
 
+    /// <summary>
+    /// Scenario: the plan already has the consolidated /24 and no recorded provenance, while the live ROS7 inventory still has five subdivisions; they are then removed.
+    /// Expected: enrich plus classify accepts cleanup (five known legacy, none unknown), verification fails while subdivisions remain, and passes and classifies clean once only the planned templates are left.
+    /// Invariant: the subdivision-to-consolidated workflow is safe to run and verifies only once cleanup completes.
+    /// </summary>
     [Fact]
     public void EndToEnd_PlannerPlusEnrich_SubdividedToConsolidated()
     {
@@ -457,6 +554,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         Assert.Empty(afterCleanup.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: a ROS7 capture with a MGMT 10.16.11.0/24 area range and five subdivided management templates.
+    /// Expected: the plan succeeds with derived management 10.16.11.0/24 inside the site networks, and at least five superseded templates, one for each subdivision.
+    /// Invariant: the planner folds subdivisions into the consolidated prefix and records them as superseded.
+    /// </summary>
     [Fact]
     public void Planner_FoldsSubdividedMgmt_BeforeEnrichment_WhenRangePresent()
     {
@@ -546,11 +648,19 @@ public sealed class OspfManagementSummarisationSupersessionTests
                 s => OspfNetworkList.SetsEqual(s.NetworkCidr, cidr)));
     }
 
+    /// <summary>
+    /// Runs the production management-summarisation postcondition check against <paramref name="inventory"/>.
+    /// </summary>
     private static IReadOnlyList<string> OspfV7Reconciler_Verify(
         OspfMigrationPlan plan,
         OspfV7Inventory inventory) =>
         OspfV7MigrationVerifier.VerifyManagementSummarisationPostconditions(plan, inventory);
 
+    /// <summary>
+    /// Builds a ROS6-sourced plan for BR01.POP011.016.Example with one backhaul, one loopback and a consolidated site template covering 10.16.11.0/24, 100.64.0.0/10 and 172.16.0.0/12.
+    /// <param name="logicalSite">Site area name used in the plan; the special value <c>SITE.Logical</c> also switches backbone templates to the logical <c>backbone</c> area name.</param>
+    /// <param name="superseded">Superseded-template provenance to attach; empty by default so cleanup must rely on desired-state replacement.</param>
+    /// </summary>
     private static OspfMigrationPlan ConsolidatedPlan(
         string logicalSite = "site-v2",
         IReadOnlyList<OspfSupersededTemplateIdentity>? superseded = null) =>
@@ -632,6 +742,12 @@ public sealed class OspfManagementSummarisationSupersessionTests
             ContentHash = "test",
         };
 
+    /// <summary>
+    /// Copies <paramref name="plan"/>, optionally replacing the passive site networks and superseded-template provenance.
+    /// <param name="plan">Plan to copy.</param>
+    /// <param name="sites">Replacement passive site networks; <see langword="null"/> keeps the originals.</param>
+    /// <param name="superseded">Replacement superseded-template provenance; <see langword="null"/> keeps the originals.</param>
+    /// </summary>
     private static OspfMigrationPlan ClonePlan(
         OspfMigrationPlan plan,
         IReadOnlyList<OspfPlanSiteNetworkTemplate>? sites = null,
@@ -666,6 +782,10 @@ public sealed class OspfManagementSummarisationSupersessionTests
             NormalisationNotes = plan.NormalisationNotes,
         };
 
+    /// <summary>
+    /// Builds the live rows for the plan's three planned templates: backhaul (<c>*1</c>), loopback (<c>*2</c>) and consolidated site template (<c>*A</c>).
+    /// <param name="plan">Plan whose templates are mirrored.</param>
+    /// </summary>
     private static IEnumerable<OspfInterfaceTemplateRow> PlannedRows(OspfMigrationPlan plan) =>
     [
         new OspfInterfaceTemplateRow
@@ -696,6 +816,10 @@ public sealed class OspfManagementSummarisationSupersessionTests
         },
     ];
 
+    /// <summary>
+    /// Builds one passive ptp site template per <see cref="SubdividedMgmt"/> prefix in the given area, starting at id <c>*3</c>.
+    /// <param name="area">Area the templates are placed in.</param>
+    /// </summary>
     private static IEnumerable<OspfInterfaceTemplateRow> SubdividedMgmtTemplates(string area) =>
         SubdividedMgmt.Select((cidr, i) => SiteTemplate(
             $"*{i + 3}",
@@ -704,6 +828,15 @@ public sealed class OspfManagementSummarisationSupersessionTests
             cidr,
             type: "ptp"));
 
+    /// <summary>
+    /// Builds a live site template row with the given identity and properties.
+    /// <param name="id">RouterOS <c>.id</c> of the row.</param>
+    /// <param name="area">Area name.</param>
+    /// <param name="interfaces">Interfaces property.</param>
+    /// <param name="networks">Networks property.</param>
+    /// <param name="passive">Whether the template is passive.</param>
+    /// <param name="type">Optional network type.</param>
+    /// </summary>
     private static OspfInterfaceTemplateRow SiteTemplate(
         string id,
         string area,
@@ -721,6 +854,18 @@ public sealed class OspfManagementSummarisationSupersessionTests
             Type = type,
         };
 
+    /// <summary>
+    /// Copies <paramref name="row"/> while overriding only the supplied properties, so tests can vary a single semantic attribute (passive, type, cost, auth, interfaces, hello interval or prefix list).
+    /// <param name="row">Template row to copy.</param>
+    /// <param name="passive">Replacement passive flag.</param>
+    /// <param name="type">Replacement network type.</param>
+    /// <param name="cost">Replacement cost.</param>
+    /// <param name="auth">Replacement authentication method.</param>
+    /// <param name="authKey">Replacement authentication key.</param>
+    /// <param name="interfaces">Replacement interfaces property.</param>
+    /// <param name="helloInterval">Replacement hello interval.</param>
+    /// <param name="prefixList">Replacement prefix list.</param>
+    /// </summary>
     private static OspfInterfaceTemplateRow CloneTemplate(
         OspfInterfaceTemplateRow row,
         bool? passive = null,
@@ -758,6 +903,10 @@ public sealed class OspfManagementSummarisationSupersessionTests
             Comment = row.Comment,
         };
 
+    /// <summary>
+    /// Builds a v7 inventory around the supplied templates, deriving the site and backbone area names from them, plus an unrelated <c>other-site-v2</c> area and a MGMT range.
+    /// <param name="templates">Interface templates to place in the inventory.</param>
+    /// </summary>
     private static OspfV7Inventory InventoryWith(IEnumerable<OspfInterfaceTemplateRow> templates)
     {
         List<OspfInterfaceTemplateRow> list = templates.ToList();
@@ -781,6 +930,10 @@ public sealed class OspfManagementSummarisationSupersessionTests
         };
     }
 
+    /// <summary>
+    /// Maps inventory templates to classifier input rows using the live area-to-instance map.
+    /// <param name="inventory">Inventory whose templates are converted.</param>
+    /// </summary>
     private static List<OspfTemplateInventoryRow> ToRows(OspfV7Inventory inventory)
     {
         Dictionary<string, string> map = OspfLiveSupersededProvenance.BuildAreaInstanceMap(inventory.Areas);

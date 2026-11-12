@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: Program.cs
+//
+// Description:
+// Application entry point. Configures bootstrap Serilog, dispatches specialized
+// CLI audit/recovery modes when requested, otherwise builds and runs the
+// production WebApplication host (firmware HTTP + scheduled upgrade worker).
+// Always flushes Serilog on exit.
+//
+// -----------------------------------------------------------------------------
+
 using System.Reflection;
 using MikrotikWorker;
 using MikrotikWorker.Logging;

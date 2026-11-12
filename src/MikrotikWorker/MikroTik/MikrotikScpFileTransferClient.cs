@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikScpFileTransferClient.cs
+//
+// Description:
+// SFTP (SSH.NET) download of router files into a .partial sibling then atomic Move to the
+// final path. Used because RouterOS API cannot transfer binary .backup contents intact.
+//
+// -----------------------------------------------------------------------------
+
 using Renci.SshNet;
 using Renci.SshNet.Common;
 
@@ -16,15 +25,23 @@ namespace MikrotikWorker.MikroTik;
 /// </remarks>
 internal sealed class MikrotikScpFileTransferClient : IMikrotikFileTransferClient
 {
+    /// <summary>Logger for download failures and partial-file cleanup problems.</summary>
     private readonly ILogger<MikrotikScpFileTransferClient> _logger;
+    /// <summary>Creates the SFTP session for a download; swapped in tests, the production default wraps <see cref="SftpClient"/>.</summary>
     private readonly Func<Renci.SshNet.ConnectionInfo, ISftpTransferSession> _sessionFactory;
 
+    /// <summary>
+    /// Creates the production SFTP transfer client.
+    /// </summary>
+    /// <param name="logger">Logger for download failures and partial-file cleanup problems.</param>
     public MikrotikScpFileTransferClient(ILogger<MikrotikScpFileTransferClient> logger)
         : this(logger, static info => new SshNetSftpTransferSession(info))
     {
     }
 
     /// <summary>Test seam for deterministic cancellation coverage.</summary>
+    /// <param name="logger">Logger for download failures and partial-file cleanup problems.</param>
+    /// <param name="sessionFactory">Creates the SFTP session for the supplied connection info; lets tests inject a fake session.</param>
     internal MikrotikScpFileTransferClient(
         ILogger<MikrotikScpFileTransferClient> logger,
         Func<Renci.SshNet.ConnectionInfo, ISftpTransferSession> sessionFactory)
@@ -33,6 +50,7 @@ internal sealed class MikrotikScpFileTransferClient : IMikrotikFileTransferClien
         _sessionFactory = sessionFactory;
     }
 
+    /// <inheritdoc />
     public async Task DownloadFileAsync(
         string host,
         int port,
@@ -123,6 +141,7 @@ internal sealed class MikrotikScpFileTransferClient : IMikrotikFileTransferClien
         }
     }
 
+    /// <summary>Best-effort removal of this download's own <c>.partial</c> file; a failure is logged as a warning and never thrown, so it cannot mask the original error.</summary>
     private void TryDeleteOwnedPartial(string partialPath)
     {
         try
@@ -145,25 +164,38 @@ internal sealed class MikrotikScpFileTransferClient : IMikrotikFileTransferClien
 /// <summary>Exclusive SFTP session used for a single download.</summary>
 internal interface ISftpTransferSession : IAsyncDisposable
 {
+    /// <summary>Opens the SSH/SFTP connection.</summary>
+    /// <param name="cancellationToken">Cancels the connection attempt.</param>
     Task ConnectAsync(CancellationToken cancellationToken);
 
+    /// <summary>Streams a remote file into <paramref name="destination"/>.</summary>
+    /// <param name="remotePath">Absolute remote file path.</param>
+    /// <param name="destination">Writable stream that receives the file content.</param>
+    /// <param name="cancellationToken">Cancels the transfer; observed during path resolution and each read/write.</param>
     Task DownloadToStreamAsync(string remotePath, Stream destination, CancellationToken cancellationToken);
 }
 
+/// <summary>SSH.NET-backed <see cref="ISftpTransferSession"/> that owns one <see cref="SftpClient"/> and disconnects and disposes it exactly once.</summary>
+/// <param name="connectionInfo">Host, credentials and timeout used to create the underlying SFTP client.</param>
 internal sealed class SshNetSftpTransferSession(Renci.SshNet.ConnectionInfo connectionInfo) : ISftpTransferSession
 {
+    /// <summary>Underlying SFTP client created from the connection info; disposed by <see cref="DisposeAsync"/>.</summary>
     private readonly SftpClient _client = new(connectionInfo);
+    /// <summary>Set to 1 once disposed so cleanup runs only once (accessed via <see cref="Interlocked"/>).</summary>
     private int _disposed;
 
+    /// <summary>Connects the SFTP client, honouring cancellation.</summary>
     public Task ConnectAsync(CancellationToken cancellationToken) =>
         _client.ConnectAsync(cancellationToken);
 
+    /// <summary>Downloads the remote file into the destination stream using SSH.NET's cancellable download.</summary>
     public Task DownloadToStreamAsync(
         string remotePath,
         Stream destination,
         CancellationToken cancellationToken) =>
         _client.DownloadFileAsync(remotePath, destination, cancellationToken);
 
+    /// <summary>Disconnects (when connected, ignoring disconnect errors) and disposes the client. Repeated calls are no-ops.</summary>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

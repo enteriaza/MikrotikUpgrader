@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfLiveIdentityResolver.cs
+//
+// Description:
+// Resolves deterministic ROS7 target identities onto the live RouterOS 7
+// inventory.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
@@ -12,6 +21,17 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </remarks>
 internal static class OspfLiveIdentityResolver
 {
+    /// <summary>
+    /// Resolves the plan's deterministic ROS7 instance, backbone area and site area onto the live inventory.
+    /// </summary>
+    /// <remarks>
+    /// Fails closed on a missing plan identity, a Router ID that does not match the Loopback /32-derived one, a missing,
+    /// duplicated or mismatched instance, areas with empty or foreign instance ownership, or area-id conflicts.
+    /// </remarks>
+    /// <param name="plan">Migration plan whose logical names and Router ID are being resolved.</param>
+    /// <param name="inventory">Live RouterOS 7 OSPF inventory snapshot.</param>
+    /// <param name="ipAddresses">Live IP address inventory used to derive the Loopback Router ID.</param>
+    /// <returns>A successful result with the live binding, or a failed result listing every error found.</returns>
     public static OspfLiveIdentityResolutionResult Resolve(
         OspfMigrationPlan plan,
         OspfV7Inventory inventory,
@@ -182,6 +202,17 @@ internal static class OspfLiveIdentityResolver
         };
     }
 
+    /// <summary>
+    /// Produces a copy of the plan whose area names and instance name refer to the live objects in the binding.
+    /// </summary>
+    /// <remarks>
+    /// All other plan content is copied unchanged. Superseded identities and captured site semantics are re-aligned to the
+    /// live instance, and a normalisation note describing the remapping is appended.
+    /// </remarks>
+    /// <param name="plan">Plan expressed in logical names.</param>
+    /// <param name="binding">Binding returned by <see cref="Resolve"/>.</param>
+    /// <returns>The remapped plan.</returns>
+    /// <exception cref="InvalidOperationException">The plan references an area that the binding does not map.</exception>
     public static OspfMigrationPlan RemapPlan(OspfMigrationPlan plan, OspfLiveIdentityBinding binding)
     {
         ArgumentNullException.ThrowIfNull(plan);
@@ -285,6 +316,16 @@ internal static class OspfLiveIdentityResolver
         };
     }
 
+    /// <summary>
+    /// Locates the single live area that matches the expected name and area-id under the live instance.
+    /// </summary>
+    /// <param name="liveAreas">All live area rows.</param>
+    /// <param name="liveInstanceName">Live OSPFv2 instance that must own the area.</param>
+    /// <param name="expectedName">Deterministic area name.</param>
+    /// <param name="expectedAreaId">Deterministic area-id; an unset live backbone area-id is treated as <c>0.0.0.0</c>.</param>
+    /// <param name="role">Role label (<c>backbone</c> or <c>site</c>) used in error messages.</param>
+    /// <param name="errors">Receives a message for every violation found.</param>
+    /// <returns>The matching area, or null when it is missing, ambiguous, owned by another instance, or has an incompatible area-id.</returns>
     private static OspfAreaRow? ResolveExpectedArea(
         IReadOnlyList<OspfAreaRow> liveAreas,
         string liveInstanceName,
@@ -382,6 +423,7 @@ internal static class OspfLiveIdentityResolver
         return area;
     }
 
+    /// <summary>Collects the distinct area names referenced by the plan's ranges and backhaul, loopback and site templates.</summary>
     private static IEnumerable<string> CollectReferencedAreaNames(OspfMigrationPlan plan)
     {
         HashSet<string> names = new(StringComparer.Ordinal);
@@ -420,6 +462,7 @@ internal static class OspfLiveIdentityResolver
         return names;
     }
 
+    /// <summary>Copies a superseded identity, mapping its area name to the live area and pointing its area instance at the live instance when one is known.</summary>
     private static OspfSupersededTemplateIdentity RemapSupersededIdentity(
         OspfSupersededTemplateIdentity source,
         Func<string, string> mapArea,
@@ -455,6 +498,7 @@ internal static class OspfLiveIdentityResolver
             Comment = source.Comment,
         };
 
+    /// <summary>Copies captured template semantics, pointing the area instance at the live instance when one is known; returns null when there is nothing to copy.</summary>
     private static OspfCapturedTemplateSemantics? RemapCapturedSemantics(
         OspfCapturedTemplateSemantics? source,
         string liveInstanceName)
@@ -491,8 +535,10 @@ internal static class OspfLiveIdentityResolver
         };
     }
 
+    /// <summary>Creates a failed resolution result with a single error.</summary>
     private static OspfLiveIdentityResolutionResult Failed(string error) => Failed([error]);
 
+    /// <summary>Creates a failed resolution result carrying a copy of the given errors.</summary>
     private static OspfLiveIdentityResolutionResult Failed(IReadOnlyList<string> errors) =>
         new()
         {
@@ -501,41 +547,65 @@ internal static class OspfLiveIdentityResolver
         };
 }
 
+/// <summary>
+/// Outcome of resolving planned OSPF identities onto live inventory.
+/// </summary>
 internal sealed class OspfLiveIdentityResolutionResult
 {
+    /// <summary>True when identities were resolved; when false see <see cref="Errors"/>.</summary>
     public required bool Succeeded { get; init; }
 
+    /// <summary>Live bindings for the instance and areas; present only on success.</summary>
     public OspfLiveIdentityBinding? Binding { get; init; }
 
+    /// <summary>Reasons resolution failed; empty on success.</summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
 
+    /// <summary>Errors joined with <c>; </c> for logging, or null on success.</summary>
     public string? Detail => Succeeded ? null : string.Join("; ", Errors);
 }
 
+/// <summary>
+/// Binding of a planned template identity to a live object.
+/// </summary>
 internal sealed class OspfLiveIdentityBinding
 {
+    /// <summary>Instance name as it appears in the plan.</summary>
     public required string LogicalInstanceName { get; init; }
 
+    /// <summary>Name of the live OSPFv2 instance that was matched.</summary>
     public required string LiveInstanceName { get; init; }
 
+    /// <summary>RouterOS <c>.id</c> of the live instance, valid for the inventory snapshot only.</summary>
     public string? LiveInstanceId { get; init; }
 
+    /// <summary>Router ID configured on the live instance.</summary>
     public string? LiveRouterId { get; init; }
 
+    /// <summary>Router ID derived from the Loopback /32 address and verified against the plan and live instance.</summary>
     public required string DerivedLoopbackRouterId { get; init; }
 
+    /// <summary>Loopback interface that supplied the Router ID, when known.</summary>
     public string? LoopbackInterfaceName { get; init; }
 
+    /// <summary>Live area bindings keyed by the plan's logical area name (ordinal).</summary>
     public required IReadOnlyDictionary<string, OspfLiveAreaBinding> Areas { get; init; }
 }
 
+/// <summary>
+/// Binding of a planned area identity to a live area.
+/// </summary>
 internal sealed class OspfLiveAreaBinding
 {
+    /// <summary>Area name as it appears in the plan.</summary>
     public required string LogicalName { get; init; }
 
+    /// <summary>Name of the live area it resolved to.</summary>
     public required string LiveName { get; init; }
 
+    /// <summary>Area-id of the live area (<c>0.0.0.0</c> for the backbone, the derived Router ID for the site area).</summary>
     public required string AreaId { get; init; }
 
+    /// <summary>RouterOS <c>.id</c> of the live area, valid for the inventory snapshot only.</summary>
     public string? LiveObjectId { get; init; }
 }

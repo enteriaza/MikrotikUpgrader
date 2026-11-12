@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityAuditHostTests.cs
+//
+// Description:
+// Verifies the live-audit host DI graph registers only read-only services and
+// excludes mutation types.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -9,8 +18,15 @@ using MikrotikWorker.Scheduling;
 using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Tests.Upgrade.Live;
+/// <summary>
+/// DI graph tests ensuring live-audit host excludes mutation services.
+/// </summary>
 public sealed class LivePackageCompatibilityAuditHostTests
 {
+    /// <summary>
+    /// After <c>ConfigureLiveAuditServices</c>, no service descriptor in the collection has a forbidden mutation
+    /// type as its service or implementation type.
+    /// </summary>
     [Fact]
     public void LiveAuditHost_DoesNotRegisterMutationServices()
     {
@@ -27,6 +43,11 @@ public sealed class LivePackageCompatibilityAuditHostTests
         }
     }
 
+    /// <summary>
+    /// The built live host resolves the inventory collector, fleet auditor, package auditor, package resolver, v7
+    /// target provider and connection factory. It does not resolve the upgrade executor, backup service, router
+    /// operations, API client, file transfer client or <c>RouterJobExecutor</c>.
+    /// </summary>
     [Fact]
     public void LiveAuditHost_ResolvesReadOnlyGraph_AndNotMutationServices()
     {
@@ -48,6 +69,11 @@ public sealed class LivePackageCompatibilityAuditHostTests
         Assert.Null(sp.GetService<RouterJobExecutor>());
     }
 
+    /// <summary>
+    /// After <c>StartAsync</c>, the hosted services include <c>RouterOsV7TargetProvider</c> and none of
+    /// <c>Worker</c>, <c>ScheduledJobsWatcherService</c>, <c>RouterJobExecutionService</c> or
+    /// <c>InMemoryJobSchedulerService</c>.
+    /// </summary>
     [Fact]
     public async Task LiveAuditHost_StartsOnlyV7TargetProvider()
     {
@@ -64,6 +90,11 @@ public sealed class LivePackageCompatibilityAuditHostTests
         await host.StopAsync();
     }
 
+    /// <summary>
+    /// The normal application builder still registers <c>IRouterOsV6UpgradeExecutor</c>,
+    /// <c>IDeviceBackupService</c> and <c>IMikrotikRouterOperations</c>, and still registers <c>Worker</c> as a
+    /// hosted service.
+    /// </summary>
     [Fact]
     public void NormalApplicationHost_StillRegistersUpgradeServices()
     {
@@ -83,6 +114,10 @@ public sealed class LivePackageCompatibilityAuditHostTests
                 || (d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(Worker)));
     }
 
+    /// <summary>
+    /// On a live-audit host built with firmware upgrade not enabled, the resolved
+    /// <c>FirmwareUpgradeOptions.Enabled</c> is false.
+    /// </summary>
     [Fact]
     public void FirmwareUpgrade_RemainsDisabledByDefault_OnLiveHost()
     {
@@ -90,6 +125,11 @@ public sealed class LivePackageCompatibilityAuditHostTests
         Assert.False(host.Services.GetRequiredService<IOptions<FirmwareUpgradeOptions>>().Value.Enabled);
     }
 
+    /// <summary>
+    /// Structural: dedicated host type exists and exposes forbidden-mutation catalogue.
+    /// Structural: the dedicated host type exists and exposes a non-empty <c>ForbiddenMutationServiceTypes</c>
+    /// catalogue that includes <c>IRouterOsV6UpgradeExecutor</c>.
+    /// </summary>
     [Fact]
     public void LiveRunner_UsesDedicatedHost_NotFullWorkerHost()
     {
@@ -102,6 +142,10 @@ public sealed class LivePackageCompatibilityAuditHostTests
             static t => t == typeof(IRouterOsV6UpgradeExecutor));
     }
 
+    /// <summary>
+    /// Builds a live-audit host over a temp firmware directory containing a v7 version file, registering the live
+    /// audit services from in-memory settings and clearing logging providers.
+    /// </summary>
     private static IHost BuildLiveHost(bool firmwareUpgradeEnabled = false)
     {
         string fw = Directory.CreateTempSubdirectory("live-host-").FullName;
@@ -115,11 +159,18 @@ public sealed class LivePackageCompatibilityAuditHostTests
         return builder.Build();
     }
 
+    /// <summary>Builds in-memory configuration with firmware upgrade disabled.</summary>
+    /// <param name="firmwareRoot">Firmware directory path to configure.</param>
+    /// <returns>The configuration root.</returns>
     private static IConfiguration BuildConfig(string firmwareRoot) =>
         new ConfigurationBuilder()
             .AddInMemoryCollection(BuildSettings(firmwareRoot, firmwareUpgradeEnabled: false))
             .Build();
 
+    /// <summary>
+    /// Returns in-memory configuration values for the live audit host: firmware path, disabled MikroTik worker, API
+    /// credentials and timeouts, the firmware upgrade flag, and live audit options.
+    /// </summary>
     private static Dictionary<string, string?> BuildSettings(string firmwareRoot, bool firmwareUpgradeEnabled) =>
         new()
         {

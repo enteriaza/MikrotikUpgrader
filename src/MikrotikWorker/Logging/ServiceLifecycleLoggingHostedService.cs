@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: ServiceLifecycleLoggingHostedService.cs
+//
+// Description:
+// Emits credential-free config summary (including independent Mikrotik:Enabled and
+// FirmwareUpgrade:Enabled) plus Application ready/stopping lifecycle events into
+// the production Serilog pipeline without device correlation context.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
@@ -11,22 +21,70 @@ namespace MikrotikWorker.Logging;
 /// </summary>
 internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
 {
+    /// <summary>
+    /// Logger that writes lifecycle events to the application log.
+    /// </summary>
     private readonly ILogger<ServiceLifecycleLoggingHostedService> _logger;
+    /// <summary>
+    /// Host lifetime whose started and stopping notifications trigger the lifecycle messages.
+    /// </summary>
     private readonly IHostApplicationLifetime _lifetime;
+    /// <summary>
+    /// Configured listening address and port reported in the summary.
+    /// </summary>
     private readonly IOptions<ListeningOptions> _listening;
+    /// <summary>
+    /// Firmware file location settings reported in the summary.
+    /// </summary>
     private readonly IOptions<FirmwareFilesOptions> _firmwareFiles;
+    /// <summary>
+    /// Scheduled-job concurrency settings reported in the summary.
+    /// </summary>
     private readonly IOptions<ScheduledJobsOptions> _scheduledJobs;
+    /// <summary>
+    /// Resolves the scheduled-jobs root directory reported in the summary.
+    /// </summary>
     private readonly ScheduledJobsPaths _scheduledJobsPaths;
+    /// <summary>
+    /// MikroTik connectivity flags reported in the summary; credentials are never logged.
+    /// </summary>
     private readonly IOptions<MikroTikOptions> _mikroTik;
+    /// <summary>
+    /// Firmware upgrade settings, including the enabled flag, reported in the summary.
+    /// </summary>
     private readonly IOptions<FirmwareUpgradeOptions> _firmwareUpgrade;
+    /// <summary>
+    /// OSPF summary redistribution setting reported in the summary.
+    /// </summary>
     private readonly IOptions<OspfSummaryRedistributionOptions> _ospfSummaryRedistribution;
+    /// <summary>
+    /// Provides the current RouterOS 7 target version reported in the summary.
+    /// </summary>
     private readonly IRouterOsV7TargetProvider _v7TargetProvider;
+    /// <summary>
+    /// Worker settings, such as the heartbeat interval, reported in the summary.
+    /// </summary>
     private readonly IOptions<WorkerOptions> _worker;
+    /// <summary>
+    /// Logging settings reported in the summary, such as the log directory and device-log flag.
+    /// </summary>
     private readonly IOptions<SerilogOptions> _serilog;
+    /// <summary>
+    /// Host environment whose name is reported in the summary.
+    /// </summary>
     private readonly IHostEnvironment _environment;
+    /// <summary>
+    /// Registration for the application-started callback; disposed on stop.
+    /// </summary>
     private CancellationTokenRegistration _startedRegistration;
+    /// <summary>
+    /// Registration for the application-stopping callback; disposed on stop.
+    /// </summary>
     private CancellationTokenRegistration _stoppingRegistration;
 
+    /// <summary>
+    /// Creates the lifecycle logger with the options snapshots used in the configuration summary.
+    /// </summary>
     public ServiceLifecycleLoggingHostedService(
         ILogger<ServiceLifecycleLoggingHostedService> logger,
         IHostApplicationLifetime lifetime,
@@ -57,6 +115,7 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
         _environment = environment;
     }
 
+    /// <inheritdoc />
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Hosted services starting");
@@ -75,6 +134,7 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc />
     public Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Hosted services stopping");
@@ -84,17 +144,22 @@ internal sealed class ServiceLifecycleLoggingHostedService : IHostedService
         return Task.CompletedTask;
     }
 
+    /// <summary>Logs <c>Application ready</c> when the host reports started.</summary>
     private void OnApplicationStarted()
     {
         // Actual listen addresses are emitted by Microsoft.Hosting.Lifecycle ("Now listening on: ...").
         _logger.LogInformation("Application ready");
     }
 
+    /// <summary>Logs <c>Application stopping</c> when the host begins shutdown.</summary>
     private void OnApplicationStopping()
     {
         _logger.LogInformation("Application stopping");
     }
 
+    /// <summary>
+    /// Emits a one-line configuration summary (paths, flags, concurrency) without credentials.
+    /// </summary>
     private void LogConfigurationSummary()
     {
         // Never log credentials, tokens, or backup passwords.

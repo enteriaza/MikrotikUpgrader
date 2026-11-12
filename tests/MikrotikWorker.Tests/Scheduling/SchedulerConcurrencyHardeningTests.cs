@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: SchedulerConcurrencyHardeningTests.cs
+//
+// Description:
+// Hardening scenarios for lost wakeups, Completed move retry, HeldForDispatch,
+// Accepted path intent vs on-disk confirm, shutdown races, abort capacity,
+// and discovery queue dedupe/saturation recovery.
+//
+// -----------------------------------------------------------------------------
+
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -5,9 +15,18 @@ using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
 
 namespace MikrotikWorker.Tests.Scheduling;
+/// <summary>
+/// Concurrency and failure-injection tests under the SchedulerHardening collection.
+/// Uses ControllableFileMover and run-loop hooks to force races without flaking production paths.
+/// Covers scheduler wake, Accepted-path acceptance, abort, shutdown, and discovery queue lifecycle.
+/// </summary>
 [Collection("SchedulerHardening")]
 public sealed class SchedulerConcurrencyHardeningTests
 {
+    /// <summary>
+    /// Hold AfterWakeSnapshotBeforeQueueCheckAsync; schedule while idle snapshot is empty.
+    /// Expects release still processes the job to Completed (no lost wakeup).
+    /// </summary>
     [Fact]
     public async Task LostWakeup_JobScheduledBetweenSnapshotAndQueueCheck_IsProcessed()
     {
@@ -45,6 +64,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.False(harness.Scheduler.IsTracked(importId));
     }
 
+    /// <summary>
+    /// ControllableFileMover fails Completed moves then allows them.
+    /// Expects import stays tracked through failures; RetryPendingCompletions archives successfully.
+    /// </summary>
     [Fact]
     public async Task CompletedMoveFailure_KeepsImportTracked_AndRetriesSuccessfully()
     {
@@ -86,6 +109,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.True(mover.CompletedMoveAttempts > failedAttempts);
     }
 
+    /// <summary>
+    /// Two due jobs scheduled before SetAcceptedPath.
+    /// Expects zero dispatch until path set; then single Completed archive and untrack.
+    /// </summary>
     [Fact]
     public async Task JobsHeldUntilAcceptedPath_ThenCompleteAndArchiveOnce()
     {
@@ -115,6 +142,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.Single(Directory.GetFiles(harness.CompletedDir, "*.csv"));
     }
 
+    /// <summary>
+    /// BindAcceptedPathIntent without SetAcceptedPath.
+    /// Expects pending held with zero dispatch until on-disk confirm.
+    /// </summary>
     [Fact]
     public async Task AcceptedPathIntent_BlocksDispatch_UntilOnDiskConfirmed()
     {
@@ -140,6 +171,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.False(harness.Scheduler.IsTracked(importId));
     }
 
+    /// <summary>
+    /// Intent bound and file on disk; SetAcceptedPath recovers as after a post-move throw.
+    /// Expects eventual Completed archival and untrack.
+    /// </summary>
     [Fact]
     public async Task FailureDuringAcceptedPathRegistration_StillBindsAndCompletes()
     {
@@ -169,6 +204,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.False(harness.Scheduler.IsTracked(importId));
     }
 
+    /// <summary>
+    /// StopAsync while only intent is bound.
+    /// Expects no Completed archive; Accepted placeholder remains.
+    /// </summary>
     [Fact]
     public async Task ShutdownDuringAcceptedIntent_DoesNotArchiveWithoutOnDiskConfirm()
     {
@@ -190,6 +229,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.True(File.Exists(harness.AcceptedCsv));
     }
 
+    /// <summary>
+    /// FailNextAcceptedMoves during ProcessProcessingFileAsync.
+    /// Expects IOException, file remains in Processing, no Accepted, pending 0.
+    /// </summary>
     [Fact]
     public async Task AcceptedMoveFailure_AbortsIntentAndLeavesProcessingFile()
     {
@@ -248,6 +291,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.Equal(1, mover.AcceptedMoveAttempts);
     }
 
+    /// <summary>
+    /// Second ScheduleAsync blocked on MaximumPendingJobs=1; StopAsync.
+    /// Expects wait completes with null/cancel/invalid — not ObjectDisposedException; pending 0.
+    /// </summary>
     [Fact]
     public async Task Shutdown_WhileWaitingForCapacity_DoesNotThrowObjectDisposed()
     {
@@ -278,6 +325,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.Equal(0, harness.Scheduler.PendingCount);
     }
 
+    /// <summary>
+    /// Abort concurrent with clock advance that would dispatch.
+    /// Expects pending 0 once; capacity fully reusable by a new import.
+    /// </summary>
     [Fact]
     public async Task Abort_RacingTerminalProcessing_ReleasesCapacityExactlyOnce()
     {
@@ -305,6 +356,10 @@ public sealed class SchedulerConcurrencyHardeningTests
         Assert.Equal(2, harness.Scheduler.PendingCount);
     }
 
+    /// <summary>
+    /// DiscoveryProbe with capacity 1.
+    /// Expects duplicate path coalescing and recovery after a slot frees.
+    /// </summary>
     [Fact]
     public async Task DiscoveryQueue_DedupesAndRecoversAfterSaturation()
     {
@@ -344,6 +399,17 @@ public sealed class SchedulerConcurrencyHardeningTests
         }
     }
 
+    /// <summary>
+    /// Builds a temp ScheduledJobs tree with a placeholder Accepted CSV and a scheduler wired to a controllable file mover.
+    /// </summary>
+    /// <param name="time">Fake clock driving the scheduler.</param>
+    /// <param name="mover">File mover to inject; a pass-through <see cref="ControllableFileMover"/> is created when <see langword="null"/>.</param>
+    /// <param name="maximumPendingJobs">Maximum pending jobs used when options are created here.</param>
+    /// <param name="startRunLoop">Whether to start the scheduler run loop immediately.</param>
+    /// <param name="root">Existing temporary root to reuse; a new one is created when <see langword="null"/>.</param>
+    /// <param name="paths">Existing folder paths to reuse; created from the options when <see langword="null"/>.</param>
+    /// <param name="options">Existing scheduler options to reuse; created with defaults for tests when <see langword="null"/>.</param>
+    /// <returns>A harness that owns the scheduler, execution workers, and temp directory.</returns>
     private static HardeningHarness CreateHarness(
         FakeTimeProvider time,
         ControllableFileMover? mover = null,
@@ -388,6 +454,14 @@ public sealed class SchedulerConcurrencyHardeningTests
             executionCts);
     }
 
+    /// <summary>
+    /// Builds a scheduled job for the fixed CORE-01 router with the given UTC window.
+    /// </summary>
+    /// <param name="importId">Import the job belongs to.</param>
+    /// <param name="row">1-based CSV row number of the job.</param>
+    /// <param name="start">Window start; treated as UTC.</param>
+    /// <param name="stop">Window stop (exclusive); treated as UTC.</param>
+    /// <returns>A job for 192.168.1.1 covering the requested window.</returns>
     private static MikrotikScheduledJob CreateJob(
         Guid importId,
         int row,
@@ -404,6 +478,9 @@ public sealed class SchedulerConcurrencyHardeningTests
             DateStopUtc = DateTime.SpecifyKind(stop, DateTimeKind.Utc),
         };
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -420,13 +497,42 @@ public sealed class SchedulerConcurrencyHardeningTests
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
+    /// <summary>
+    /// Optional delayed StartRunLoop, ControllableFileMover wiring, and cleanup of
+    /// scheduler/execution tasks over a temp ScheduledJobs root.
+    /// </summary>
     private sealed class HardeningHarness : IAsyncDisposable
     {
+        /// <summary>
+        /// Cancels the scheduler run loop during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _cts = new();
+
+        /// <summary>
+        /// Cancels the router execution workers during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _executionCts;
+
+        /// <summary>
+        /// Task running the router execution workers.
+        /// </summary>
         private readonly Task _executionTask;
+
+        /// <summary>
+        /// Task running the scheduler loop; <see langword="null"/> until <see cref="StartRunLoop"/> is called.
+        /// </summary>
         private Task? _runTask;
 
+        /// <summary>
+        /// Initializes the harness and optionally starts the scheduler run loop.
+        /// </summary>
+        /// <param name="scheduler">Scheduler under test.</param>
+        /// <param name="paths">Resolved ScheduledJobs folder paths.</param>
+        /// <param name="acceptedCsv">Path of the placeholder Accepted CSV.</param>
+        /// <param name="root">Temporary ScheduledJobs root to delete on disposal.</param>
+        /// <param name="startRunLoop">Whether to start the scheduler run loop immediately.</param>
+        /// <param name="executionTask">Task running the execution workers.</param>
+        /// <param name="executionCts">Cancellation source that stops the execution workers.</param>
         public HardeningHarness(
             InMemoryJobScheduler scheduler,
             ScheduledJobsPaths paths,
@@ -449,21 +555,42 @@ public sealed class SchedulerConcurrencyHardeningTests
             }
         }
 
+        /// <summary>
+        /// Scheduler under test, created over the temporary ScheduledJobs tree this harness builds.
+        /// </summary>
         public InMemoryJobScheduler Scheduler { get; }
 
+        /// <summary>
+        /// Resolved ScheduledJobs folder paths for the temporary tree this harness creates.
+        /// </summary>
         public ScheduledJobsPaths Paths { get; }
 
+        /// <summary>
+        /// Path of the placeholder Accepted CSV that the scheduled jobs are registered against.
+        /// </summary>
         public string AcceptedCsv { get; }
 
+        /// <summary>
+        /// Completed folder inside the temporary ScheduledJobs tree; finished CSVs are archived here.
+        /// </summary>
         public string CompletedDir { get; }
 
+        /// <summary>
+        /// Temporary ScheduledJobs root directory that holds every folder this harness creates.
+        /// </summary>
         public string Root { get; }
 
+        /// <summary>
+        /// Starts the scheduler RunAsync loop for this harness.
+        /// </summary>
         public void StartRunLoop()
         {
             _runTask ??= Scheduler.RunAsync(_cts.Token);
         }
 
+        /// <summary>
+        /// Stops background loops and deletes temporary directories.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             _cts.Cancel();
@@ -509,14 +636,38 @@ public sealed class SchedulerConcurrencyHardeningTests
     /// <summary>
     /// Mirrors watcher discovery coalesce/saturation behaviour for deterministic unit testing.
     /// </summary>
+    /// <param name="capacity">Bounded channel capacity for queued discovery paths.</param>
     private sealed class DiscoveryProbe(int capacity)
     {
+        /// <summary>
+        /// Bounded channel standing in for the discovery queue.
+        /// </summary>
         private readonly Channel<string> _channel = Channel.CreateBounded<string>(capacity);
+
+        /// <summary>
+        /// Full paths currently queued or in flight, used to coalesce duplicates.
+        /// </summary>
         private readonly HashSet<string> _pending = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Guards <see cref="_pending"/>.
+        /// </summary>
         private readonly object _gate = new();
 
+        /// <summary>
+        /// Number of enqueue attempts rejected because the probe's queue was already full; tests use it to confirm
+        /// saturation was counted rather than dropped silently.
+        /// </summary>
         public int SaturationCount { get; private set; }
 
+        /// <summary>
+        /// Attempts to queue a discovered path, coalescing duplicates and counting saturation.
+        /// </summary>
+        /// <param name="path">Discovered CSV path.</param>
+        /// <returns>
+        /// <see langword="true"/> when the path was queued or is already pending;
+        /// <see langword="false"/> when the queue is saturated.
+        /// </returns>
         public bool TryEnqueue(string path)
         {
             string key = Path.GetFullPath(path);
@@ -542,6 +693,10 @@ public sealed class SchedulerConcurrencyHardeningTests
             return false;
         }
 
+        /// <summary>
+        /// Marks a path as processed: clears its pending entry and frees one queue slot.
+        /// </summary>
+        /// <param name="path">Path whose processing has finished.</param>
         public void Complete(string path)
         {
             lock (_gate)

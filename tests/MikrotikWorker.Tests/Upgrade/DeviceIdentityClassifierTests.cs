@@ -1,8 +1,27 @@
+// -----------------------------------------------------------------------------
+// File: DeviceIdentityClassifierTests.cs
+//
+// Description:
+// Unit tests for DeviceIdentityClassifier / DeviceType parsing and v7
+// eligibility policy.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Tests.Upgrade;
+
+/// <summary>
+/// Device identity string classification into ACE/AP/BR/DCL/Unknown and the
+/// RouterOS 7 upgrade-eligibility policy attached to each result.
+/// </summary>
 public sealed class DeviceIdentityClassifierTests
 {
+    /// <summary>
+    /// Standard dotted identities with ACE/AP/BR/DCL type prefixes (mixed casing).
+    /// Expects DeviceType from the prefix, MatchedStandardFormat, identity echoed,
+    /// and ShouldUpgradeToV7 for every standard fleet type.
+    /// </summary>
     [Theory]
     [InlineData("ACE01.POP001.001.core", DeviceType.Ace)]
     [InlineData("ACE12.POP123.456.edge", DeviceType.Ace)]
@@ -27,6 +46,11 @@ public sealed class DeviceIdentityClassifierTests
         Assert.True(result.ShouldUpgradeToV7);
     }
 
+    /// <summary>
+    /// Non-standard, truncated, or prefix-poisoned identity strings.
+    /// Expects DeviceType.Unknown with ShouldUpgradeToV7 still true and a
+    /// policy reason mentioning unknown/non-standard — unknowns remain upgrade-eligible.
+    /// </summary>
     [Theory]
     [InlineData("UNKNOWN01.POP001.001.device")]
     [InlineData("MikroTik")]
@@ -49,6 +73,10 @@ public sealed class DeviceIdentityClassifierTests
         Assert.Contains("unknown or non-standard", result.PolicyReason, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Leading/trailing whitespace around an otherwise standard ACE identity.
+    /// Expects trim before classification so DeviceType.Ace still matches and remains v7-eligible.
+    /// </summary>
     [Fact]
     public void SurroundingWhitespace_IsTrimmedBeforeClassification()
     {
@@ -58,6 +86,10 @@ public sealed class DeviceIdentityClassifierTests
         Assert.True(result.ShouldUpgradeToV7);
     }
 
+    /// <summary>
+    /// Null and empty/whitespace identity inputs.
+    /// Expects Unknown, MatchedStandardFormat false, and ShouldUpgradeToV7 true (fail-open).
+    /// </summary>
     [Theory]
     [InlineData(null)]
     [InlineData("")]
@@ -71,6 +103,10 @@ public sealed class DeviceIdentityClassifierTests
         Assert.True(result.ShouldUpgradeToV7);
     }
 
+    /// <summary>
+    /// Direct ShouldUpgradeToV7 checks for every DeviceType enum value.
+    /// Expects true for Ace, Br, Ap, Dcl, and Unknown — no type is excluded from RouterOS 7.
+    /// </summary>
     [Fact]
     public void AllDeviceTypes_AreEligibleForRouterOs7()
     {
@@ -81,6 +117,10 @@ public sealed class DeviceIdentityClassifierTests
         Assert.True(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Unknown));
     }
 
+    /// <summary>
+    /// AP-prefixed identity whose later component contains "ACE".
+    /// Expects DeviceType.Ap and v7 eligibility — classification uses the leading component only.
+    /// </summary>
     [Fact]
     public void LaterComponentContainingAce_DoesNotClassifyAsAce()
     {
@@ -90,6 +130,10 @@ public sealed class DeviceIdentityClassifierTests
         Assert.True(result.ShouldUpgradeToV7);
     }
 
+    /// <summary>
+    /// DCL-prefixed identity whose later component contains "BR".
+    /// Expects DeviceType.Dcl and v7 eligibility — substring "BR" must not override the prefix.
+    /// </summary>
     [Fact]
     public void LaterComponentContainingBr_DoesNotClassifyAsBr()
     {

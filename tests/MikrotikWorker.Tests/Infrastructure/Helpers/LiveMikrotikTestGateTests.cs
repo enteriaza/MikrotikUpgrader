@@ -1,6 +1,22 @@
+// -----------------------------------------------------------------------------
+// File: LiveMikrotikTestGateTests.cs
+//
+// Description:
+// Unit tests for LiveMikrotikTestGate opt-in behaviour that protects live router tests.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Tests.Infrastructure.Helpers;
+/// <summary>
+/// Covers the live MikroTik test opt-in gate.
+/// </summary>
 public sealed class LiveMikrotikTestGateTests
 {
+    /// <summary>
+    /// Clears ALLOW_LIVE_MIKROTIK.
+    /// Expects RequireArmed throws an xUnit failure mentioning ALLOW_LIVE_MIKROTIK=1
+    /// and that arming must happen before any router contact.
+    /// </summary>
     [Fact]
     public void RequireArmed_FailsClosed_WhenEnvUnset()
     {
@@ -21,6 +37,11 @@ public sealed class LiveMikrotikTestGateTests
         }
     }
 
+    /// <summary>
+    /// Reads known live/OSP F harness sources from disk.
+    /// Expects each file contains RequireArmed and that call appears before
+    /// OpenConnection / IsTcpReachableAsync when those APIs are used.
+    /// </summary>
     [Fact]
     public void LiveConnectingTests_DeclareOptInGateBeforeConnectionPatterns()
     {

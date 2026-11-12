@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: OspfV3RemovalSelection.cs
+//
+// Description:
+// Computes instance-safe OSPFv3 removal targets from a v7 inventory. Areas
+// belong to instances via instance=; templates/ranges reference areas by name.
+// When a v3 area name also exists on an OSPFv2 instance, selection fails
+// closed.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
@@ -7,16 +18,44 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal static class OspfV3RemovalSelection
 {
+    /// <summary>
+    /// Selected OSPFv3 objects that are safe to remove for a given inventory.
+    /// </summary>
     internal sealed class Result
     {
+        /// <summary>
+        /// Gets a value indicating whether a safe removal selection was computed.
+        /// </summary>
         public required bool Succeeded { get; init; }
+        /// <summary>
+        /// Gets why selection failed closed, or null on success.
+        /// </summary>
         public string? FailureDetail { get; init; }
+        /// <summary>
+        /// Gets RouterOS <c>.id</c> values of interface-templates that depend on an OSPFv3 area.
+        /// </summary>
         public IReadOnlyList<string> TemplateIds { get; init; } = [];
+        /// <summary>
+        /// Gets RouterOS <c>.id</c> values of area ranges that belong to an OSPFv3 area.
+        /// </summary>
         public IReadOnlyList<string> RangeIds { get; init; } = [];
+        /// <summary>
+        /// Gets RouterOS <c>.id</c> values of areas that belong to an OSPFv3 instance.
+        /// </summary>
         public IReadOnlyList<string> AreaIds { get; init; } = [];
+        /// <summary>
+        /// Gets RouterOS <c>.id</c> values of the OSPFv3 instances.
+        /// </summary>
         public IReadOnlyList<string> InstanceIds { get; init; } = [];
     }
 
+    /// <summary>
+    /// Selects the OSPFv3 instances and their dependent areas, ranges, and templates for removal.
+    /// Fails closed when an object lacks a name or <c>.id</c>, or when an OSPFv3 area name also exists on an OSPFv2 instance.
+    /// </summary>
+    /// <param name="inventory">Live RouterOS 7 OSPF inventory.</param>
+    /// <returns>A successful selection (empty when no OSPFv3 instance exists), or a failure with detail.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="inventory"/> is null.</exception>
     public static Result Build(OspfV7Inventory inventory)
     {
         ArgumentNullException.ThrowIfNull(inventory);

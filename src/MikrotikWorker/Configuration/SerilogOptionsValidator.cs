@@ -1,9 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: SerilogOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for SerilogOptions: allowed rolling intervals and levels,
+// positive capacity/size limits, valid file name characters, and resolvable
+// log directory path.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="SerilogOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class SerilogOptionsValidator : IValidateOptions<SerilogOptions>
 {
+    /// <summary>
+    /// Rolling interval names accepted for log files, compared case-insensitively.
+    /// </summary>
     private static readonly HashSet<string> AllowedIntervals = new(StringComparer.OrdinalIgnoreCase)
     {
         "Infinite",
@@ -14,6 +30,9 @@ internal sealed class SerilogOptionsValidator : IValidateOptions<SerilogOptions>
         "Minute",
     };
 
+    /// <summary>
+    /// Serilog level names accepted for minimum-level settings, compared case-insensitively.
+    /// </summary>
     private static readonly HashSet<string> AllowedLevels = new(StringComparer.OrdinalIgnoreCase)
     {
         "Verbose",
@@ -24,6 +43,7 @@ internal sealed class SerilogOptionsValidator : IValidateOptions<SerilogOptions>
         "Fatal",
     };
 
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, SerilogOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

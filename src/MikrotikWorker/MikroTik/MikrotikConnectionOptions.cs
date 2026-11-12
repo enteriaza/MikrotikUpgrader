@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikConnectionOptions.cs
+//
+// Description:
+// Per-device connection parameters for a single API/SCP session. Host comes from
+// the scheduled CSV; credentials from IRouterCredentialResolver; optional Port
+// and ConnectTimeout fall back to Mikrotik section defaults when null.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.MikroTik;
 
 /// <summary>
@@ -6,6 +16,7 @@ namespace MikrotikWorker.MikroTik;
 /// </summary>
 public sealed class MikrotikConnectionOptions
 {
+    /// <summary>Device management IP or host name.</summary>
     public required string Host { get; init; }
 
     /// <summary>
@@ -13,8 +24,10 @@ public sealed class MikrotikConnectionOptions
     /// </summary>
     public int? Port { get; init; }
 
+    /// <summary>RouterOS API username. Never log.</summary>
     public required string Username { get; init; }
 
+    /// <summary>RouterOS API password. Never log.</summary>
     public required string Password { get; init; }
 
     /// <summary>

@@ -1,8 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: OspfV3RemovalSelectionTests.cs
+//
+// Description:
+// Unit tests for OspfV3RemovalSelection instance-safe OSPFv3 cleanup
+// targeting.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Upgrade.Ospf;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
+/// <summary>
+/// Unit tests for instance-safe OSPFv3 removal selection.
+/// </summary>
 public sealed class OspfV3RemovalSelectionTests
 {
+    /// <summary>
+    /// Scenario: an inventory where the OSPFv2 and OSPFv3 instances each own an area named 'backbone'.
+    /// Expected: Build fails with a detail saying the name 'also exists on an OSPFv2' object, and selects no template, area or instance ids.
+    /// Invariant: an ambiguous area name must never lead to v2 objects being scheduled for removal.
+    /// </summary>
     [Fact]
     public void CollidingAreaNames_FailClosed_WithoutSelectingV2Objects()
     {
@@ -37,6 +54,11 @@ public sealed class OspfV3RemovalSelectionTests
         Assert.Empty(result.InstanceIds);
     }
 
+    /// <summary>
+    /// Scenario: v2 and v3 instances with distinct area names, each with its own templates and ranges.
+    /// Expected: Build succeeds and returns only the v3 ids (*t3, *r3, *a3, *v3); *t2, *a2 and *v2 are not selected.
+    /// Invariant: removal targets are chosen by .id and only for objects that depend on the v3 instance.
+    /// </summary>
     [Fact]
     public void DistinctAreaNames_SelectOnlyV3DependentsById()
     {
@@ -75,6 +97,11 @@ public sealed class OspfV3RemovalSelectionTests
         Assert.DoesNotContain("*v2", result.InstanceIds);
     }
 
+    /// <summary>
+    /// Scenario: v3 instance and area rows carry no .id values.
+    /// Expected: Build fails and the failure detail mentions '.id'.
+    /// Invariant: without stable ids the selector refuses to build a removal set.
+    /// </summary>
     [Fact]
     public void MissingIds_FailClosed()
     {

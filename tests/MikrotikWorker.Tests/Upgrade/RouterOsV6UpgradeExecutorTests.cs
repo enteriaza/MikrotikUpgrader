@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: RouterOsV6UpgradeExecutorTests.cs
+//
+// Description:
+// Unit/fake-based tests for RouterOsV6UpgradeExecutor workflow gates, stages,
+// and outcomes.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -11,8 +20,15 @@ using tik4net;
 using tik4net.Testing;
 
 namespace MikrotikWorker.Tests.Upgrade;
+/// <summary>
+/// Fake-based tests for RouterOsV6UpgradeExecutor gates, stages, and outcomes.
+/// </summary>
 public sealed class RouterOsV6UpgradeExecutorTests
 {
+    /// <summary>
+    /// A failing backup service gives <c>UpgradeOutcome.BackupFailed</c> with no fetch, no reboot and
+    /// <c>RebootInitiated</c> false.
+    /// </summary>
     [Fact]
     public async Task BackupFailure_PreventsFetchAndReboot()
     {
@@ -38,6 +54,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(result.RebootInitiated);
     }
 
+    /// <summary>
+    /// A backup whose remote cleanup fails also gives <c>BackupFailed</c>, with a detail containing 'Remote cleanup
+    /// failed'. Nothing is fetched or rebooted and <c>RebootInitiated</c> is false.
+    /// </summary>
     [Fact]
     public async Task RemoteCleanupFailure_PreventsFetchAndReboot()
     {
@@ -65,6 +85,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(result.RebootInitiated);
     }
 
+    /// <summary>
+    /// With a successful backup and the firmware file present, the executor does attempt the fetch
+    /// (<c>FetchCalled</c>). When the router never reports the file, the result is <c>UpgradeFailed</c> and no
+    /// reboot is requested.
+    /// </summary>
     [Fact]
     public async Task SuccessfulBackup_AllowsPackageStagingFetch_WithoutRebootWhenFetchFailsMissingFile()
     {
@@ -94,6 +119,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.Equal(UpgradeOutcome.UpgradeFailed, result.Outcome);
     }
 
+    /// <summary>
+    /// A device already on RouterOS 7.23.8 gives <c>SkippedAlreadyAtTarget</c> with <c>CompletedStage</c>
+    /// RouterboardFirmware and <c>PostUpgradeVersion</c> 7.23.8. Nothing is fetched and no reboot is requested.
+    /// </summary>
     [Fact]
     public async Task V7Device_AtTarget_IsNeverModified()
     {
@@ -129,6 +158,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(ops.RebootCalled);
     }
 
+    /// <summary>
+    /// With upgrades disabled in options, the result is <c>SkippedUpgradeDisabled</c> and the router is never asked
+    /// to fetch.
+    /// </summary>
     [Fact]
     public async Task UpgradeDisabled_SkipsWithoutFetch()
     {
@@ -149,6 +182,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(ops.FetchCalled);
     }
 
+    /// <summary>
+    /// A router with <c>routeros-mipsbe</c> and an installed <c>tr069-client</c> but only the main package in the
+    /// firmware folder gives <c>PackageResolutionFailed</c>. Nothing is fetched or rebooted.
+    /// </summary>
     [Fact]
     public async Task MissingOptionalPackage_PreventsFetchAndReboot()
     {
@@ -184,6 +221,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(ops.RebootCalled);
     }
 
+    /// <summary>
+    /// Cancelling 50 ms into a fetch that would take 5 seconds gives <c>UpgradeInterrupted</c>. No reboot is
+    /// requested and <c>RebootInitiated</c> is false.
+    /// </summary>
     [Fact]
     public async Task CancellationDuringFetch_PreventsReboot()
     {
@@ -210,6 +251,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(result.RebootInitiated);
     }
 
+    /// <summary>
+    /// When the fetched file never appears on the router (<c>OmitFetchedFile</c>), the fetch is attempted but the
+    /// result is <c>UpgradeFailed</c> and no reboot is requested.
+    /// </summary>
     [Fact]
     public async Task IncompleteStaging_PreventsReboot()
     {
@@ -231,6 +276,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(ops.RebootCalled);
     }
 
+    /// <summary>
+    /// When the schedule-window check returns false, the result is <c>PolicyBlocked</c> with no fetch and no
+    /// reboot.
+    /// </summary>
     [Fact]
     public async Task OutsideScheduleWindow_PreventsFetchAndReboot()
     {
@@ -252,6 +301,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.False(ops.RebootCalled);
     }
 
+    /// <summary>
+    /// A fake clock advanced in 15 s steps past the 5 minute reboot timeout, with every reconnect failing ('still
+    /// down'), gives <c>UpgradeTimedOut</c> and never <c>UpgradeSucceeded</c>. The reboot was requested and
+    /// <c>RebootInitiated</c> is true.
+    /// </summary>
     [Fact]
     public async Task ReconnectionTimeout_AfterReboot_ReportsTimedOut()
     {
@@ -295,6 +349,15 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.True(result.RebootInitiated);
     }
 
+    /// <summary>
+    /// Scenario: Fake time starts at 12:00 and the reconnect factory only succeeds two minutes after the reboot. The
+    /// executor retries every 15 seconds within a five-minute reboot timeout, and the test advances the clock in
+    /// 15-second steps so the retry delays can complete. No RouterOS 7 target is configured.
+    /// Expected: A reconnect succeeds before the deadline and the v6 stepping stage completes with 6.49.23 reported
+    /// afterwards. The outcome is TargetUnavailable because no RouterOS 7 target follows, and at least one connection
+    /// succeeded.
+    /// Invariant: A reconnect inside the five-minute window counts as success, not as a timeout.
+    /// </summary>
     [Fact]
     public async Task Reconnection_SucceedsWithinFiveMinutes()
     {
@@ -337,6 +400,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.True(factory.SuccessCount >= 1);
     }
 
+    /// <summary>
+    /// A reconnect that first succeeds at 4:50 of the 5:00 reboot window, with 10 s retries, is accepted. The
+    /// executor then stops at the v6 stepping stage with <c>TargetUnavailable</c> (no RouterOS 7 target is
+    /// configured) instead of timing out, and <c>CompletedStage</c> is V6Stepping.
+    /// </summary>
     [Fact]
     public async Task Reconnection_AtFourMinutesFiftySeconds_SucceedsBeforeDeadline()
     {
@@ -378,6 +446,13 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
     }
 
+    /// <summary>
+    /// Scenario: The reconnect factory never succeeds. The executor retries every 30 seconds within a five-minute
+    /// reboot timeout, and the test advances the fake clock 30 seconds at a time.
+    /// Expected: The outcome is UpgradeTimedOut, the fake clock has reached at least 12:05 (five minutes after the
+    /// reboot), and at least two attempts were made.
+    /// Invariant: Retries never extend the absolute five-minute deadline measured from the reboot.
+    /// </summary>
     [Fact]
     public async Task Reconnection_RetryDoesNotExtendAbsoluteDeadline()
     {
@@ -422,6 +497,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.True(factory.Attempts >= 2);
     }
 
+    /// <summary>
+    /// A reconnect attempt that hangs is cancelled when the fake clock reaches the 5 minute deadline, which the
+    /// test confirms through the factory's cancellation signal. The result is <c>UpgradeTimedOut</c>, never
+    /// <c>UpgradeSucceeded</c>.
+    /// </summary>
     [Fact]
     public async Task Reconnection_ConnectionAttemptCannotOverrunRemainingDeadline()
     {
@@ -457,6 +537,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
     }
 
+    /// <summary>
+    /// Allow the reconnect loop to enter its delay before cancelling.
+    /// Cancelling while the reconnect loop waits out its 1 minute delay, then advancing the fake clock to release
+    /// it, gives <c>UpgradeInterrupted</c> rather than a timeout or success. <c>RebootInitiated</c> is true.
+    /// </summary>
     [Fact]
     public async Task Reconnection_CancellationStopsImmediately()
     {
@@ -496,6 +581,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.True(result.RebootInitiated);
     }
 
+    /// <summary>
+    /// With a factory whose every attempt throws and the clock advanced in 20 s steps, the result is
+    /// <c>UpgradeTimedOut</c> and never <c>UpgradeSucceeded</c>.
+    /// </summary>
     [Fact]
     public async Task Reconnection_TimeoutNeverProducesUpgradeSucceeded()
     {
@@ -534,6 +623,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
     }
 
+    /// <summary>
+    /// After a successful reconnect to a router now reporting 6.49.23, the executor verifies the version.
+    /// <c>PostUpgradeVersion</c> is 6.49.23 and <c>CompletedStage</c> is V6Stepping, and with no RouterOS 7 target
+    /// the outcome is <c>TargetUnavailable</c>.
+    /// </summary>
     [Fact]
     public async Task PostUpgradeVerification_RunsAfterSuccessfulReconnect()
     {
@@ -564,6 +658,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.Equal("6.49.23", result.PostUpgradeVersion);
     }
 
+    /// <summary>
+    /// Expire the (capped) verify poll window well inside the absolute reboot deadline.
+    /// A router that reconnects reporting 6.48.1 instead of 6.49.23 gives <c>UpgradeVersionMismatch</c> once the
+    /// verify poll window expires (clock advanced 2 s), not <c>UpgradeTimedOut</c>. <c>RebootInitiated</c> is true.
+    /// </summary>
     [Fact]
     public async Task PostUpgradeVersionMismatch_IsReported()
     {
@@ -601,6 +700,14 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.True(result.RebootInitiated);
     }
 
+    /// <summary>
+    /// Scenario: The reconnect factory succeeds only 4 minutes 50 seconds after the reboot, leaving 10 seconds of the
+    /// five-minute window. Once the post-reboot read starts, the test advances the fake clock 15 seconds, past the
+    /// absolute deadline.
+    /// Expected: The outcome is UpgradeTimedOut (not success), the reboot is recorded as initiated, and the fake
+    /// clock has reached at least 12:05.
+    /// Invariant: Post-reboot verification cannot continue past the absolute deadline, even after a late reconnect.
+    /// </summary>
     [Fact]
     public async Task PostRebootVerification_CannotContinuePastAbsoluteDeadline_AfterLateReconnect()
     {
@@ -653,6 +760,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.True(time.GetUtcNow() >= new DateTimeOffset(2026, 11, 10, 12, 5, 0, TimeSpan.Zero));
     }
 
+    /// <summary>
+    /// When the router reconnects within the deadline reporting 6.49.23, the post-reboot package list and device
+    /// info are each read at least once. The run ends at V6Stepping with <c>TargetUnavailable</c>.
+    /// </summary>
     [Fact]
     public async Task PostRebootVerification_CompletingInsideDeadline_StillRunsPackageChecks()
     {
@@ -684,6 +795,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
         Assert.True(ops.PostRebootDeviceInfoCount >= 1);
     }
 
+    /// <summary>
+    /// These stage-oriented unit tests exercise the v6 stepping machinery. No RouterOS 7 target is configured,
+    /// </summary>
     private static RouterOsV6UpgradeExecutor CreateExecutor(
         TrackingOps ops,
         IDeviceBackupService backup,
@@ -755,6 +869,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -771,13 +888,23 @@ public sealed class RouterOsV6UpgradeExecutorTests
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
+    /// <summary>
+    /// Connection factory driven by a fake clock: attempts fail until the clock reaches a chosen instant, then return
+    /// a fully populated fake connection.
+    /// </summary>
     private sealed class TimedReconnectFactory(FakeTimeProvider time, DateTimeOffset succeedAfter)
         : IMikrotikConnectionFactory
     {
+        /// <summary>Total reconnect attempts, successful or not.</summary>
         public int Attempts { get; private set; }
 
+        /// <summary>Number of attempts that succeeded after the router "came back".</summary>
         public int SuccessCount { get; private set; }
 
+        /// <summary>
+        /// Throws <see cref="IOException"/> (<c>router still rebooting</c>) while the clock is before the success
+        /// time; afterwards returns a fake connection.
+        /// </summary>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -793,10 +920,15 @@ public sealed class RouterOsV6UpgradeExecutorTests
         }
     }
 
+    /// <summary>
+    /// Connection factory that counts attempts and always fails, simulating a router that stays unreachable.
+    /// </summary>
     private sealed class CountingThrowFactory : IMikrotikConnectionFactory
     {
+        /// <summary>Number of reconnect attempts made.</summary>
         public int Attempts { get; private set; }
 
+        /// <summary>Counts the attempt and throws <see cref="IOException"/> (<c>still down</c>).</summary>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -806,12 +938,22 @@ public sealed class RouterOsV6UpgradeExecutorTests
         }
     }
 
+    /// <summary>
+    /// Connection factory that blocks until cancelled, used to verify reboot-wait cancellation reaches an in-flight
+    /// reconnect.
+    /// </summary>
     private sealed class HangingReconnectFactory : IMikrotikConnectionFactory
     {
+        /// <summary>Completed when the first reconnect attempt begins.</summary>
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>Completed when the pending attempt observes cancellation.</summary>
         public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>
+        /// Signals <see cref="Started"/>, waits indefinitely, and signals <see cref="Cancelled"/> before rethrowing
+        /// when cancelled.
+        /// </summary>
         public async Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -831,6 +973,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
         }
     }
 
+    /// <summary>Builds a minimal scheduled job (router <c>CORE-01</c>, 10.0.0.50) for executor calls.</summary>
     private static MikrotikScheduledJob CreateJob() =>
         new()
         {
@@ -843,6 +986,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
             DateStopUtc = DateTime.UtcNow.AddHours(1),
         };
 
+    /// <summary>
+    /// Builds RouterOS 6.49.10 <see cref="MikrotikDeviceInfo"/> (mipsbe, hEX PoE) for a core router.
+    /// </summary>
     private static MikrotikDeviceInfo CreateDevice() =>
         new()
         {
@@ -852,6 +998,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
             BoardName = "hEX PoE",
         };
 
+    /// <summary>
+    /// Builds a compatible, path-eligible assessment targeting RouterOS 7.23.8 with the given status and version
+    /// classification.
+    /// </summary>
     private static DeviceCompatibilityAssessment CreateAssessment(
         DeviceAssessmentStatus status,
         RouterOsVersionClassification classification = RouterOsVersionClassification.OlderThanTargetV6) =>
@@ -867,18 +1017,41 @@ public sealed class RouterOsV6UpgradeExecutorTests
             AssessedAtUtc = DateTimeOffset.UtcNow,
         };
 
+    /// <summary>
+    /// Configurable <see cref="IMikrotikRouterOperations"/> fake that reports a fixed post-upgrade version and
+    /// records fetch, reboot, cleanup and RouterBOARD activity for executor stage assertions.
+    /// </summary>
     private sealed class TrackingOps : IMikrotikRouterOperations
     {
+        /// <summary>
+        /// True once <see cref="FetchUrlToFileAsync"/> has been invoked, i.e. the firmware package fetch was
+        /// attempted.
+        /// </summary>
         public bool FetchCalled { get; private set; }
 
+        /// <summary>
+        /// True once <see cref="RebootAsync"/> has been invoked, i.e. the executor requested a router reboot.
+        /// </summary>
         public bool RebootCalled { get; private set; }
 
+        /// <summary>
+        /// When true, <see cref="FindFileAsync"/> reports <c>.npk</c> files as missing, simulating a fetch that
+        /// produced nothing.
+        /// </summary>
         public bool OmitFetchedFile { get; init; }
 
+        /// <summary>
+        /// Set by tests that expect the fetched package size to match; the fake already reports 4-byte files, so this
+        /// flag does not alter behaviour.
+        /// </summary>
         public bool FetchReturnsMatchingSize { get; init; }
 
+        /// <summary>
+        /// Delay applied inside <see cref="FetchUrlToFileAsync"/>, used to exercise fetch timeouts and cancellation.
+        /// </summary>
         public TimeSpan FetchDelay { get; init; }
 
+        /// <summary>RouterOS version reported by device-info and package reads (default 6.49.23).</summary>
         public string PostUpgradeVersion { get; init; } = "6.49.23";
 
         /// <summary>
@@ -886,35 +1059,71 @@ public sealed class RouterOsV6UpgradeExecutorTests
         /// </summary>
         public string Identity { get; init; } = "ACE01.POP001.001.core";
 
+        /// <summary>RouterBOARD firmware version currently running on the fake router.</summary>
         public string RouterboardCurrentFirmware { get; init; } = "7.23.8";
 
+        /// <summary>
+        /// RouterBOARD firmware version available for upgrade; equal to the current firmware means no RouterBOARD
+        /// upgrade is needed.
+        /// </summary>
         public string RouterboardUpgradeFirmware { get; init; } = "7.23.8";
 
+        /// <summary>
+        /// When true, the first post-reboot device-info read blocks until cancelled, simulating a router that never
+        /// answers.
+        /// </summary>
         public bool HangPostRebootReadUntilCancelled { get; init; }
 
+        /// <summary>
+        /// Completed when a post-reboot device-info read begins, so tests can cancel at a deterministic point.
+        /// </summary>
         public TaskCompletionSource PostRebootReadStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>Number of device-info reads performed after a reboot was requested.</summary>
         public int PostRebootDeviceInfoCount { get; private set; }
 
+        /// <summary>Number of package listings performed after a reboot was requested.</summary>
         public int PostRebootPackageListCount { get; private set; }
 
+        /// <summary>Number of RouterBOARD firmware upgrades issued.</summary>
         public int RouterboardUpgradeCount { get; private set; }
 
+        /// <summary>Names of legacy fleet-upgrade scripts currently present on the fake router.</summary>
         public List<string> PresentScripts { get; init; } = [];
 
+        /// <summary>Names of legacy fleet-upgrade schedulers currently present on the fake router.</summary>
         public List<string> PresentSchedulers { get; init; } = [];
 
+        /// <summary>
+        /// Ordered log of removals (<c>script:name</c> / <c>scheduler:name</c>) used to assert cleanup order.
+        /// </summary>
         public List<string> RemovalOrder { get; } = [];
 
+        /// <summary>
+        /// Number of scheduler inspections performed; zero proves cleanup never looked for schedulers.
+        /// </summary>
         public int SchedulerCountCalls { get; private set; }
 
+        /// <summary>Number of script inspections performed; zero proves cleanup never looked for scripts.</summary>
         public int ScriptCountCalls { get; private set; }
 
+        /// <summary>
+        /// Per-file sizes (case-insensitive) reported by <see cref="FindFileAsync"/>, letting tests simulate
+        /// truncated or mismatched uploads.
+        /// </summary>
         public Dictionary<string, long> FileSizes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Explicit package inventory returned by <see cref="ListInstalledPackagesAsync"/>; when null a single main
+        /// package is derived from the version.
+        /// </summary>
         public IReadOnlyList<InstalledPackageInfo>? Installed { get; init; }
 
+        /// <summary>
+        /// Returns device info at <see cref="PostUpgradeVersion"/>. After a reboot, reads are counted and optionally
+        /// block until cancelled (<see cref="HangPostRebootReadUntilCancelled"/>).
+        /// </summary>
         public async Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
             string host,
@@ -941,6 +1150,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
             };
         }
 
+        /// <summary>
+        /// Returns <see cref="Installed"/> when set; otherwise a single main package (<c>routeros-mipsbe</c> or
+        /// <c>routeros</c>) at the post-upgrade version. Counts post-reboot listings.
+        /// </summary>
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default)
@@ -963,12 +1176,14 @@ public sealed class RouterOsV6UpgradeExecutorTests
             ]);
         }
 
+        /// <summary>No-op: pretends the <c>.rsc</c> configuration export was written on the router.</summary>
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>No-op: pretends the binary <c>.backup</c> system backup was saved on the router.</summary>
         public Task SaveSystemBackupAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -976,6 +1191,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Returns null for <c>.npk</c> files when <see cref="OmitFetchedFile"/> is set; otherwise the size
+        /// registered in <see cref="FileSizes"/>, or a 4-byte file.
+        /// </summary>
         public Task<RouterFileInfo?> FindFileAsync(
             ITikConnection connection,
             string fileName,
@@ -994,6 +1213,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
             return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, 4));
         }
 
+        /// <summary>
+        /// No-op: files are reported ready immediately, so the executor never waits on backup-file polling.
+        /// </summary>
         public Task WaitForFileAsync(
             ITikConnection connection,
             string fileName,
@@ -1002,12 +1224,17 @@ public sealed class RouterOsV6UpgradeExecutorTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>No-op: pretends the file was deleted from the router.</summary>
         public Task RemoveFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Marks the fetch as called and optionally waits <see cref="FetchDelay"/> (cancellable); no data is
+        /// transferred.
+        /// </summary>
         public async Task FetchUrlToFileAsync(
             ITikConnection connection,
             string url,
@@ -1022,12 +1249,16 @@ public sealed class RouterOsV6UpgradeExecutorTests
             }
         }
 
+        /// <summary>Marks the reboot as requested.</summary>
         public Task RebootAsync(ITikConnection connection, CancellationToken cancellationToken = default)
         {
             RebootCalled = true;
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Counts the call and returns how many entries in <see cref="PresentScripts"/> match the name exactly.
+        /// </summary>
         public Task<int> CountSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
@@ -1037,6 +1268,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
             return Task.FromResult(PresentScripts.Count(n => n.Equals(scriptName, StringComparison.Ordinal)));
         }
 
+        /// <summary>
+        /// Records <c>script:name</c> in <see cref="RemovalOrder"/> and removes matching entries from <see
+        /// cref="PresentScripts"/>.
+        /// </summary>
         public Task RemoveSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
@@ -1047,6 +1282,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Counts the call and returns how many entries in <see cref="PresentSchedulers"/> match the name exactly.
+        /// </summary>
         public Task<int> CountSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
@@ -1056,6 +1294,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
             return Task.FromResult(PresentSchedulers.Count(n => n.Equals(schedulerName, StringComparison.Ordinal)));
         }
 
+        /// <summary>
+        /// Records <c>scheduler:name</c> in <see cref="RemovalOrder"/> and removes matching entries from <see
+        /// cref="PresentSchedulers"/>.
+        /// </summary>
         public Task RemoveSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
@@ -1066,6 +1308,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
             return Task.CompletedTask;
         }
 
+        /// <summary>Counts the RouterBOARD firmware upgrade request.</summary>
         public Task UpgradeRouterboardAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default)
@@ -1075,8 +1318,16 @@ public sealed class RouterOsV6UpgradeExecutorTests
         }
     }
 
+    /// <summary>
+    /// Backup fake that always fails with a configurable reason; a reason containing "cleanup" also flags remote
+    /// cleanup failure.
+    /// </summary>
     private sealed class FailingBackup(string reason = "backup failed") : IDeviceBackupService
     {
+        /// <summary>
+        /// Returns a failed result carrying the configured reason, with <c>RemoteCleanupFailed</c> set when the
+        /// reason mentions cleanup.
+        /// </summary>
         public Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
             ITikConnection connection,
             MikrotikScheduledJob job,
@@ -1092,8 +1343,10 @@ public sealed class RouterOsV6UpgradeExecutorTests
             });
     }
 
+    /// <summary>Backup fake that always succeeds with remote cleanup completed.</summary>
     private sealed class SucceedingBackup : IDeviceBackupService
     {
+        /// <summary>Returns success with remote cleanup completed.</summary>
         public Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
             ITikConnection connection,
             MikrotikScheduledJob job,

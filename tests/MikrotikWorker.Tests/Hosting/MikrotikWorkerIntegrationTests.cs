@@ -1,11 +1,28 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikWorkerIntegrationTests.cs
+//
+// Description:
+// Broader host integration tests covering DI composition and end-to-end worker host
+// startup with TestHostFactory.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Configuration;
 using MikrotikWorker.MikroTik;
 
 namespace MikrotikWorker.Tests.Hosting;
+/// <summary>
+/// Covers host integration and DI composition.
+/// </summary>
 public sealed class MikrotikWorkerIntegrationTests
 {
+    /// <summary>Upper bound for each host start/stop and wait in these tests.</summary>
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Enabled=false with RecordingMikrotikApiClient.
+    /// Expects CallCount remains 0 after a short idle period.
+    /// </summary>
     [Fact]
     public async Task MikroTikIntegrationDisabled_DoesNotAttemptConnections()
     {
@@ -44,6 +61,10 @@ public sealed class MikrotikWorkerIntegrationTests
         }
     }
 
+    /// <summary>
+    /// Enabled=true with credentials but no scheduled jobs.
+    /// Expects idle/no-workload log and zero API client calls.
+    /// </summary>
     [Fact]
     public async Task MikroTikIntegrationEnabledWithoutWorkload_RemainsIdle()
     {
@@ -96,6 +117,11 @@ public sealed class MikrotikWorkerIntegrationTests
         }
     }
 
+    /// <summary>
+    /// Default production DI graph.
+    /// Expects API client, AppSettingsRouterCredentialResolver, placeholder credentials,
+    /// port 8728, Enabled=false, and Worker.ApiClient same instance.
+    /// </summary>
     [Fact]
     public void ProductionRegistration_ResolvesMikroTikServicesWithSharedCredentialPlaceholders()
     {
@@ -125,6 +151,10 @@ public sealed class MikrotikWorkerIntegrationTests
         }
     }
 
+    /// <summary>
+    /// ConnectionTimeout=00:00:00.
+    /// Expects OptionsValidationException citing ConnectionTimeout.
+    /// </summary>
     [Fact]
     public void InvalidGlobalMikroTikOptions_PreventStartup()
     {

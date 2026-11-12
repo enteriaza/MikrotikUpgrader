@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: LiveAuditRouterCsvParser.cs
+//
+// Description:
+// Parses a read-only live-audit router list CSV. Credentials are never
+// accepted from CSV. The source file is never modified.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -12,18 +21,36 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 internal static class LiveAuditRouterCsvParser
 {
+    /// <summary>
+    /// Parsed live-audit CSV rows with validity and duplicate accounting.
+    /// </summary>
     public sealed class ParseResult
     {
+        /// <summary>
+        /// All parsed rows including invalid and duplicate entries.
+        /// </summary>
         public required IReadOnlyList<LiveAuditRouterInput> Rows { get; init; }
 
+        /// <summary>
+        /// Valid unique router rows eligible for collection.
+        /// </summary>
         public IReadOnlyList<LiveAuditRouterInput> ValidUnique =>
             Rows.Where(static r => r.IsValid && !r.IsDuplicate).ToList();
 
+        /// <summary>
+        /// Count of duplicate IP rows.
+        /// </summary>
         public int DuplicateCount => Rows.Count(static r => r.IsDuplicate);
 
+        /// <summary>
+        /// Count of invalid rows.
+        /// </summary>
         public int InvalidCount => Rows.Count(static r => !r.IsValid);
     }
 
+    /// <summary>
+    /// Parses a live-audit router CSV from disk without modifying the source file.
+    /// </summary>
     public static ParseResult ParseFile(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -32,6 +59,9 @@ internal static class LiveAuditRouterCsvParser
         return Parse(reader);
     }
 
+    /// <summary>
+    /// Parses a live-audit router CSV from a text reader.
+    /// </summary>
     public static ParseResult Parse(TextReader reader)
     {
         ArgumentNullException.ThrowIfNull(reader);
@@ -126,6 +156,11 @@ internal static class LiveAuditRouterCsvParser
         return new ParseResult { Rows = rows };
     }
 
+    /// <summary>
+    /// Trims a value, returning null for null or blank input.
+    /// </summary>
+    /// <param name="value">Text to normalise.</param>
+    /// <returns>The trimmed text, or null.</returns>
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

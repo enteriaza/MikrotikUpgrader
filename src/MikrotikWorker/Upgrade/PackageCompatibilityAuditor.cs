@@ -1,12 +1,31 @@
+// -----------------------------------------------------------------------------
+// File: PackageCompatibilityAuditor.cs
+//
+// Description:
+// Evaluates whether installed packages can be resolved to catalogue .npk files
+// for v6 stepping and RouterOS 7 targets, including identity classification
+// for reporting.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Assessment;
 using MikrotikWorker.MikroTik;
 
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// Evaluates catalogue compatibility of installed package inventories for upgrade stages.
+/// </summary>
 internal interface IPackageCompatibilityAuditor
 {
+    /// <summary>
+    /// Assesses catalogue compatibility for one device across v6 stepping and RouterOS 7 stages.
+    /// </summary>
     PackageCompatibilityDeviceReport AssessDevice(PackageCompatibilityAuditDevice device);
 
+    /// <summary>
+    /// Assesses each device in <paramref name="devices"/> and returns one report per device.
+    /// </summary>
     IReadOnlyList<PackageCompatibilityDeviceReport> AssessDevices(
         IEnumerable<PackageCompatibilityAuditDevice> devices);
 }
@@ -21,10 +40,12 @@ internal sealed class PackageCompatibilityAuditor(
     IFirmwarePackageCatalog packageCatalog,
     IRouterOsV7TargetProvider v7TargetProvider) : IPackageCompatibilityAuditor
 {
+    /// <inheritdoc />
     public IReadOnlyList<PackageCompatibilityDeviceReport> AssessDevices(
         IEnumerable<PackageCompatibilityAuditDevice> devices) =>
         devices.Select(AssessDevice).ToList();
 
+    /// <inheritdoc />
     public PackageCompatibilityDeviceReport AssessDevice(PackageCompatibilityAuditDevice device)
     {
         ArgumentNullException.ThrowIfNull(device);
@@ -43,6 +64,12 @@ internal sealed class PackageCompatibilityAuditor(
         };
     }
 
+    /// <summary>
+    /// Assesses the v6 stepping stage. It is not applicable for non-v6 devices or devices already at or beyond the stepping version, and an unparseable version is an invalid inventory.
+    /// </summary>
+    /// <param name="device">Device inventory.</param>
+    /// <param name="classification">Identity classification of the device.</param>
+    /// <returns>The stage result.</returns>
     private PackageCompatibilityStageResult AssessV6Stepping(
         PackageCompatibilityAuditDevice device,
         DeviceIdentityClassification classification)
@@ -87,6 +114,12 @@ internal sealed class PackageCompatibilityAuditor(
             RouterOsUpgradeVersions.V6Stepping);
     }
 
+    /// <summary>
+    /// Assesses the RouterOS 7 stage. It is not applicable when identity policy excludes the device or the device is already at or beyond the target, and it reports an unavailable target when none is validated.
+    /// </summary>
+    /// <param name="device">Device inventory.</param>
+    /// <param name="classification">Identity classification of the device.</param>
+    /// <returns>The stage result.</returns>
     private PackageCompatibilityStageResult AssessRouterOs7(
         PackageCompatibilityAuditDevice device,
         DeviceIdentityClassification classification)
@@ -145,6 +178,14 @@ internal sealed class PackageCompatibilityAuditor(
             snapshot.Version);
     }
 
+    /// <summary>
+    /// Resolves the installed packages against the catalogue for a target version and reports the outcome.
+    /// </summary>
+    /// <param name="device">Device inventory.</param>
+    /// <param name="classification">Identity classification of the device.</param>
+    /// <param name="stage">Stage being assessed.</param>
+    /// <param name="target">Target RouterOS version.</param>
+    /// <returns>A compatible result listing the resolved package files, or the mapped failure.</returns>
     private PackageCompatibilityStageResult ResolveStage(
         PackageCompatibilityAuditDevice device,
         DeviceIdentityClassification classification,
@@ -206,6 +247,16 @@ internal sealed class PackageCompatibilityAuditor(
             resolution);
     }
 
+    /// <summary>
+    /// Detects inventory and catalogue problems that give a clearer diagnosis than the resolver: missing architecture, empty inventory, main package present only for other versions, or only for other architectures.
+    /// </summary>
+    /// <param name="device">Device inventory.</param>
+    /// <param name="classification">Identity classification of the device.</param>
+    /// <param name="stage">Stage being assessed.</param>
+    /// <param name="target">Target RouterOS version.</param>
+    /// <param name="inventory">Summary of the installed packages.</param>
+    /// <param name="independentNames">Names of independently installed packages.</param>
+    /// <returns>A failure result, or null when the resolver should run.</returns>
     private PackageCompatibilityStageResult? PrecheckArchitectureAndVersion(
         PackageCompatibilityAuditDevice device,
         DeviceIdentityClassification classification,
@@ -307,6 +358,17 @@ internal sealed class PackageCompatibilityAuditor(
         return null;
     }
 
+    /// <summary>
+    /// Maps a package resolution failure to a catalogue compatibility status and result, listing the missing package where known.
+    /// </summary>
+    /// <param name="device">Device inventory.</param>
+    /// <param name="classification">Identity classification of the device.</param>
+    /// <param name="stage">Stage being assessed.</param>
+    /// <param name="target">Target RouterOS version.</param>
+    /// <param name="inventory">Summary of the installed packages.</param>
+    /// <param name="independentNames">Names of independently installed packages.</param>
+    /// <param name="resolution">Failed resolution outcome.</param>
+    /// <returns>The failure result.</returns>
     private static PackageCompatibilityStageResult MapFailure(
         PackageCompatibilityAuditDevice device,
         DeviceIdentityClassification classification,
@@ -374,10 +436,27 @@ internal sealed class PackageCompatibilityAuditor(
         };
     }
 
+    /// <summary>
+    /// Determines whether the package that failed to resolve is the main RouterOS package.
+    /// </summary>
+    /// <param name="installedName">Name of the package that failed, if known.</param>
+    /// <returns><see langword="true"/> when it is a main RouterOS package.</returns>
     private static bool IsMainFailure(string? installedName) =>
         !string.IsNullOrWhiteSpace(installedName)
         && UpgradePackageResolver.IsMainRouterOsPackage(installedName);
 
+    /// <summary>
+    /// Builds a stage result for a decision made without package resolution.
+    /// </summary>
+    /// <param name="device">Device inventory.</param>
+    /// <param name="classification">Identity classification of the device.</param>
+    /// <param name="stage">Stage being assessed.</param>
+    /// <param name="targetVersion">Target version text, or null when none applies.</param>
+    /// <param name="status">Outcome of the stage.</param>
+    /// <param name="explanation">Human-readable reason.</param>
+    /// <param name="independentNames">Independent package names; derived from the device when null.</param>
+    /// <param name="bundledCount">Bundled component count; derived from the device when null.</param>
+    /// <returns>The stage result.</returns>
     private static PackageCompatibilityStageResult BaseResult(
         PackageCompatibilityAuditDevice device,
         DeviceIdentityClassification classification,

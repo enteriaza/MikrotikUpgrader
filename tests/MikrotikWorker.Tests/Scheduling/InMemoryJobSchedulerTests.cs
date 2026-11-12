@@ -1,11 +1,29 @@
+// -----------------------------------------------------------------------------
+// File: InMemoryJobSchedulerTests.cs
+//
+// Description:
+// Core InMemoryJobScheduler behaviours: eligibility vs time, future jobs not
+// blocking immediate ones, inclusive start/exclusive stop, expiry, capacity
+// backpressure, abort releasing capacity, and shutdown discarding pending work.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
 
 namespace MikrotikWorker.Tests.Scheduling;
+
+/// <summary>
+/// Unit tests for time-aware scheduling, capacity, abort, and shutdown of InMemoryJobScheduler.
+/// </summary>
 public sealed class InMemoryJobSchedulerTests
 {
+    /// <summary>
+    /// Job whose window already contains now; Accepted path set.
+    /// Expects pending drains to 0 and the import archives to Completed.
+    /// </summary>
     [Fact]
     public async Task ImmediateJob_BecomesObservedEligible()
     {
@@ -25,6 +43,10 @@ public sealed class InMemoryJobSchedulerTests
         await harness.WaitForCompletedAsync();
     }
 
+    /// <summary>
+    /// Job starting one hour ahead remains pending until clock advances into the window.
+    /// Expects dispatch/completion only after Advance, not before.
+    /// </summary>
     [Fact]
     public async Task FutureJob_BecomesEligible_AfterTimeAdvance()
     {
@@ -45,6 +67,10 @@ public sealed class InMemoryJobSchedulerTests
         await harness.WaitForCompletedAsync();
     }
 
+    /// <summary>
+    /// Same import: future job enqueued before an already-due job.
+    /// Expects NOW dispatched while FUTURE stays queued — no head-of-line blocking.
+    /// </summary>
     [Fact]
     public async Task FutureJob_DoesNotBlock_ImmediateJob()
     {
@@ -83,6 +109,10 @@ public sealed class InMemoryJobSchedulerTests
         Assert.Equal(1, harness.Scheduler.QueuedCount);
     }
 
+    /// <summary>
+    /// Three jobs sharing a future start; clock advanced into window.
+    /// Expects three dispatch log lines and pending cleared.
+    /// </summary>
     [Fact]
     public async Task MultipleJobs_BecomeEligible_Simultaneously()
     {
@@ -109,6 +139,10 @@ public sealed class InMemoryJobSchedulerTests
         Assert.Equal(3, logs.Messages.Count(static m => m.Contains("dispatched to execution queue", StringComparison.Ordinal)));
     }
 
+    /// <summary>
+    /// One job with start==now (due) and one with stop==now (expired).
+    /// Expects inclusive start dispatches; exclusive stop expires without connect/dispatch.
+    /// </summary>
     [Fact]
     public async Task DateStartUtc_IsInclusive_DateStopUtc_IsExclusive()
     {
@@ -136,6 +170,10 @@ public sealed class InMemoryJobSchedulerTests
             static m => m.Contains("EXCLUSIVE_STOP", StringComparison.Ordinal) && m.Contains("Job expired", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Future window jumped entirely past by clock advance.
+    /// Expects Job expired log, pending 0, and no dispatch.
+    /// </summary>
     [Fact]
     public async Task JobExpiringBeforeStart_IsExpired()
     {
@@ -168,6 +206,10 @@ public sealed class InMemoryJobSchedulerTests
             static m => m.Contains("dispatched to execution queue", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// MaximumPendingJobs=1 with a future job holding the slot.
+    /// Expects second ScheduleAsync cancels on short token until the first completes.
+    /// </summary>
     [Fact]
     public async Task CapacityBackpressure_WaitsUntilTerminalReleasesSlot()
     {
@@ -192,6 +234,10 @@ public sealed class InMemoryJobSchedulerTests
         await harness.WaitForPendingAsync(0);
     }
 
+    /// <summary>
+    /// Abort of a two-job future import.
+    /// Expects pending cleared, capacity reusable by another import, and no Completed files.
+    /// </summary>
     [Fact]
     public async Task AbortImport_ReleasesCapacity_AndDoesNotCompleteBatch()
     {
@@ -219,6 +265,10 @@ public sealed class InMemoryJobSchedulerTests
         Assert.False(Directory.EnumerateFiles(harness.CompletedDir).Any());
     }
 
+    /// <summary>
+    /// Dispose while a future job is pending.
+    /// Expects pending count drops to 0 without completing the batch.
+    /// </summary>
     [Fact]
     public async Task Shutdown_DiscardsPendingJobs()
     {
@@ -236,6 +286,10 @@ public sealed class InMemoryJobSchedulerTests
         Assert.Equal(0, harness.Scheduler.PendingCount);
     }
 
+    /// <summary>
+    /// Temp ScheduledJobs tree, placeholder Accepted CSV, optional recording logger,
+    /// and SchedulerExecutionTestHost run/execution loops.
+    /// </summary>
     private static SchedulerHarness CreateHarness(
         FakeTimeProvider time,
         int maximumPendingJobs = 100,
@@ -274,6 +328,9 @@ public sealed class InMemoryJobSchedulerTests
         return new SchedulerHarness(scheduler, time, paths, acceptedCsv, root, executionTask, executionCts);
     }
 
+    /// <summary>
+    /// Builds a MikrotikScheduledJob with UTC start/stop and fixed IP.
+    /// </summary>
     private static MikrotikScheduledJob CreateJob(
         Guid importId,
         int row,
@@ -291,6 +348,9 @@ public sealed class InMemoryJobSchedulerTests
             DateStopUtc = DateTime.SpecifyKind(stop, DateTimeKind.Utc),
         };
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -307,13 +367,42 @@ public sealed class InMemoryJobSchedulerTests
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
+    /// <summary>
+    /// Owns scheduler RunAsync + execution worker CTS/tasks and temp root cleanup.
+    /// WaitForPendingAsync / WaitForCompletedAsync poll PendingCount and Completed dir.
+    /// </summary>
     private sealed class SchedulerHarness : IAsyncDisposable
     {
+        /// <summary>
+        /// Cancels the scheduler run loop during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _cts = new();
+
+        /// <summary>
+        /// Cancels the router execution workers during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _executionCts;
+
+        /// <summary>
+        /// Task running the scheduler loop.
+        /// </summary>
         private readonly Task _runTask;
+
+        /// <summary>
+        /// Task running the router execution workers.
+        /// </summary>
         private readonly Task _executionTask;
 
+        /// <summary>
+        /// Initializes the harness and starts the scheduler run loop.
+        /// </summary>
+        /// <param name="scheduler">Scheduler under test.</param>
+        /// <param name="time">Fake clock driving the scheduler.</param>
+        /// <param name="paths">Resolved ScheduledJobs folder paths.</param>
+        /// <param name="acceptedCsv">Path of the placeholder Accepted CSV.</param>
+        /// <param name="root">Temporary ScheduledJobs root to delete on disposal.</param>
+        /// <param name="executionTask">Task running the execution workers.</param>
+        /// <param name="executionCts">Cancellation source that stops the execution workers.</param>
         public SchedulerHarness(
             InMemoryJobScheduler scheduler,
             FakeTimeProvider time,
@@ -334,23 +423,48 @@ public sealed class InMemoryJobSchedulerTests
             _runTask = scheduler.RunAsync(_cts.Token);
         }
 
+        /// <summary>
+        /// Scheduler under test, created over the temporary ScheduledJobs tree this harness builds.
+        /// </summary>
         public InMemoryJobScheduler Scheduler { get; }
 
+        /// <summary>
+        /// Fake clock that drives the scheduler's job eligibility and wake-ups; tests advance it explicitly.
+        /// </summary>
         public FakeTimeProvider Time { get; }
 
+        /// <summary>
+        /// Resolved ScheduledJobs folder paths for the temporary tree this harness creates.
+        /// </summary>
         public ScheduledJobsPaths Paths { get; }
 
+        /// <summary>
+        /// Path of the placeholder Accepted CSV that the scheduled jobs are registered against.
+        /// </summary>
         public string AcceptedCsv { get; }
 
+        /// <summary>
+        /// Completed folder inside the temporary ScheduledJobs tree; finished CSVs are archived here.
+        /// </summary>
         public string CompletedDir { get; }
 
+        /// <summary>
+        /// Temporary ScheduledJobs root directory that holds every folder this harness creates; it is deleted on
+        /// disposal.
+        /// </summary>
         public string Root { get; }
 
+        /// <summary>
+        /// Waits until PendingCount equals the expected value.
+        /// </summary>
         public async Task WaitForPendingAsync(int expected)
         {
             await WaitForAsync(() => Scheduler.PendingCount == expected, TimeSpan.FromSeconds(5));
         }
 
+        /// <summary>
+        /// Waits until the Accepted CSV has been archived to Completed.
+        /// </summary>
         public async Task WaitForCompletedAsync()
         {
             await WaitForAsync(
@@ -358,6 +472,9 @@ public sealed class InMemoryJobSchedulerTests
                 TimeSpan.FromSeconds(5));
         }
 
+        /// <summary>
+        /// Stops background loops and deletes temporary directories.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             _cts.Cancel();

@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: AutomaticUpgradePathTests.cs
+//
+// Description:
+// Unit tests for the automatic multi-stage upgrade path decisions and
+// outcomes.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -18,6 +27,10 @@ namespace MikrotikWorker.Tests.Upgrade;
 /// </summary>
 public sealed class AutomaticUpgradePathTests
 {
+    /// <summary>
+    /// Component packages bundled into <c>routeros-mipsbe</c> on the lab RouterOS 6 router, used to build a realistic
+    /// inventory.
+    /// </summary>
     private static readonly string[] LabBundledComponents =
     [
         "system",
@@ -32,6 +45,16 @@ public sealed class AutomaticUpgradePathTests
         "ipv6",
     ];
 
+    /// <summary>
+    /// Scenario: A mipsbe router on RouterOS 6.49.19, below the 6.49.23 stepping release, runs the full executor with
+    /// scripted operations whose reboots report 6.49.23 and then 7.23.8. The identity varies across the cases: the
+    /// generic name Mikrotik, a blank name, and AP, DCL, ACE and BR style names.
+    /// Expected: The upgrade succeeds with the RouterBOARD firmware stage completed and 7.23.8 as the post-upgrade
+    /// version. Three backups and two reboots occur, the first resolved target is the v6 stepping version and the
+    /// second is a RouterOS 7 target, the 7.23.8 package is fetched, and FleetUpgradeInstall.rsc is not. The identity
+    /// classifies to the expected device type.
+    /// Invariant: Stepping and then RouterOS 7 is chosen regardless of device identity.
+    /// </summary>
     [Theory]
     [InlineData("Mikrotik", DeviceType.Unknown)]
     [InlineData(" ", DeviceType.Unknown)]
@@ -89,6 +112,16 @@ public sealed class AutomaticUpgradePathTests
         Assert.Equal(expectedType, DeviceIdentityClassifier.Classify(identity).DeviceType);
     }
 
+    /// <summary>
+    /// Scenario: Synthetic lab fixture only; not a live router observation or live upgrade result. A router named
+    /// Mikrotik at 198.18.240.11 on RouterOS 6.49.19 (mipsbe) with lab-bundled inventory runs the executor, with
+    /// reboots reporting 6.49.23 and then 7.23.8.
+    /// Expected: The upgrade succeeds with the RouterBOARD firmware stage completed and 7.23.8 mipsbe after the
+    /// upgrade. Three backups and two reboots occur, routeros-mipsbe-6.49.23.npk is the first file fetched, the
+    /// 7.23.8 package is fetched later, and the resolved targets run from the v6 stepping version to a RouterOS 7
+    /// target.
+    /// Invariant: Only fixture data is exercised; the result says nothing about any real router.
+    /// </summary>
     [Fact]
     public async Task SyntheticLabFixture_198_18_240_11_StepsThenUpgradesToRouterOs7()
     {
@@ -159,6 +192,14 @@ public sealed class AutomaticUpgradePathTests
         Assert.True(packages.ResolvedTargets[^1].IsV7OrLater);
     }
 
+    /// <summary>
+    /// Scenario: A router named Mikrotik already on 6.49.23 or 6.49.24 (at or above the stepping release) runs the
+    /// executor, with a single reboot reporting 7.23.8.
+    /// Expected: The upgrade succeeds with the RouterBOARD firmware stage completed and 7.23.8 as the post-upgrade
+    /// version. One reboot and one RouterOS 7 target capture occur, exactly one package is resolved and it is a
+    /// RouterOS 7 package, and no 6.49.23 file is fetched.
+    /// Invariant: Devices at or above the stepping release skip v6 stepping and go straight to RouterOS 7.
+    /// </summary>
     [Theory]
     [InlineData("6.49.23")]
     [InlineData("6.49.24")]
@@ -208,6 +249,11 @@ public sealed class AutomaticUpgradePathTests
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A router on 7.22.0 that reports 7.23.8 after its reboot gives <c>UpgradeSucceeded</c> with
+    /// <c>PostUpgradeVersion</c> 7.23.8 after exactly one reboot. Every package the resolver was asked for is a
+    /// RouterOS 7 target, so no v6 stepping stage is used.
+    /// </summary>
     [Fact]
     public async Task RouterOs7OlderThanTarget_UpgradesDirectlyToTarget()
     {
@@ -244,6 +290,11 @@ public sealed class AutomaticUpgradePathTests
         Assert.All(packages.ResolvedTargets, static t => Assert.True(t.IsV7OrLater));
     }
 
+    /// <summary>
+    /// A router already on 7.23.8 gives <c>SkippedAlreadyAtTarget</c>, with <c>CompletedStage</c>
+    /// RouterboardFirmware and <c>PostUpgradeVersion</c> 7.23.8. <c>RebootInitiated</c> is false, there are no
+    /// reboots or fetches and the package resolver is never called. The job outcome maps to <c>AlreadyUpToDate</c>.
+    /// </summary>
     [Fact]
     public async Task RouterOs7AtTarget_ReportsAlreadyAtTarget_WithoutPackageStageOrReboot()
     {
@@ -277,6 +328,12 @@ public sealed class AutomaticUpgradePathTests
             RouterJobExecutor.MapUpgradeOutcome(result.Outcome));
     }
 
+    /// <summary>
+    /// With upgrades administratively disabled the result is <c>SkippedUpgradeDisabled</c>, with
+    /// <c>CompletedStage</c> None and a detail containing 'administratively disabled'. No backup, reboot, scheduler
+    /// lookup, fetch, package resolution or v7 target capture happens. The job maps to
+    /// <c>ScheduledJobTerminalState.Failed</c> and is not reported as a success.
+    /// </summary>
     [Fact]
     public async Task UpgradeDisabled_DoesNotMutate_AndIsNeverReportedAsSuccess()
     {
@@ -320,6 +377,11 @@ public sealed class AutomaticUpgradePathTests
         Assert.False(success);
     }
 
+    /// <summary>
+    /// A RouterOS 5.26 router gives <c>PolicyBlocked</c> with a detail containing 'Unsupported RouterOS major
+    /// version'. There is no backup, reboot or fetch, and <c>MapUpgradeOutcome</c> maps the outcome to
+    /// <c>ScheduledJobTerminalState.Blocked</c>.
+    /// </summary>
     [Fact]
     public async Task UnsupportedRouterOsMajor_IsBlocked_WithoutMutation()
     {
@@ -346,6 +408,11 @@ public sealed class AutomaticUpgradePathTests
         Assert.Equal(ScheduledJobTerminalState.Blocked, RouterJobExecutor.MapUpgradeOutcome(result.Outcome).Terminal);
     }
 
+    /// <summary>
+    /// A 6.49.19 router that comes back from the stepping reboot on 6.48.1 gives <c>UpgradeVersionMismatch</c> with
+    /// <c>CompletedStage</c> None. Exactly one backup and one reboot occurred, the v7 target was never captured, no
+    /// resolved package is a RouterOS 7 one, and no v7 mutation happened. The job maps to <c>Failed</c>.
+    /// </summary>
     [Fact]
     public async Task SteppingVerificationFailure_DoesNotContinueToRouterOs7_OrClaimSuccess()
     {
@@ -392,6 +459,10 @@ public sealed class AutomaticUpgradePathTests
         Assert.Equal(ScheduledJobTerminalState.Failed, RouterJobExecutor.MapUpgradeOutcome(result.Outcome).Terminal);
     }
 
+    /// <summary>
+    /// When every reconnect attempt after the first reboot throws, the result is <c>UpgradeTimedOut</c> with
+    /// <c>CompletedStage</c> None, and no v7 mutation follows.
+    /// </summary>
     [Fact]
     public async Task SteppingRebootTimeout_PreservesTimeoutOutcome_AndDoesNotContinue()
     {
@@ -436,6 +507,10 @@ public sealed class AutomaticUpgradePathTests
         AssertNoV7Mutation(ops);
     }
 
+    /// <summary>
+    /// Cancelling once the post-reboot read has started gives <c>UpgradeInterrupted</c> with <c>CompletedStage</c>
+    /// None and no v7 mutation. <c>MapUpgradeOutcome</c> maps it to <c>ScheduledJobTerminalState.Cancelled</c>.
+    /// </summary>
     [Fact]
     public async Task Cancellation_DuringSteppingVerification_PreservesInterruptedOutcome()
     {
@@ -485,6 +560,12 @@ public sealed class AutomaticUpgradePathTests
         Assert.Equal(ScheduledJobTerminalState.Cancelled, RouterJobExecutor.MapUpgradeOutcome(result.Outcome).Terminal);
     }
 
+    /// <summary>
+    /// When the legacy FleetUpgrade scheduler cleanup fails, the result is
+    /// <c>LegacyFirmwareAutomationCleanupFailed</c> with <c>CompletedStage</c> None. The cleanup did query
+    /// schedulers (<c>SchedulerCountCalls</c> above 0), but no reboot, backup, fetch or package resolution
+    /// followed.
+    /// </summary>
     [Fact]
     public async Task LegacyCleanupFailure_SkipsFirmwareMutation()
     {
@@ -527,6 +608,12 @@ public sealed class AutomaticUpgradePathTests
         Assert.True(ops.SchedulerCountCalls > 0);
     }
 
+    /// <summary>
+    /// A CSV with no execution-mode column must still be accepted by the importer, and the resulting 6.49.19 job
+    /// runs the automatic path through 6.49.23 and then 7.23.8. The outcome is <c>UpgradeSucceeded</c> with
+    /// <c>CompletedStage</c> RouterboardFirmware, the v7 target is captured once, and a RouterOS 7 package was
+    /// resolved.
+    /// </summary>
     [Fact]
     public async Task CsvWithoutExecutionMode_ImportsAndRunsAutomaticPath()
     {
@@ -617,6 +704,10 @@ public sealed class AutomaticUpgradePathTests
         }
     }
 
+    /// <summary>
+    /// Asserts that no RouterOS 7 package was fetched and at most one reboot happened, i.e. the router was never
+    /// moved to RouterOS 7.
+    /// </summary>
     private static void AssertNoV7Mutation(StageTrackingOps ops)
     {
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
@@ -624,11 +715,18 @@ public sealed class AutomaticUpgradePathTests
         Assert.True(ops.RebootCount <= 1);
     }
 
+    /// <summary>
+    /// Asserts that no <c>/system/routerboard/upgrade</c> command was issued on the recorded connection.
+    /// </summary>
     private static void AssertNoRouterboardUpgrade(CommandRecordingConnection recording) =>
         Assert.DoesNotContain(
             recording.Commands,
             static c => c.Contains("/system/routerboard/upgrade", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Creates a counting package resolver over a temporary firmware directory holding stub RouterOS 6.49.23 and
+    /// 7.23.8 mipsbe packages.
+    /// </summary>
     private static CountingPackageResolver CreateCountingResolver()
     {
         string root = Directory.CreateTempSubdirectory("v6only-fw-").FullName;
@@ -637,6 +735,11 @@ public sealed class AutomaticUpgradePathTests
         return new CountingPackageResolver(root);
     }
 
+    /// <summary>
+    /// Builds a <see cref="RouterOsV6UpgradeExecutor"/> wired to the supplied fakes with short test timeouts.
+    /// Optional resolver, RouterOS 7 target provider, clock and enabled flag can be overridden; the verify timeout is
+    /// capped at the reboot timeout.
+    /// </summary>
     private static RouterOsV6UpgradeExecutor CreateExecutor(
         StageTrackingOps ops,
         IDeviceBackupService backup,
@@ -702,6 +805,7 @@ public sealed class AutomaticUpgradePathTests
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
 
+    /// <summary>Builds a minimal scheduled job (router <c>R1</c>, 10.0.0.50) for executor calls.</summary>
     private static MikrotikScheduledJob CreateJob() =>
         new()
         {
@@ -714,6 +818,9 @@ public sealed class AutomaticUpgradePathTests
             DateStopUtc = DateTime.UtcNow.AddHours(1),
         };
 
+    /// <summary>
+    /// Builds <see cref="MikrotikDeviceInfo"/> (mipsbe, hEX PoE) with the given identity and version.
+    /// </summary>
     private static MikrotikDeviceInfo CreateDevice(string identity, string version) =>
         new()
         {
@@ -723,6 +830,9 @@ public sealed class AutomaticUpgradePathTests
             BoardName = "hEX PoE",
         };
 
+    /// <summary>
+    /// Builds a compatible, path-eligible assessment targeting RouterOS 6.49.23 with the given overall status.
+    /// </summary>
     private static DeviceCompatibilityAssessment CreateAssessment(
         DeviceAssessmentStatus status = DeviceAssessmentStatus.ReadyForUpgrade) =>
         new()
@@ -737,6 +847,9 @@ public sealed class AutomaticUpgradePathTests
             AssessedAtUtc = DateTimeOffset.UtcNow,
         };
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -753,10 +866,13 @@ public sealed class AutomaticUpgradePathTests
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
+    /// <summary>Backup fake that always succeeds and counts how many backups were requested.</summary>
     private sealed class CountingBackup : IDeviceBackupService
     {
+        /// <summary>Number of pre-upgrade backups requested.</summary>
         public int CallCount { get; private set; }
 
+        /// <summary>Counts the call and returns success with remote cleanup completed.</summary>
         public Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
             ITikConnection connection,
             MikrotikScheduledJob job,
@@ -774,16 +890,26 @@ public sealed class AutomaticUpgradePathTests
         }
     }
 
+    /// <summary>
+    /// Package resolver decorator that records each requested target version while delegating to the production
+    /// resolver over a temporary firmware directory.
+    /// </summary>
     private sealed class CountingPackageResolver(string firmwareRoot) : IUpgradePackageResolver
     {
+        /// <summary>Production resolver over the temporary firmware directory.</summary>
         private readonly UpgradePackageResolver _inner = new(
             new StaticFirmwarePackageCatalog(firmwareRoot),
             Options.Create(new FirmwareFilesOptions { Path = firmwareRoot }));
 
+        /// <summary>Temporary firmware directory the resolver reads from.</summary>
         public string FirmwareRoot { get; } = firmwareRoot;
 
+        /// <summary>
+        /// Target versions passed to <see cref="Resolve"/>, in call order (v6 stepping first, then RouterOS 7).
+        /// </summary>
         public List<RouterOsVersion> ResolvedTargets { get; } = [];
 
+        /// <summary>Records the target version and delegates to the production resolver.</summary>
         public UpgradePackageResolution Resolve(
             string? deviceArchitecture,
             IReadOnlyList<InstalledPackageInfo> installedPackages,
@@ -794,16 +920,22 @@ public sealed class AutomaticUpgradePathTests
         }
     }
 
+    /// <summary>RouterOS 7 target provider decorator that counts how often a snapshot is captured.</summary>
     private sealed class CountingV7TargetProvider(string? versionText) : IRouterOsV7TargetProvider
     {
+        /// <summary>Fixed provider supplying the configured target version.</summary>
         private readonly FixedRouterOsV7TargetProvider _inner = new(versionText);
 
+        /// <summary>Number of times <see cref="CaptureSnapshot"/> was called.</summary>
         public int CaptureCount { get; private set; }
 
+        /// <summary>Source path reported by the inner provider.</summary>
         public string VersionFilePath => _inner.VersionFilePath;
 
+        /// <summary>Returns the inner snapshot without counting it.</summary>
         public RouterOsV7TargetSnapshot? TryGetCurrent() => _inner.TryGetCurrent();
 
+        /// <summary>Counts the capture and returns the inner snapshot.</summary>
         public RouterOsV7TargetSnapshot? CaptureSnapshot()
         {
             CaptureCount++;
@@ -811,10 +943,15 @@ public sealed class AutomaticUpgradePathTests
         }
     }
 
+    /// <summary>
+    /// Connection factory that counts attempts and always fails, simulating a router that stays unreachable.
+    /// </summary>
     private sealed class CountingThrowFactory : IMikrotikConnectionFactory
     {
+        /// <summary>Number of reconnect attempts made.</summary>
         public int Attempts { get; private set; }
 
+        /// <summary>Counts the attempt and throws <see cref="IOException"/> (<c>still down</c>).</summary>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -824,58 +961,126 @@ public sealed class AutomaticUpgradePathTests
         }
     }
 
+    /// <summary>
+    /// Stateful <see cref="IMikrotikRouterOperations"/> fake that models a router across upgrade stages: the reported
+    /// version changes per reboot, and fetches, reboots and cleanup are recorded.
+    /// </summary>
     private sealed class StageTrackingOps(string identity) : IMikrotikRouterOperations
     {
+        /// <summary>
+        /// 1-based index of the latest reboot into <see cref="VersionsAfterReboot"/>; zero before any reboot.
+        /// </summary>
         private int _rebootIndex;
 
+        /// <summary>System identity reported by the fake router.</summary>
         public string Identity { get; } = identity;
 
+        /// <summary>
+        /// RouterOS version reported before the first reboot (default 6.49.19, older than the 6.49.23 stepping
+        /// target).
+        /// </summary>
         public string InitialVersion { get; init; } = "6.49.19";
 
+        /// <summary>
+        /// RouterOS versions reported after each successive reboot; the last entry repeats once the list is
+        /// exhausted.
+        /// </summary>
         public List<string> VersionsAfterReboot { get; init; } = [];
 
+        /// <summary>
+        /// When true, RouterOS 6 inventories also list the lab bundled components (system, wireless, hotspot, ...) as
+        /// members of the <c>routeros-mipsbe</c> bundle.
+        /// </summary>
         public bool IncludeLabBundledInventory { get; init; }
 
+        /// <summary>
+        /// When true, the first post-reboot device-info read blocks until cancelled, simulating a router that never
+        /// answers.
+        /// </summary>
         public bool HangPostRebootReadUntilCancelled { get; init; }
 
+        /// <summary>
+        /// Completed when a post-reboot device-info read begins, so tests can cancel at a deterministic point.
+        /// </summary>
         public TaskCompletionSource PostRebootReadStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>RouterBOARD firmware version currently running on the fake router.</summary>
         public string RouterboardCurrentFirmware { get; init; } = "7.23.8";
 
+        /// <summary>
+        /// RouterBOARD firmware version available for upgrade; equal to the current firmware means no RouterBOARD
+        /// upgrade is needed.
+        /// </summary>
         public string RouterboardUpgradeFirmware { get; init; } = "7.23.8";
 
+        /// <summary>Names of legacy fleet-upgrade scripts currently present on the fake router.</summary>
         public List<string> PresentScripts { get; init; } = [];
 
+        /// <summary>Names of legacy fleet-upgrade schedulers currently present on the fake router.</summary>
         public List<string> PresentSchedulers { get; init; } = [];
 
+        /// <summary>
+        /// Ordered log of removals (<c>script:name</c> / <c>scheduler:name</c>) used to assert cleanup order.
+        /// </summary>
         public List<string> RemovalOrder { get; } = [];
 
+        /// <summary>
+        /// When set, <see cref="RemoveSchedulersByNameAsync"/> throws this exception instead of removing the
+        /// scheduler.
+        /// </summary>
         public Exception? ThrowOnSchedulerRemove { get; init; }
 
+        /// <summary>
+        /// When set, <see cref="RemoveSystemScriptsByNameAsync"/> throws this exception instead of removing the
+        /// script.
+        /// </summary>
         public Exception? ThrowOnScriptRemove { get; init; }
 
+        /// <summary>Number of reboots requested so far.</summary>
         public int RebootCount { get; private set; }
 
+        /// <summary>
+        /// Number of scheduler inspections performed; zero proves cleanup never looked for schedulers.
+        /// </summary>
         public int SchedulerCountCalls { get; private set; }
 
+        /// <summary>Number of script inspections performed; zero proves cleanup never looked for scripts.</summary>
         public int ScriptCountCalls { get; private set; }
 
+        /// <summary>Total scheduler and script inspections; zero proves legacy cleanup was never attempted.</summary>
         public int CleanupInspectionCount => SchedulerCountCalls + ScriptCountCalls;
 
+        /// <summary>
+        /// Largest number of bundled components returned by any package listing; zero when none were listed.
+        /// </summary>
         public int MaxBundledComponentCount { get; private set; }
 
+        /// <summary>
+        /// Per-file sizes (case-insensitive) reported by <see cref="FindFileAsync"/>, letting tests simulate
+        /// truncated or mismatched uploads.
+        /// </summary>
         public Dictionary<string, long> FileSizes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>Destination file names passed to <see cref="FetchUrlToFileAsync"/>, in call order.</summary>
         public List<string> FetchedFiles { get; } = [];
 
+        /// <summary>Source URLs passed to <see cref="FetchUrlToFileAsync"/>, in call order.</summary>
         public List<string> FetchedUrls { get; } = [];
 
+        /// <summary>
+        /// RouterOS version reported right now: <see cref="InitialVersion"/> before any reboot, then the entry of
+        /// <see cref="VersionsAfterReboot"/> selected by the latest reboot.
+        /// </summary>
         private string CurrentVersion =>
             RebootCount == 0
                 ? InitialVersion
                 : VersionsAfterReboot[Math.Min(_rebootIndex - 1, VersionsAfterReboot.Count - 1)];
 
+        /// <summary>
+        /// Returns device info at the current stage version. After a reboot, blocks until cancelled when <see
+        /// cref="HangPostRebootReadUntilCancelled"/> is set (signalling <see cref="PostRebootReadStarted"/> first).
+        /// </summary>
         public async Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
             string host,
@@ -898,6 +1103,11 @@ public sealed class AutomaticUpgradePathTests
             };
         }
 
+        /// <summary>
+        /// Returns the main package (<c>routeros-mipsbe</c> on RouterOS 6, <c>routeros</c> on 7+). With <see
+        /// cref="IncludeLabBundledInventory"/> on RouterOS 6 it also lists the lab bundled components and tracks the
+        /// largest bundle seen.
+        /// </summary>
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default)
@@ -927,12 +1137,14 @@ public sealed class AutomaticUpgradePathTests
             return Task.FromResult<IReadOnlyList<InstalledPackageInfo>>(packages);
         }
 
+        /// <summary>No-op: pretends the <c>.rsc</c> configuration export was written on the router.</summary>
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>No-op: pretends the binary <c>.backup</c> system backup was saved on the router.</summary>
         public Task SaveSystemBackupAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -940,6 +1152,10 @@ public sealed class AutomaticUpgradePathTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Reports the file with the size registered in <see cref="FileSizes"/>, or a 4-byte file that matches the
+        /// stub firmware payloads.
+        /// </summary>
         public Task<RouterFileInfo?> FindFileAsync(
             ITikConnection connection,
             string fileName,
@@ -953,6 +1169,9 @@ public sealed class AutomaticUpgradePathTests
             return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, 4));
         }
 
+        /// <summary>
+        /// No-op: files are reported ready immediately, so the executor never waits on backup-file polling.
+        /// </summary>
         public Task WaitForFileAsync(
             ITikConnection connection,
             string fileName,
@@ -961,12 +1180,14 @@ public sealed class AutomaticUpgradePathTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>No-op: pretends the file was deleted from the router.</summary>
         public Task RemoveFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>Records the URL and destination file name without transferring anything.</summary>
         public Task FetchUrlToFileAsync(
             ITikConnection connection,
             string url,
@@ -979,6 +1200,7 @@ public sealed class AutomaticUpgradePathTests
             return Task.CompletedTask;
         }
 
+        /// <summary>Counts the reboot and selects the next post-reboot version.</summary>
         public Task RebootAsync(ITikConnection connection, CancellationToken cancellationToken = default)
         {
             RebootCount++;
@@ -986,6 +1208,9 @@ public sealed class AutomaticUpgradePathTests
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Counts the call and returns how many entries in <see cref="PresentScripts"/> match the name exactly.
+        /// </summary>
         public Task<int> CountSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
@@ -995,6 +1220,10 @@ public sealed class AutomaticUpgradePathTests
             return Task.FromResult(PresentScripts.Count(n => n.Equals(scriptName, StringComparison.Ordinal)));
         }
 
+        /// <summary>
+        /// Throws <see cref="ThrowOnScriptRemove"/> when configured; otherwise records <c>script:name</c> in <see
+        /// cref="RemovalOrder"/> and removes matching entries from <see cref="PresentScripts"/>.
+        /// </summary>
         public Task RemoveSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
@@ -1010,6 +1239,9 @@ public sealed class AutomaticUpgradePathTests
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Counts the call and returns how many entries in <see cref="PresentSchedulers"/> match the name exactly.
+        /// </summary>
         public Task<int> CountSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
@@ -1019,6 +1251,10 @@ public sealed class AutomaticUpgradePathTests
             return Task.FromResult(PresentSchedulers.Count(n => n.Equals(schedulerName, StringComparison.Ordinal)));
         }
 
+        /// <summary>
+        /// Throws <see cref="ThrowOnSchedulerRemove"/> when configured; otherwise records <c>scheduler:name</c> in
+        /// <see cref="RemovalOrder"/> and removes matching entries from <see cref="PresentSchedulers"/>.
+        /// </summary>
         public Task RemoveSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
@@ -1034,6 +1270,9 @@ public sealed class AutomaticUpgradePathTests
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// No-op: RouterBOARD upgrades are not modelled here; tests assert on recorded router commands instead.
+        /// </summary>
         public Task UpgradeRouterboardAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>

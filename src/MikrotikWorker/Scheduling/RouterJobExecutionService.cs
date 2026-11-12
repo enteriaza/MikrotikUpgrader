@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: RouterJobExecutionService.cs
+//
+// Description:
+// Hosted background service that runs a fixed pool of workers draining the
+// router execution queue. Each worker invokes <see cref="RouterJobExecutor"/>
+// and ensures unhandled exceptions or shutdown cancel still terminal-complete
+// the dispatched job so import Remaining cannot leak.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 
@@ -6,6 +17,11 @@ namespace MikrotikWorker.Scheduling;
 /// <summary>
 /// Fixed-concurrency hosted workers that execute dispatched router jobs asynchronously.
 /// </summary>
+/// <param name="queue">Bounded handoff from the scheduler.</param>
+/// <param name="executor">Per-job connect/upgrade workflow.</param>
+/// <param name="completer">Scheduler callbacks for terminal/requeue outcomes.</param>
+/// <param name="options">Supplies <see cref="ScheduledJobsOptions.MaxConcurrentRouterJobs"/>.</param>
+/// <param name="logger">Worker lifecycle and error logging.</param>
 internal sealed class RouterJobExecutionService(
     RouterJobExecutionQueue queue,
     RouterJobExecutor executor,
@@ -13,6 +29,11 @@ internal sealed class RouterJobExecutionService(
     IOptions<ScheduledJobsOptions> options,
     ILogger<RouterJobExecutionService> logger) : BackgroundService
 {
+    /// <summary>
+    /// Starts <see cref="ScheduledJobsOptions.MaxConcurrentRouterJobs"/> workers and waits until
+    /// all exit, then completes the queue writer.
+    /// </summary>
+    /// <param name="stoppingToken">Host shutdown token shared with workers.</param>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         int concurrency = options.Value.MaxConcurrentRouterJobs;
@@ -40,6 +61,12 @@ internal sealed class RouterJobExecutionService(
         }
     }
 
+    /// <summary>
+    /// Drains <see cref="RouterJobExecutionQueue.Reader"/> until cancellation or completion.
+    /// Unhandled executor exceptions mark the job Failed; shutdown cancel marks Cancelled.
+    /// </summary>
+    /// <param name="workerId">Diagnostic worker index.</param>
+    /// <param name="stoppingToken">Cancellation shared with the host.</param>
     private async Task RunWorkerAsync(int workerId, CancellationToken stoppingToken)
     {
         logger.LogInformation("Router job worker available. WorkerId={WorkerId}", workerId);

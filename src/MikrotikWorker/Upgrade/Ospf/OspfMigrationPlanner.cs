@@ -1,3 +1,15 @@
+// -----------------------------------------------------------------------------
+// File: OspfMigrationPlanner.cs
+//
+// Description:
+// Ensures the derived management /24 is available as a consolidation input
+// when needed. /// Does not inject a duplicate /24 when a broader site matcher
+// already covers it and there /// are no more-specific management subdivisions
+// to fold — the MGMT area-range remains the /// summarisation artifact in that
+// hierarchy.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -12,9 +24,22 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal static class OspfMigrationPlanner
 {
+    /// <summary>
+    /// OSPF cost applied to every active backbone PTP backhaul under the fleet standard.
+    /// </summary>
     public const int FleetBackhaulCost = 10;
+    /// <summary>
+    /// Area ID of the OSPF backbone area.
+    /// </summary>
     public const string BackboneAreaId = "0.0.0.0";
 
+    /// <summary>
+    /// Classifies a capture snapshot into a normalised migration plan and validates it.
+    /// Problems are collected as validation errors on the plan rather than thrown, so callers must check validity before use.
+    /// </summary>
+    /// <param name="snapshot">Captured OSPF, address, and identity state for one router.</param>
+    /// <returns>A result holding the content-hashed plan, including any validation errors and normalisation notes.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="snapshot"/> is null.</exception>
     public static OspfPlanValidationResult Build(OspfCaptureSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -366,6 +391,18 @@ internal static class OspfMigrationPlanner
         return new OspfPlanValidationResult { Plan = plan };
     }
 
+    /// <summary>
+    /// Classifies RouterOS 6 <c>network</c> and interface rows into backhaul, loopback, and site-network templates.
+    /// </summary>
+    /// <param name="snapshot">Captured router state.</param>
+    /// <param name="areas">Planned areas used to resolve area references.</param>
+    /// <param name="backboneName">Name of the backbone area.</param>
+    /// <param name="areaNameById">Area names keyed by area ID.</param>
+    /// <param name="backhauls">Receives active backbone PTP backhaul templates.</param>
+    /// <param name="loopbacks">Receives passive backbone loopback templates.</param>
+    /// <param name="sites">Receives passive site network matchers.</param>
+    /// <param name="errors">Receives validation errors.</param>
+    /// <param name="notes">Receives normalisation notes.</param>
     private static void ClassifyFromV6(
         OspfCaptureSnapshot snapshot,
         List<OspfPlanArea> areas,
@@ -528,6 +565,18 @@ internal static class OspfMigrationPlanner
         }
     }
 
+    /// <summary>
+    /// Classifies RouterOS 7 interface templates into backhaul, loopback, and site-network templates.
+    /// </summary>
+    /// <param name="snapshot">Captured router state.</param>
+    /// <param name="areas">Planned areas used to resolve area references.</param>
+    /// <param name="backboneName">Name of the backbone area.</param>
+    /// <param name="areaNameById">Area names keyed by area ID.</param>
+    /// <param name="backhauls">Receives active backbone PTP backhaul templates.</param>
+    /// <param name="loopbacks">Receives passive backbone loopback templates.</param>
+    /// <param name="sites">Receives passive site network matchers.</param>
+    /// <param name="errors">Receives validation errors.</param>
+    /// <param name="notes">Receives normalisation notes.</param>
     private static void ClassifyFromV7(
         OspfCaptureSnapshot snapshot,
         List<OspfPlanArea> areas,
@@ -700,6 +749,13 @@ internal static class OspfMigrationPlanner
         return errors;
     }
 
+    /// <summary>
+    /// Selects the OSPFv2 instance that owns the backbone, recording an error when the choice is ambiguous.
+    /// </summary>
+    /// <param name="snapshot">Captured router state.</param>
+    /// <param name="backbone">Backbone area row, used to match its owning instance.</param>
+    /// <param name="errors">Receives an error when several instances remain.</param>
+    /// <returns>The selected instance, or null when none exist.</returns>
     private static OspfInstanceRow? SelectInstance(
         OspfCaptureSnapshot snapshot,
         OspfAreaRow? backbone,
@@ -744,6 +800,12 @@ internal static class OspfMigrationPlanner
         return list.FirstOrDefault();
     }
 
+    /// <summary>
+    /// Returns the instance name, or the RouterOS default when it is unnamed.
+    /// </summary>
+    /// <param name="instance">Selected instance row, if any.</param>
+    /// <param name="kind">Source RouterOS major version.</param>
+    /// <returns>The instance name, or <c>default-v2</c> / <c>default</c> as fallback.</returns>
     private static string ResolveInstanceName(OspfInstanceRow? instance, OspfCaptureSourceKind kind)
     {
         if (!string.IsNullOrWhiteSpace(instance?.Name))
@@ -754,6 +816,12 @@ internal static class OspfMigrationPlanner
         return kind == OspfCaptureSourceKind.RouterOsV7 ? "default-v2" : "default";
     }
 
+    /// <summary>
+    /// Determines whether an area belongs to the selected instance; unassigned areas are treated as belonging.
+    /// </summary>
+    /// <param name="area">Area row to test.</param>
+    /// <param name="instance">Selected instance, if any.</param>
+    /// <returns><see langword="true"/> when the area applies to the instance.</returns>
     private static bool BelongsToInstance(OspfAreaRow area, OspfInstanceRow? instance)
     {
         if (instance is null)
@@ -769,6 +837,12 @@ internal static class OspfMigrationPlanner
         return string.Equals(area.Instance, instance.Name, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Looks up the instance name recorded on a captured area.
+    /// </summary>
+    /// <param name="snapshot">Captured router state.</param>
+    /// <param name="areaName">Area name to find.</param>
+    /// <returns>The trimmed instance name, or null when not recorded.</returns>
     private static string? ResolveAreaInstanceName(OspfCaptureSnapshot snapshot, string areaName)
     {
         OspfAreaRow? area = snapshot.Areas.FirstOrDefault(a =>
@@ -776,6 +850,13 @@ internal static class OspfMigrationPlanner
         return string.IsNullOrWhiteSpace(area?.Instance) ? null : area!.Instance!.Trim();
     }
 
+    /// <summary>
+    /// Resolves an area reference, given as a name or an area ID, to a planned area name.
+    /// </summary>
+    /// <param name="areaRef">Area name or area ID from a captured row.</param>
+    /// <param name="areas">Planned areas.</param>
+    /// <param name="areaNameById">Area names keyed by area ID.</param>
+    /// <returns>The planned area name, or null when the reference is blank or unknown.</returns>
     private static string? ResolveAreaName(
         string? areaRef,
         List<OspfPlanArea> areas,
@@ -802,6 +883,11 @@ internal static class OspfMigrationPlanner
         return null;
     }
 
+    /// <summary>
+    /// Trims an area ID, treating a blank one as the backbone.
+    /// </summary>
+    /// <param name="areaId">Raw area ID.</param>
+    /// <returns>The normalised area ID.</returns>
     private static string NormalizeAreaId(string? areaId)
     {
         if (string.IsNullOrWhiteSpace(areaId))
@@ -812,11 +898,22 @@ internal static class OspfMigrationPlanner
         return areaId.Trim();
     }
 
+    /// <summary>
+    /// Determines whether a network type denotes point-to-point.
+    /// </summary>
+    /// <param name="networkType">RouterOS network type text.</param>
+    /// <returns><see langword="true"/> for <c>point-to-point</c> or <c>ptp</c>.</returns>
     private static bool IsPointToPoint(string? networkType) =>
         networkType is not null
         && (networkType.Equals("point-to-point", StringComparison.OrdinalIgnoreCase)
             || networkType.Equals("ptp", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Derives the connected subnet of an interface address.
+    /// </summary>
+    /// <param name="addr">Address row to evaluate.</param>
+    /// <param name="subnet">Receives the subnet on success.</param>
+    /// <returns><see langword="true"/> when a subnet could be determined.</returns>
     private static bool TryInterfaceSubnet(OspfIpAddressRow addr, out OspfIpPrefix subnet)
     {
         subnet = default;
@@ -834,6 +931,11 @@ internal static class OspfMigrationPlanner
         return OspfIpPrefix.TryParse(addr.Address, out subnet);
     }
 
+    /// <summary>
+    /// Trims a value, returning null for null or blank input.
+    /// </summary>
+    /// <param name="value">Text to normalise.</param>
+    /// <returns>The trimmed text, or null.</returns>
     private static string? NullIfWhite(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
@@ -897,6 +999,16 @@ internal static class OspfMigrationPlanner
         return result;
     }
 
+    /// <summary>
+    /// Ensures the site area carries exactly one MGMT area range equal to the derived management CIDR.
+    /// Existing ranges that differ in prefix or comment are replaced with the fleet-standard form.
+    /// </summary>
+    /// <param name="ranges">Current planned area ranges.</param>
+    /// <param name="areas">Planned areas.</param>
+    /// <param name="derivedMgmtCidr">Derived management CIDR.</param>
+    /// <param name="notes">Receives normalisation notes.</param>
+    /// <param name="errors">Receives an error when no site area exists.</param>
+    /// <returns>The updated range list.</returns>
     private static List<OspfPlanAreaRange> EnsureManagementAreaRange(
         List<OspfPlanAreaRange> ranges,
         IReadOnlyList<OspfPlanArea> areas,
@@ -968,6 +1080,12 @@ internal static class OspfMigrationPlanner
         return result;
     }
 
+    /// <summary>
+    /// Copies a plan with a replacement list of validation errors.
+    /// </summary>
+    /// <param name="plan">Plan to copy.</param>
+    /// <param name="errors">Validation errors for the copy.</param>
+    /// <returns>A new plan; the content hash is not carried over.</returns>
     private static OspfMigrationPlan ClonePlan(OspfMigrationPlan plan, IReadOnlyList<string> errors) =>
         new()
         {
@@ -1037,6 +1155,11 @@ internal static class OspfMigrationPlanner
         return Convert.ToHexString(hash);
     }
 
+    /// <summary>
+    /// Verifies that a plan carries a content hash equal to a freshly computed one.
+    /// </summary>
+    /// <param name="plan">Plan to verify.</param>
+    /// <returns><see langword="true"/> when the stored hash is present and matches.</returns>
     internal static bool ContentHashMatches(OspfMigrationPlan plan) =>
         !string.IsNullOrWhiteSpace(plan.ContentHash)
         && string.Equals(plan.ContentHash, ComputeContentHash(plan), StringComparison.OrdinalIgnoreCase);

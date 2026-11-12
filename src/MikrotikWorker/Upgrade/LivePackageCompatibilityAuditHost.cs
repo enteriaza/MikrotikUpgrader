@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityAuditHost.cs
+//
+// Description:
+// Minimal HostApplicationBuilder / DI graph for the live read-only package
+// compatibility audit CLI. Registers catalogue, resolver, auditor, connection
+// factory, and read-only inventory collection only. Explicitly excludes upgrade,
+// backup, fetch, reboot, scheduler, and mutation-capable RouterOS services.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;

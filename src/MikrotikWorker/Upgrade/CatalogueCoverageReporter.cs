@@ -1,22 +1,46 @@
+// -----------------------------------------------------------------------------
+// File: CatalogueCoverageReporter.cs
+//
+// Description:
+// Reports firmware-catalogue coverage per supported architecture for
+// package-compatibility audits (main .npk present, optionals listed).
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Assessment;
 
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// Builds per-architecture catalogue coverage rows for a target RouterOS version.
+/// </summary>
 internal interface ICatalogueCoverageReporter
 {
+    /// <summary>
+    /// Returns one coverage row per architecture for packages at <paramref name="targetVersion"/>.
+    /// </summary>
+    /// <param name="targetVersion">Catalogue version to inspect.</param>
+    /// <param name="architectures">Architectures to report; defaults to <see cref="CatalogueCoverageReporter.SupportedArchitectures"/>.</param>
     IReadOnlyList<CatalogueCoverageArchitectureRow> BuildCoverage(
         RouterOsVersion targetVersion,
         IReadOnlyList<string>? architectures = null);
 }
 
+/// <summary>
+/// Default catalogue coverage reporter over <see cref="IFirmwarePackageCatalog"/>.
+/// </summary>
 internal sealed class CatalogueCoverageReporter(IFirmwarePackageCatalog packageCatalog)
     : ICatalogueCoverageReporter
 {
+    /// <summary>
+    /// Architectures reported when the caller does not supply an explicit list.
+    /// </summary>
     public static readonly string[] SupportedArchitectures =
     [
         "mipsbe", "arm", "arm64", "mmips", "smips", "tile", "powerpc", "x86",
     ];
 
+    /// <inheritdoc />
     public IReadOnlyList<CatalogueCoverageArchitectureRow> BuildCoverage(
         RouterOsVersion targetVersion,
         IReadOnlyList<string>? architectures = null)

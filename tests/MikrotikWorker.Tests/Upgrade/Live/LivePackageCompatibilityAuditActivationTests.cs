@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityAuditActivationTests.cs
+//
+// Description:
+// Dual-gate activation tests. These must never open a live router connection.
+// Ambient appsettings.Development.local.json in the test output may enable
+// live audit; tests that assert the disabled gate force Enabled=false after
+// local config via
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
@@ -14,12 +25,19 @@ namespace MikrotikWorker.Tests.Upgrade.Live;
 [Trait("Category", "LiveAuditGate")]
 public sealed class LivePackageCompatibilityAuditActivationTests
 {
+    /// <summary>
+    /// A default <c>LivePackageCompatibilityAuditOptions</c> has <c>Enabled</c> false.
+    /// </summary>
     [Fact]
     public void LiveAudit_DisabledByDefault()
     {
         Assert.False(new LivePackageCompatibilityAuditOptions().Enabled);
     }
 
+    /// <summary>
+    /// <c>IsLiveAuditRequested</c> is false for an empty argument list and for the fixture-only
+    /// <c>--audit-package-compatibility</c> flag with an input file.
+    /// </summary>
     [Fact]
     public void MissingCliOption_IsNotLiveAuditRequest()
     {
@@ -28,6 +46,9 @@ public sealed class LivePackageCompatibilityAuditActivationTests
             ["--audit-package-compatibility", "--input", "a.csv"]));
     }
 
+    /// <summary>
+    /// <c>IsLiveAuditRequested</c> is true for <c>--audit-package-compatibility-live --input routers.csv</c>.
+    /// </summary>
     [Fact]
     public void ExplicitCliOption_IsDetected()
     {
@@ -35,6 +56,9 @@ public sealed class LivePackageCompatibilityAuditActivationTests
             ["--audit-package-compatibility-live", "--input", "routers.csv"]));
     }
 
+    /// <summary>
+    /// Running with only <c>--input routers.csv</c> returns exit code 2 without connecting.
+    /// </summary>
     [Fact]
     public async Task RunLiveAudit_WithoutCliOption_FailsBeforeConnect()
     {
@@ -43,6 +67,10 @@ public sealed class LivePackageCompatibilityAuditActivationTests
         Assert.Equal(2, code);
     }
 
+    /// <summary>
+    /// Running with <c>--audit-package-compatibility-live</c> but no <c>--input</c> returns exit code 2 without
+    /// connecting.
+    /// </summary>
     [Fact]
     public async Task RunLiveAudit_WithCliButMissingInput_FailsBeforeConnect()
     {
@@ -51,6 +79,12 @@ public sealed class LivePackageCompatibilityAuditActivationTests
         Assert.Equal(2, code);
     }
 
+    /// <summary>
+    /// With the CLI flag and an input CSV but the configuration forced to disabled, the runner returns exit code 2.
+    /// The test forces <c>Enabled</c> false after the local settings files load, because
+    /// <c>appsettings.Development.local.json</c> copied into the test output could otherwise enable the audit and
+    /// let it attempt connections. That makes the assertion independent of the machine and connection-free.
+    /// </summary>
     [Fact]
     public async Task RunLiveAudit_WithCliButDisabledConfig_FailsBeforeConnect()
     {
@@ -74,6 +108,12 @@ public sealed class LivePackageCompatibilityAuditActivationTests
         }
     }
 
+    /// <summary>
+    /// An in-memory configuration source added after the local files sets
+    /// <c>LivePackageCompatibilityAudit:Enabled</c> to false (with dummy credentials). The runner still returns
+    /// exit code 2 without connecting, which shows that later sources win over <c>Development.local.json</c> without
+    /// enabling a live run.
+    /// </summary>
     [Fact]
     public async Task RunLiveAudit_AmbientLocalEnable_IsOverridableToDisabledWithoutConnecting()
     {
@@ -102,6 +142,9 @@ public sealed class LivePackageCompatibilityAuditActivationTests
         }
     }
 
+    /// <summary>
+    /// <c>MaxConcurrentConnections</c> of 0 fails options validation.
+    /// </summary>
     [Fact]
     public void InvalidConcurrency_FailsValidation()
     {
@@ -112,6 +155,10 @@ public sealed class LivePackageCompatibilityAuditActivationTests
         Assert.True(result.Failed);
     }
 
+    /// <summary>
+    /// A zero <c>ConnectionTimeout</c> and a negative <c>TotalAuditTimeout</c> fail validation, with one failure
+    /// message naming each option.
+    /// </summary>
     [Fact]
     public void InvalidTimeouts_FailValidation()
     {
@@ -128,6 +175,10 @@ public sealed class LivePackageCompatibilityAuditActivationTests
         Assert.Contains(result.Failures, static f => f.Contains("TotalAuditTimeout", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Options with <c>Enabled</c> true, 5 concurrent connections and a 10 second connection timeout pass
+    /// validation.
+    /// </summary>
     [Fact]
     public void ValidOptions_PassValidation()
     {
@@ -143,12 +194,17 @@ public sealed class LivePackageCompatibilityAuditActivationTests
         Assert.False(result.Failed);
     }
 
+    /// <summary>
+    /// A default <c>FirmwareUpgradeOptions</c> has <c>Enabled</c> false.
+    /// </summary>
     [Fact]
     public void FirmwareUpgrade_RemainsDisabledByDefault()
     {
         Assert.False(new FirmwareUpgradeOptions().Enabled);
     }
 
+    /// <summary>Forces <c>LivePackageCompatibilityAudit:Enabled</c> to <c>false</c> in the builder configuration.</summary>
+    /// <param name="builder">Host builder to configure.</param>
     private static void ForceLiveAuditDisabled(HostApplicationBuilder builder) =>
         builder.Configuration.AddInMemoryCollection(
             new Dictionary<string, string?>

@@ -1,10 +1,23 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityAuditOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for LivePackageCompatibilityAuditOptions: concurrent
+// connection bounds (1–64) and positive optional timeouts when set.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="LivePackageCompatibilityAuditOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class LivePackageCompatibilityAuditOptionsValidator
     : IValidateOptions<LivePackageCompatibilityAuditOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, LivePackageCompatibilityAuditOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

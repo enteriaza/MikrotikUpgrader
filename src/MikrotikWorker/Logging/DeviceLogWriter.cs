@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: DeviceLogWriter.cs
+//
+// Description:
+// HostedService bounded-channel writer for per-device log appends and pending→identity
+// promotions with a redirect map so late writes cannot orphan lines.
+//
+// -----------------------------------------------------------------------------
+
 using System.Text;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
@@ -16,17 +25,44 @@ namespace MikrotikWorker.Logging;
 /// </summary>
 internal sealed class DeviceLogWriter : IHostedService, IDisposable
 {
+    /// <summary>
+    /// Device-log settings, including enablement, directory, and queue behaviour.
+    /// </summary>
     private readonly SerilogOptions _options;
+    /// <summary>
+    /// Bounded queue of append and promote work consumed by a single reader.
+    /// </summary>
     private readonly Channel<DeviceLogWorkItem> _channel;
+    /// <summary>
+    /// Lock serializing file writes and access to the redirect map.
+    /// </summary>
     private readonly object _writeGate = new();
+    /// <summary>
+    /// Maps promoted pending keys to their identity keys so late writes reach the identity file. Guarded by <c>_writeGate</c>.
+    /// </summary>
     private readonly Dictionary<string, string> _keyRedirects = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Formats log events using the device file output template.
+    /// </summary>
     private readonly MessageTemplateTextFormatter _formatter = new(
         SerilogConfigurator.DeviceFileOutputTemplate,
         formatProvider: null);
+    /// <summary>
+    /// Background task that drains the channel; null until started.
+    /// </summary>
     private Task? _consumer;
+    /// <summary>
+    /// Set to 1 once stopping begins; read with volatile semantics.
+    /// </summary>
     private int _stopped;
+    /// <summary>
+    /// Number of failed appends or promotions, exposed by <see cref="WriteFailureCount"/>.
+    /// </summary>
     private long _writeFailureCount;
 
+    /// <summary>
+    /// Creates the writer using <c>Logging:Serilog</c> device-log options.
+    /// </summary>
     public DeviceLogWriter(IOptions<SerilogOptions> options)
     {
         _options = options.Value;
@@ -40,13 +76,16 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         _channel = Channel.CreateBounded<DeviceLogWorkItem>(channelOptions);
     }
 
+    /// <summary>Count of append/promote failures observed by the consumer.</summary>
     public long WriteFailureCount => Interlocked.Read(ref _writeFailureCount);
 
+    /// <summary>Absolute directory for per-device log files.</summary>
     public string DeviceLogDirectory =>
         Path.IsPathRooted(_options.DeviceLogDirectory)
             ? Path.GetFullPath(_options.DeviceLogDirectory)
             : Path.GetFullPath(Path.Combine(_options.GetAbsoluteLogDirectory(), _options.DeviceLogDirectory));
 
+    /// <summary>Formats and enqueues a structured log event for <paramref name="deviceLogKey"/>.</summary>
     public void Emit(string deviceLogKey, LogEvent logEvent)
     {
         if (!_options.DeviceLogEnabled || string.IsNullOrWhiteSpace(deviceLogKey) || Volatile.Read(ref _stopped) != 0)
@@ -59,6 +98,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         EnqueueOrWrite(new DeviceLogWorkItem.Append(deviceLogKey, writer.ToString()));
     }
 
+    /// <summary>Enqueues raw text (e.g. session header) for <paramref name="deviceLogKey"/>.</summary>
     public void WriteRaw(string deviceLogKey, string text)
     {
         if (!_options.DeviceLogEnabled || string.IsNullOrWhiteSpace(deviceLogKey) || Volatile.Read(ref _stopped) != 0)
@@ -107,6 +147,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
+    /// <inheritdoc />
     public Task StartAsync(CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(DeviceLogDirectory);
@@ -115,6 +156,9 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Completes the channel and drains the consumer; briefly waits if host cancellation interrupts.
+    /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         if (Interlocked.Exchange(ref _stopped, 1) != 0)
@@ -145,11 +189,16 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
+    /// <summary>Synchronously stops the writer by draining with a non-cancellable token.</summary>
     public void Dispose()
     {
         StopAsync(CancellationToken.None).GetAwaiter().GetResult();
     }
 
+    /// <summary>
+    /// Tries a non-blocking enqueue; when the channel is full, either writes synchronously
+    /// (if not blocking) or waits for capacity.
+    /// </summary>
     private void EnqueueOrWrite(DeviceLogWorkItem item)
     {
         if (_channel.Writer.TryWrite(item))
@@ -205,6 +254,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
+    /// <summary>Single consumer that serializes all append and promote work items.</summary>
     private async Task ConsumeAsync()
     {
         try
@@ -228,6 +278,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
+    /// <summary>Dispatches an append or promote work item under the write gate as needed.</summary>
     private void ProcessItem(DeviceLogWorkItem item)
     {
         switch (item)
@@ -241,6 +292,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
+    /// <summary>Appends <paramref name="line"/> to the redirected active file for <paramref name="deviceLogKey"/>.</summary>
     private void WriteLine(string deviceLogKey, string line)
     {
         lock (_writeGate)
@@ -261,6 +313,9 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
+    /// <summary>
+    /// Registers a redirect, appends pending content into the identity file, then deletes the pending file.
+    /// </summary>
     private void PromoteFiles(string fromKey, string toKey)
     {
         lock (_writeGate)
@@ -299,6 +354,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         }
     }
 
+    /// <summary>Follows the redirect map (bounded) to the current file key. Caller must hold the write gate.</summary>
     private string ResolveActiveKey_NoLock(string deviceLogKey)
     {
         string current = deviceLogKey;
@@ -317,6 +373,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         return current;
     }
 
+    /// <summary>Maps a device log key to a safe path under <see cref="DeviceLogDirectory"/>.</summary>
     private string ResolvePath(string deviceLogKey)
     {
         string safeName = deviceLogKey;
@@ -329,6 +386,7 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         return Path.Combine(DeviceLogDirectory, Path.GetFileName(safeName));
     }
 
+    /// <summary>Increments <see cref="WriteFailureCount"/> and warns on the service logger (no DeviceLogKey).</summary>
     private void RecordWriteFailure(string deviceLogKey, Exception ex)
     {
         Interlocked.Increment(ref _writeFailureCount);
@@ -336,10 +394,13 @@ internal sealed class DeviceLogWriter : IHostedService, IDisposable
         Log.Warning(ex, "Failed to append device log for {DeviceLogKey}", deviceLogKey);
     }
 
+    /// <summary>Channel payload for serialized device-log I/O.</summary>
     private abstract record DeviceLogWorkItem(string PrimaryKey)
     {
+        /// <summary>Append formatted or raw text to a device log key.</summary>
         public sealed record Append(string DeviceLogKey, string Line) : DeviceLogWorkItem(DeviceLogKey);
 
+        /// <summary>Promote pending content from <paramref name="FromKey"/> into <paramref name="ToKey"/>.</summary>
         public sealed record Promote(string FromKey, string ToKey) : DeviceLogWorkItem(FromKey);
     }
 }

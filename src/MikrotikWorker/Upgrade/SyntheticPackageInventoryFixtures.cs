@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: SyntheticPackageInventoryFixtures.cs
+//
+// Description:
+// Synthetic lab mirror of 198.18.240.11 (identity Mikrotik, 6.49.19 mipsbe,
+// main-only with /// ten bundled components). Not a live router observation.
+// Identity remains Unknown/v7-eligible; /// a v6 device below the stepping
+// release is stepped to 6.49.23 before the RouterOS 7 stage.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.MikroTik;
 
 namespace MikrotikWorker.Upgrade;
@@ -8,8 +19,15 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 internal static class SyntheticPackageInventoryFixtures
 {
+    /// <summary>
+    /// Inventory-source marker stamped on every fixture so reports can never mistake them for live captures.
+    /// </summary>
     public const string InventorySource = "SyntheticFixture";
 
+    /// <summary>
+    /// Returns every synthetic fixture in a stable order for auditing the whole set at once.
+    /// </summary>
+    /// <returns>All fixture devices defined in this class.</returns>
     public static IReadOnlyList<PackageCompatibilityAuditDevice> All() =>
     [
         MainOnlyMipsbeOlderV6(),
@@ -31,6 +49,10 @@ internal static class SyntheticPackageInventoryFixtures
         LabV7PostUpgradeMikrotik1981824011(),
     ];
 
+    /// <summary>
+    /// Older v6 mipsbe router that has only the independent main package installed.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice MainOnlyMipsbeOlderV6() =>
         Device(
             "main-only-mipsbe-older-v6",
@@ -40,6 +62,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
 
+    /// <summary>
+    /// v6 mipsbe router with the main package, bundled components, and independently installed optional packages.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice MainPlusIndependentOptionalsMipsbe() =>
         Device(
             "main-plus-optionals-mipsbe",
@@ -55,6 +81,10 @@ internal static class SyntheticPackageInventoryFixtures
                 Indep("tr069-client", "6.49.10"),
             ]);
 
+    /// <summary>
+    /// v6 mipsbe core router whose extra components all ship inside the main package bundle.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice BundledComponentsMipsbe() =>
         Device(
             "bundled-components-mipsbe",
@@ -84,6 +114,10 @@ internal static class SyntheticPackageInventoryFixtures
                 Indep("user-manager", "6.49.10"),
             ]);
 
+    /// <summary>
+    /// Router reporting an architecture that has no firmware catalogue entry, so the audit must fail closed.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice UnsupportedArchitecture() =>
         Device(
             "unsupported-architecture",
@@ -93,6 +127,10 @@ internal static class SyntheticPackageInventoryFixtures
             "riscv",
             [Indep("routeros-riscv", "6.49.10")]);
 
+    /// <summary>
+    /// Router with an empty package list, which is an invalid inventory that cannot be audited.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice InvalidEmptyInventory() =>
         Device(
             "invalid-empty-inventory",
@@ -102,6 +140,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             []);
 
+    /// <summary>
+    /// Router whose identity is blank; it is treated as unknown and remains eligible for RouterOS 7.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice EmptyIdentityEligible() =>
         Device(
             "empty-identity",
@@ -111,6 +153,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
 
+    /// <summary>
+    /// Router with the default <c>MikroTik</c> identity that cannot be matched to a naming prefix but remains eligible.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice UnknownIdentityEligible() =>
         Device(
             "unknown-identity",
@@ -120,6 +166,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
 
+    /// <summary>
+    /// Router whose identity carries the <c>ACE</c> prefix used for core devices.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice AceIdentity() =>
         Device(
             "ace-identity",
@@ -129,6 +179,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
 
+    /// <summary>
+    /// Router whose identity carries the <c>BR</c> prefix used for edge devices.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice BrIdentity() =>
         Device(
             "br-identity",
@@ -138,6 +192,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
 
+    /// <summary>
+    /// Router whose identity carries the <c>AP</c> prefix used for access devices.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice ApIdentity() =>
         Device(
             "ap-identity",
@@ -147,6 +205,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
 
+    /// <summary>
+    /// Router whose identity carries the <c>DCL</c> prefix with extra dotted segments.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice DclIdentity() =>
         Device(
             "dcl-identity",
@@ -156,6 +218,10 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros-mipsbe", "6.49.10")]);
 
+    /// <summary>
+    /// x86 router whose main package is the plain <c>routeros</c> name with no architecture suffix.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice X86ArchlessMain() =>
         Device(
             "x86-archless-main",
@@ -165,6 +231,10 @@ internal static class SyntheticPackageInventoryFixtures
             "x86",
             [Indep("routeros", "6.49.10")]);
 
+    /// <summary>
+    /// Router reporting the <c>ppc</c> architecture alias while its main package uses the <c>powerpc</c> name.
+    /// </summary>
+    /// <returns>The synthetic fixture device.</returns>
     public static PackageCompatibilityAuditDevice PowerPcAlias() =>
         Device(
             "powerpc-alias",
@@ -225,6 +295,16 @@ internal static class SyntheticPackageInventoryFixtures
             "mipsbe",
             [Indep("routeros", "7.23.8")]);
 
+    /// <summary>
+    /// Builds a fixture device, stamping it with <see cref="InventorySource"/>.
+    /// </summary>
+    /// <param name="fixtureName">Stable fixture identifier used in audit output.</param>
+    /// <param name="identity">RouterOS identity string.</param>
+    /// <param name="ip">Router IP address.</param>
+    /// <param name="version">Raw RouterOS version string.</param>
+    /// <param name="architecture">RouterOS architecture name.</param>
+    /// <param name="packages">Installed package inventory.</param>
+    /// <returns>The populated fixture device.</returns>
     private static PackageCompatibilityAuditDevice Device(
         string fixtureName,
         string identity,
@@ -243,9 +323,22 @@ internal static class SyntheticPackageInventoryFixtures
             Packages = packages,
         };
 
+    /// <summary>
+    /// Creates an enabled package that is installed independently, not as part of a bundle.
+    /// </summary>
+    /// <param name="name">Package name.</param>
+    /// <param name="version">Package version.</param>
+    /// <returns>The package record.</returns>
     private static InstalledPackageInfo Indep(string name, string version) =>
         new(name, version, Disabled: false, Bundle: null);
 
+    /// <summary>
+    /// Creates an enabled package that ships inside the named main-package bundle.
+    /// </summary>
+    /// <param name="name">Package name.</param>
+    /// <param name="version">Package version.</param>
+    /// <param name="bundle">Name of the main package that contains this component.</param>
+    /// <returns>The package record.</returns>
     private static InstalledPackageInfo Bundled(string name, string version, string bundle) =>
         new(name, version, Disabled: false, Bundle: bundle);
 }

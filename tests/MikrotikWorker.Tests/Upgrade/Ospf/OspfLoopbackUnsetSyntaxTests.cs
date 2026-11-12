@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfLoopbackUnsetSyntaxTests.cs
+//
+// Description:
+// Documents the supported tik4net/RouterOS API syntax used to clear
+// interface-template type:
+//
+// -----------------------------------------------------------------------------
+
 using System.Reflection;
 using MikrotikWorker.Upgrade.Ospf;
 using tik4net;
@@ -9,12 +18,22 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfLoopbackUnsetSyntaxTests
 {
+    /// <summary>
+    /// Scenario: read the tik4net special-property constant used to unset a RouterOS property.
+    /// Expected: TikSpecialProperties.UnsetValueName equals 'value-name'.
+    /// Invariant: unset commands depend on this exact RouterOS argument name.
+    /// </summary>
     [Fact]
     public void Tik4net_ExposesUnsetValueName_AsValueName()
     {
         Assert.Equal("value-name", TikSpecialProperties.UnsetValueName);
     }
 
+    /// <summary>
+    /// Scenario: inspect OspfMikrotikOperations by reflection for the unset helper and the loopback template method.
+    /// Expected: a private static UnsetPropertyAsync and a public EnsureLoopbackTemplateAsync both exist.
+    /// Invariant: loopback reconciliation keeps a dedicated unset-capable path instead of relying on type=null.
+    /// </summary>
     [Fact]
     public void Operations_DeclareUnsetHelper_ForAreaAndTemplatePaths()
     {

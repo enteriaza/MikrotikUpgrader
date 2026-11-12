@@ -1,8 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: PostUpgradePackageVerifier.cs
+//
+// Description:
+// Strict post-reboot package inventory checks used by RouterOsV6UpgradeExecutor
+// after a package stage. Confirms independent installs, a single main RouterOS
+// package, each resolved package present at the target version, and main-package
+// architecture alignment. RouterOS version string alone is never sufficient.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Assessment;
 using MikrotikWorker.MikroTik;
 
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// Result of <see cref="PostUpgradePackageVerifier.Verify"/>.
+/// </summary>
+/// <param name="Succeeded">True when inventory matches every required package at the target version.</param>
+/// <param name="FailureOutcome">Outcome to report on failure; <see cref="UpgradeOutcome.UpgradeSucceeded"/> when Succeeded.</param>
+/// <param name="Detail">Human-readable failure detail, or null on success.</param>
 internal sealed record PostUpgradePackageVerification(
     bool Succeeded,
     UpgradeOutcome FailureOutcome,
@@ -14,6 +31,15 @@ internal sealed record PostUpgradePackageVerification(
 /// </summary>
 internal static class PostUpgradePackageVerifier
 {
+    /// <summary>
+    /// Verifies post-upgrade installed packages against the packages that were resolved and staged.
+    /// Fails closed on empty inventory, missing/ambiguous mains, version mismatches, or arch mismatch.
+    /// </summary>
+    /// <param name="targetVersion">Exact RouterOS version the stage targeted.</param>
+    /// <param name="expectedArchitecture">Device architecture before upgrade (normalized when compared).</param>
+    /// <param name="postPackages">Installed packages read after reconnect.</param>
+    /// <param name="requiredPackages">Packages previously resolved for this stage.</param>
+    /// <param name="unparsablePackageRows">Count of inventory rows that could not be parsed; any positive value fails.</param>
     public static PostUpgradePackageVerification Verify(
         RouterOsVersion targetVersion,
         string? expectedArchitecture,
@@ -145,6 +171,9 @@ internal static class PostUpgradePackageVerifier
             Detail: null);
     }
 
+    /// <summary>
+    /// Builds a failed verification result with the given outcome and detail.
+    /// </summary>
     private static PostUpgradePackageVerification Fail(UpgradeOutcome outcome, string detail) =>
         new(Succeeded: false, FailureOutcome: outcome, Detail: detail);
 }

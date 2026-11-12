@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: DeviceBackupService.cs
+//
+// Description:
+// Creates pre-upgrade .rsc + .backup on the router, downloads them via SFTP to
+// Backups/Exports and Backups/Binary, writes a SHA-256 JSON manifest, then best-
+// effort removes owned remote leftovers. Stem allocation happens before any remote commands.
+//
+// -----------------------------------------------------------------------------
+
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -10,8 +20,14 @@ using tik4net;
 
 namespace MikrotikWorker.Backup;
 
+/// <summary>
+/// Creates remote export/binary backups, downloads them centrally, and writes a manifest.
+/// </summary>
 internal interface IDeviceBackupService
 {
+    /// <summary>
+    /// Creates and retrieves a pre-upgrade backup for <paramref name="job"/> using an open API session.
+    /// </summary>
     Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -21,6 +37,9 @@ internal interface IDeviceBackupService
         CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Production backup orchestration over RouterOS API + SFTP file transfer.
+/// </summary>
 internal sealed class DeviceBackupService(
     IMikrotikRouterOperations routerOperations,
     IMikrotikFileTransferClient fileTransferClient,
@@ -28,8 +47,10 @@ internal sealed class DeviceBackupService(
     TimeProvider timeProvider,
     ILogger<DeviceBackupService> logger) : IDeviceBackupService
 {
+    /// <summary>Max local stem reallocations when reserved paths collide before remote commands.</summary>
     private const int MaxAllocationAttempts = 8;
 
+    /// <inheritdoc />
     public async Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -433,6 +454,10 @@ internal sealed class DeviceBackupService(
         }
     }
 
+    /// <summary>
+    /// Removes owned remote artefacts under a bounded timeout and verifies they are gone.
+    /// Returns a failed <see cref="DeviceBackupResult"/> when cleanup fails; otherwise null.
+    /// </summary>
     private async Task<DeviceBackupResult?> TryCleanupOwnedRemoteArtefactsAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -546,6 +571,9 @@ internal sealed class DeviceBackupService(
         return null;
     }
 
+    /// <summary>
+    /// Logs intentional remote retention after failed central verification, then returns <see cref="Fail"/>.
+    /// </summary>
     private DeviceBackupResult FailRetain(
         string reason,
         MikrotikScheduledJob job,
@@ -580,11 +608,13 @@ internal sealed class DeviceBackupService(
             remainingRemoteFiles: ownedRemoteFiles.Count > 0 ? ownedRemoteFiles : null);
     }
 
+    /// <summary>True when none of the reserved export/binary/manifest paths already exist on disk.</summary>
     private static bool LocalArtefactPathsAreFree(BackupStemReservation reservation) =>
         !File.Exists(reservation.ExportLocalPath)
         && !File.Exists(reservation.BinaryLocalPath)
         && !File.Exists(reservation.ManifestLocalPath);
 
+    /// <summary>Writes the manifest with <see cref="FileMode.CreateNew"/> so stem collisions fail loudly.</summary>
     private static async Task WriteManifestCreateNewAsync(
         string manifestPath,
         BackupManifest manifest,
@@ -601,6 +631,7 @@ internal sealed class DeviceBackupService(
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Builds a failed <see cref="DeviceBackupResult"/> preserving any local paths and remote leftovers.</summary>
     private static DeviceBackupResult Fail(
         string reason,
         string? exportLocal,
@@ -620,6 +651,7 @@ internal sealed class DeviceBackupService(
             RemainingRemoteFiles = remainingRemoteFiles ?? [],
         };
 
+    /// <summary>Lowercase hex SHA-256 of a local file.</summary>
     private static string ComputeSha256Hex(string path)
     {
         using FileStream stream = File.OpenRead(path);

@@ -1,7 +1,23 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikConnectionOptionsValidator.cs
+//
+// Description:
+// Runtime guard for MikrotikConnectionOptions before opening a tik4net session:
+// non-empty host/username, non-null password, and optional port/timeout ranges.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.MikroTik;
 
+/// <summary>
+/// Throws <see cref="ArgumentException"/> / <see cref="ArgumentOutOfRangeException"/> when
+/// a connection request is incomplete or out of range.
+/// </summary>
 internal static class MikrotikConnectionOptionsValidator
 {
+    /// <summary>
+    /// Validates required fields and optional port/timeout bounds on <paramref name="connection"/>.
+    /// </summary>
     public static void Validate(MikrotikConnectionOptions connection)
     {
         ArgumentNullException.ThrowIfNull(connection);

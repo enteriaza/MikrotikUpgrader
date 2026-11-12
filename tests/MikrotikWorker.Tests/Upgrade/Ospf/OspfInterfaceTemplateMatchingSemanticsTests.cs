@@ -1,3 +1,16 @@
+// -----------------------------------------------------------------------------
+// File: OspfInterfaceTemplateMatchingSemanticsTests.cs
+//
+// Description:
+// Documents RouterOS v7 interface-template matching evidence and the planner's
+// fail-closed posture. Official docs describe interfaces= and networks= as
+// alternative matchers ("either by specifying network or interface"). Combined
+// AND semantics are not assumed. Plans therefore emit exact interface subnets
+// for active backhauls and refuse templates whose network matcher would cover
+// an address on any other local interface (OR-safe isolation).
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using MikrotikWorker.Upgrade.Ospf;
 
@@ -11,6 +24,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfInterfaceTemplateMatchingSemanticsTests
 {
+    /// <summary>
+    /// Scenario: ether1 has a /30 address but its active template lists the broader 10.0.0.0/24, alongside passive loopback and site templates.
+    /// Expected: the plan succeeds, the backhaul network is narrowed to 10.0.0.0/30, and a 'Narrowing backhaul' note is recorded.
+    /// Invariant: active backhauls are planned from the exact interface subnet, not the template's broader network.
+    /// </summary>
     [Fact]
     public void ActiveBackhaul_UsesExactInterfaceSubnet_NotBroaderTemplateNetwork()
     {
@@ -34,6 +52,11 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
         Assert.Contains(result.Plan.NormalisationNotes, n => n.Contains("Narrowing backhaul", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: ether1 and vlan10 both hold addresses in 10.0.0.0/24, so the backhaul subnet cannot be narrowed away from vlan10 (under OR matching, networks= would also activate vlan10).
+    /// Expected: planning fails with a validation error mentioning an 'unrelated interface'.
+    /// Invariant: naming interfaces= does not make a template safe when its network matcher covers another interface's address.
+    /// </summary>
     [Fact]
     public void OverlappingAddressOnOtherInterface_FailsEvenIfInterfacesNamed()
     {
@@ -60,6 +83,11 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             e => e.Contains("unrelated interface", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: two backhauls on ether1 and ether2 with separate /30 subnets, plus a bridge-local site LAN.
+    /// Expected: two active backhauls are planned, none on bridge-local, each non-passive, type ptp and cost 10.
+    /// Invariant: each backhaul is limited to its own interface and the LAN is never promoted to an active backhaul.
+    /// </summary>
     [Fact]
     public void MultipleDistinctBackhauls_DoNotCrossActivate()
     {
@@ -91,6 +119,11 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
         });
     }
 
+    /// <summary>
+    /// Scenario: the passive site template uses interfaces=all with networks=0.0.0.0/0, which covers the ether1 backhaul (unsafe under OR-style matching).
+    /// Expected: planning fails with an error that the matcher 'covers active backhaul'.
+    /// Invariant: a passive site matcher must never be allowed to cover an active backhaul subnet.
+    /// </summary>
     [Fact]
     public void BroadPassiveSiteMatcher_CoveringBackhaul_FailsClosed()
     {
@@ -116,6 +149,11 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             e => e.Contains("covers active backhaul", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: a passive site template for 10.10.0.0/16 that does not overlap the 10.0.0.0/30 backhaul.
+    /// Expected: the plan succeeds with one passive site network 10.10.0.0/16 on interfaces 'all' and one active backhaul on ether1.
+    /// Invariant: a broad passive matcher is preserved as long as it stays clear of every backhaul.
+    /// </summary>
     [Fact]
     public void BroadPassiveSiteMatcher_OutsideBackhaul_IsRetainedAsInterfacesAll()
     {
@@ -143,6 +181,9 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
         Assert.Equal("ether1", result.Plan.ActiveBackhauls[0].Interface);
     }
 
+    /// <summary>
+    /// Builds a RouterOS 7 capture snapshot with the given interface templates and IP addresses.
+    /// </summary>
     private static OspfCaptureSnapshot V7(
         IReadOnlyList<OspfInterfaceTemplateRow> templates,
         IReadOnlyList<OspfIpAddressRow> addresses) =>
@@ -165,6 +206,9 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             IpAddresses = addresses,
         };
 
+    /// <summary>Creates an active (non-passive) backbone point-to-point template.</summary>
+    /// <param name="iface">Interface name.</param>
+    /// <param name="network">Network in CIDR notation.</param>
     private static OspfInterfaceTemplateRow Active(string iface, string network) => new()
     {
         Area = "backbone",
@@ -175,6 +219,8 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
         Passive = false,
     };
 
+    /// <summary>Creates a passive loopback template.</summary>
+    /// <param name="network">Network in CIDR notation.</param>
     private static OspfInterfaceTemplateRow PassiveLoop(string network) => new()
     {
         Area = "backbone",
@@ -182,6 +228,8 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
         Passive = true,
     };
 
+    /// <summary>Creates a passive site-network template.</summary>
+    /// <param name="network">Network in CIDR notation.</param>
     private static OspfInterfaceTemplateRow PassiveSite(string network) => new()
     {
         Area = "site",
@@ -189,6 +237,10 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
         Passive = true,
     };
 
+    /// <summary>Creates an IP address row.</summary>
+    /// <param name="address">Address with prefix length.</param>
+    /// <param name="network">Network address.</param>
+    /// <param name="iface">Interface the address is assigned to.</param>
     private static OspfIpAddressRow Addr(string address, string network, string iface) => new()
     {
         Address = address,

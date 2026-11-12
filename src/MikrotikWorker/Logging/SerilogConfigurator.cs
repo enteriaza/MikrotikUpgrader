@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: SerilogConfigurator.cs
+//
+// Description:
+// Builds the production Serilog pipeline: console + rolling file (device-detail filtered)
+// plus optional DeviceLogSink. Also creates the bootstrap logger used before host build.
+//
+// -----------------------------------------------------------------------------
+
 using System.Reflection;
 using System.Text;
 using Microsoft.Extensions.Hosting;
@@ -12,9 +21,11 @@ namespace MikrotikWorker.Logging;
 /// </summary>
 internal static class SerilogConfigurator
 {
+    /// <summary>Console output template including source context.</summary>
     internal const string ConsoleOutputTemplate =
         "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}";
 
+    /// <summary>Service rolling-file output template including source context.</summary>
     internal const string FileOutputTemplate =
         "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] ({SourceContext}) {Message:lj}{NewLine}{Exception}";
 
@@ -24,6 +35,7 @@ internal static class SerilogConfigurator
     internal const string DeviceFileOutputTemplate =
         "{Timestamp:HH:mm:ss} {Level:u3} {Message:lj}{NewLine}{Exception}";
 
+    /// <summary>Binds <c>Logging:Serilog</c> into a new <see cref="SerilogOptions"/> instance.</summary>
     public static SerilogOptions BindOptions(IConfiguration configuration)
     {
         SerilogOptions options = new();
@@ -31,6 +43,7 @@ internal static class SerilogConfigurator
         return options;
     }
 
+    /// <summary>Configures console/file sinks and optional device mirroring on <paramref name="loggerConfiguration"/>.</summary>
     public static void Configure(
         LoggerConfiguration loggerConfiguration,
         IConfiguration configuration,
@@ -111,6 +124,9 @@ internal static class SerilogConfigurator
         }
     }
 
+    /// <summary>
+    /// Creates the early console-only logger used before the host replaces <c>Log.Logger</c>.
+    /// </summary>
     public static Serilog.ILogger CreateBootstrapLogger() =>
         new LoggerConfiguration()
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
@@ -118,11 +134,17 @@ internal static class SerilogConfigurator
             .WriteTo.Console(outputTemplate: ConsoleOutputTemplate)
             .CreateBootstrapLogger();
 
+    /// <summary>
+    /// Parses a Serilog level name; defaults to <see cref="LogEventLevel.Information"/>.
+    /// </summary>
     internal static LogEventLevel ParseLevel(string level) =>
         Enum.TryParse(level, ignoreCase: true, out LogEventLevel parsed)
             ? parsed
             : LogEventLevel.Information;
 
+    /// <summary>
+    /// Parses a rolling-interval name; defaults to <see cref="RollingInterval.Day"/>.
+    /// </summary>
     internal static RollingInterval ParseRollingInterval(string interval) =>
         Enum.TryParse(interval, ignoreCase: true, out RollingInterval parsed)
             ? parsed

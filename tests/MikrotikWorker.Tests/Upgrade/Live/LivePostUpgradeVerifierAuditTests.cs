@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: LivePostUpgradeVerifierAuditTests.cs
+//
+// Description:
+// One-shot read-only audit: collect live inventory from 198.18.240.11 and pass
+// it through production (not a synthetic fixture).
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
@@ -17,9 +26,34 @@ namespace MikrotikWorker.Tests.Upgrade.Live;
 [Trait("Category", "Live")]
 public sealed class LivePostUpgradeVerifierAuditTests
 {
+    /// <summary>Management address of the lab router audited by this test.</summary>
     private const string LiveHost = "198.18.240.11";
+    /// <summary>RouterOS 7 target version the audited router was upgraded to.</summary>
     private static readonly RouterOsVersion TargetV7 = RouterOsVersion.Parse("7.23.8");
 
+    /// <summary>
+    /// Audits the live router at <see cref="LiveHost"/> by feeding its real package inventory through the
+    /// production <see cref="PostUpgradePackageVerifier"/> used by <c>RouterOsV6UpgradeExecutor</c>.
+    /// <para>
+    /// Gate-before-TCP invariant: <see cref="LiveMikrotikTestGate.RequireArmed"/> is the very first statement,
+    /// so the test is skipped or fails before any local config is read and before any TCP/API connection is
+    /// opened. A mis-scoped test filter that is not explicitly targeting the <c>Live</c> category can therefore
+    /// never reach the physical device.
+    /// </para>
+    /// <para>
+    /// Once armed, the test performs only read-only API commands: it reads device identity, version and
+    /// architecture, lists installed packages (both via the production client and by re-parsing raw
+    /// <c>/system/package/print</c> rows with the collector parser), and asserts that both views agree with no
+    /// unparsable rows. It then reconstructs the pre-upgrade RouterOS v6 inventory, resolves required packages
+    /// for the 7.23.8 target through <see cref="UpgradePackageResolver"/>, and asserts the verifier accepts the
+    /// live post-upgrade inventory. A JSON evidence file is written to the temp directory.
+    /// </para>
+    /// <para>
+    /// Safety guards: the test refuses to run if <c>FirmwareUpgrade:Enabled</c> is true in local config, and
+    /// credentials are only read from the git-ignored local settings file. Secrets must never appear in log or
+    /// assertion failure text.
+    /// </para>
+    /// </summary>
     [Fact]
     public async Task LiveInventory_PassesProductionPostUpgradePackageVerifier()
     {
@@ -172,6 +206,10 @@ public sealed class LivePostUpgradeVerifierAuditTests
         Assert.DoesNotContain(collectorPackages, static p => p.IsBundledComponent);
     }
 
+    /// <summary>
+    /// Walks up from the test base directory to the folder containing <c>MikrotikUpgrader.sln</c>; throws <see
+    /// cref="InvalidOperationException"/> if it is not found.
+    /// </summary>
     private static string FindRepoRoot()
     {
         DirectoryInfo? dir = new(AppContext.BaseDirectory);

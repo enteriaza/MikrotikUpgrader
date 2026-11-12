@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: DeviceLogTests.cs
+//
+// Description:
+// Unit/integration tests for DeviceLogWriter append, WriteRaw session headers, and
+// DeviceLogSink routing.
+//
+// -----------------------------------------------------------------------------
+
 using System.Collections.Concurrent;
 using System.Net;
 using Microsoft.Extensions.Options;
@@ -8,8 +17,18 @@ using Serilog.Events;
 using Serilog.Parsing;
 
 namespace MikrotikWorker.Tests.Logging;
+/// <summary>
+/// Covers DeviceLogWriter and DeviceLogSink basics.
+/// </summary>
 public sealed class DeviceLogTests
 {
+    /// <summary>
+    /// Scenario: A device log file name and stem are built for identity <c>MikroTik</c> at 198.18.0.83, and the plain
+    /// identity is sanitised.
+    /// Expected: The file name is <c>MikroTik_198.18.0.83.log</c>, the stem is <c>MikroTik_198.18.0.83</c>, and a
+    /// name that is already safe is returned unchanged.
+    /// Invariant: Device log names use the same identity_ip stem convention as backup artefacts.
+    /// </summary>
     [Fact]
     public void DeviceLogNaming_IdentityStem_MatchesBackupSanitisation()
     {
@@ -19,12 +38,23 @@ public sealed class DeviceLogTests
         Assert.Equal("MikroTik", DeviceLogNaming.Sanitize("MikroTik"));
     }
 
+    /// <summary>
+    /// Scenario: A pending log file name is requested for 198.18.0.83 before a router identity is known.
+    /// Expected: The name is <c>pending_198.18.0.83.log</c>.
+    /// Invariant: Before identity is resolved, the log is keyed by IP address only.
+    /// </summary>
     [Fact]
     public void DeviceLogNaming_PendingUsesIpUntilIdentityKnown()
     {
         Assert.Equal("pending_198.18.0.83.log", DeviceLogNaming.BuildPendingLogFileName(IPAddress.Parse("198.18.0.83")));
     }
 
+    /// <summary>
+    /// Scenario: Two routers that both report identity <c>MikroTik</c>, at 198.18.0.83 and 198.18.0.84, resolve
+    /// their log file names through one shared <c>DeviceLogIdentityRegistry</c>.
+    /// Expected: The names are <c>MikroTik_198.18.0.83.log</c> and <c>MikroTik_198.18.0.84.log</c>.
+    /// Invariant: Routers sharing an identity are disambiguated by IP and never share a log file.
+    /// </summary>
     [Fact]
     public void DeviceLogNaming_CollisionUsesIdentityPlusIp()
     {
@@ -42,6 +72,11 @@ public sealed class DeviceLogTests
         Assert.Equal("MikroTik_198.18.0.84.log", second);
     }
 
+    /// <summary>
+    /// Scenario: The same identity (<c>MikroTik</c>) and IP (198.18.0.83) are resolved twice through one registry.
+    /// Expected: Both calls return <c>MikroTik_198.18.0.83.log</c>.
+    /// Invariant: Re-resolving a known device is idempotent and does not create a second log stem.
+    /// </summary>
     [Fact]
     public void DeviceLogNaming_SameIdentityAndIp_ReusesStem()
     {
@@ -58,6 +93,12 @@ public sealed class DeviceLogTests
         Assert.Equal("MikroTik_198.18.0.83.log", second);
     }
 
+    /// <summary>
+    /// Scenario: A log file name is built from the hostile identity <c>CORE:01/..\evil</c> and IP 10.0.0.7.
+    /// Expected: The name is <c>CORE_01_.._evil_10.0.0.7.log</c> and contains no characters from
+    /// <c>Path.GetInvalidFileNameChars()</c>.
+    /// Invariant: A device-reported identity cannot introduce path separators or traversal into the log file name.
+    /// </summary>
     [Fact]
     public void DeviceLogNaming_SanitizesUnsafePathCharacters()
     {
@@ -66,6 +107,13 @@ public sealed class DeviceLogTests
         Assert.Equal(-1, name.IndexOfAny(Path.GetInvalidFileNameChars()));
     }
 
+    /// <summary>
+    /// Scenario: A started <c>DeviceLogWriter</c> receives one event for CORE-01, then is stopped and disposed before
+    /// the file is read back.
+    /// Expected: The device log file exists, can be read after disposal, contains the logged message, and does not
+    /// contain <c>Password=</c>.
+    /// Invariant: Secrets never appear in log content, and the written file is readable once the writer has stopped.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_AppendsWithoutRetainingHandles_AndSanitizesSecretsInContent()
     {
@@ -96,6 +144,12 @@ public sealed class DeviceLogTests
         Assert.DoesNotContain("Password=", content, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Scenario: A scope begins for a job targeting 10.1.2.3, then the router identity <c>MikroTik</c> is set.
+    /// Expected: The scope key is <c>pending_10.1.2.3.log</c> initially and <c>MikroTik_10.1.2.3.log</c> after the
+    /// identity is set.
+    /// Invariant: The log key moves from IP-only to identity-based exactly when the identity becomes known.
+    /// </summary>
     [Fact]
     public void DeviceLogScope_StartsPending_ThenPromotesToIdentity()
     {
@@ -116,6 +170,13 @@ public sealed class DeviceLogTests
         Assert.Equal("MikroTik_10.1.2.3.log", scope.DeviceLogKey);
     }
 
+    /// <summary>
+    /// Scenario: A scope for LIVE-TEST (198.18.0.83, import 3e00880a-b421-4c69-997b-963f5c8a9f05) sets its identity
+    /// and emits one event through a writer with a fixed clock.
+    /// Expected: The log carries a session header with the device, address, CSV name and import ID, plus the logged
+    /// line, and contains no <c>ImportId=</c>, <c>JobId=</c> or <c>RouterIp=</c> correlation fragments.
+    /// Invariant: Correlation details appear once in the header and are never repeated on each log line.
+    /// </summary>
     [Fact]
     public async Task DeviceLogScope_WritesSessionHeaderOnce_WithoutRepeatingCorrelationOnLines()
     {
@@ -160,6 +221,13 @@ public sealed class DeviceLogTests
         Assert.DoesNotContain("RouterIp=", content, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: An event is written under <c>pending_10.0.0.1.log</c>, the key is promoted to
+    /// <c>MikroTik_10.0.0.1.log</c>, and a second event is written under the identity key.
+    /// Expected: The pending file no longer exists, and the identity file contains both the pre-identity and
+    /// post-identity lines.
+    /// Invariant: Promotion keeps earlier output and leaves no orphaned pending file.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_PromoteKey_MovesPendingIntoIdentityFile()
     {
@@ -185,6 +253,13 @@ public sealed class DeviceLogTests
         Assert.Contains("post-identity", content, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: 50 events are emitted to one device log through a writer with a 1000-entry queue, and the writer is
+    /// stopped immediately afterwards.
+    /// Expected: The file contains the first (<c>drain-line-0</c>) and last (<c>drain-line-49</c>) lines and
+    /// <c>WriteFailureCount</c> is 0.
+    /// Invariant: Stopping the writer flushes every queued event before it returns.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_StopDrainsQueuedEvents()
     {
@@ -214,6 +289,11 @@ public sealed class DeviceLogTests
         Assert.Equal(0, writer.WriteFailureCount);
     }
 
+    /// <summary>
+    /// Scenario: A started writer is stopped twice and disposed twice.
+    /// Expected: No exception is thrown by the repeated calls.
+    /// Invariant: Shutdown can be called redundantly (for example by the host and by disposal) without failing.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_Stop_IsIdempotent()
     {
@@ -232,6 +312,12 @@ public sealed class DeviceLogTests
         writer.Dispose();
     }
 
+    /// <summary>
+    /// Scenario: 100 tasks concurrently emit uniquely numbered events (<c>LINE_nnn_END</c>) to the same device log.
+    /// Expected: The file contains exactly 100 marker lines, each ending in <c>_END</c>, and all 100 markers are
+    /// distinct.
+    /// Invariant: Concurrent writers to one device never interleave or truncate each other's lines.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_ConcurrentEmits_DoNotInterleaveLinesForSameDevice()
     {
@@ -267,6 +353,12 @@ public sealed class DeviceLogTests
         Assert.Equal(100, markers.Distinct().Count());
     }
 
+    /// <summary>
+    /// Scenario: Two routers with the same identity <c>SAME</c> but different IPs (10.0.0.1, 10.0.0.2) each receive
+    /// one event.
+    /// Expected: Each file contains only its own event and not the other's.
+    /// Invariant: Events for different devices are never mixed in a single log file.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_DifferentDevices_UseDistinctFiles()
     {
@@ -295,6 +387,11 @@ public sealed class DeviceLogTests
         Assert.DoesNotContain("device-a-only", contentB, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: A directory is created where the device log file should be, so appending the emitted event fails.
+    /// Expected: Emit, stop and dispose complete without throwing and <c>WriteFailureCount</c> is at least 1.
+    /// Invariant: A device log I/O failure is counted and swallowed so it cannot break the router job.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_WriteFailure_IsCountedAndDoesNotThrow()
     {
@@ -318,6 +415,12 @@ public sealed class DeviceLogTests
         Assert.True(writer.WriteFailureCount >= 1);
     }
 
+    /// <summary>
+    /// Scenario: 200 events are emitted rapidly to a writer with a 64-entry queue and blocking-when-full disabled.
+    /// Expected: The first (<c>sync-fallback-0</c>) and last (<c>sync-fallback-199</c>) lines are in the file and
+    /// <c>WriteFailureCount</c> is 0.
+    /// Invariant: Overflowing the queue falls back to a synchronous write instead of dropping events.
+    /// </summary>
     [Fact]
     public async Task DeviceLogWriter_WhenQueueFullWithoutBlocking_FallsBackToSyncWrite()
     {
@@ -347,6 +450,12 @@ public sealed class DeviceLogTests
         Assert.Equal(0, writer.WriteFailureCount);
     }
 
+    /// <summary>
+    /// Scenario: Three events carrying a <c>DeviceLogKey</c> are tested against the service-log filter: an
+    /// information detail line, an information line flagged <c>ServiceSummary</c>, and a warning.
+    /// Expected: Only the plain detail line is excluded from the service log.
+    /// Invariant: Device-level detail stays in the device log, while summaries and warnings still reach the service log.
+    /// </summary>
     [Fact]
     public void DeviceLogFilters_ExcludeDeviceDetail_ButKeepWarningsAndSummaries()
     {
@@ -371,6 +480,9 @@ public sealed class DeviceLogTests
         Assert.False(DeviceLogFilters.IsDeviceDetailExcludedFromServiceLog(warning));
     }
 
+    /// <summary>
+    /// Private helper <c>CreateEvent</c> supporting the scenarios in this file.
+    /// </summary>
     private static LogEvent CreateEvent(string message, params LogEventProperty[] properties) =>
         new(
             DateTimeOffset.UtcNow,

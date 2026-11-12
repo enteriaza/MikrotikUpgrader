@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: OspfSummaryRedistributionOptions.cs
+//
+// Description:
+// Root-key option RedistributeSummaryviaStatics controlling the optional post-
+// OSPF stage that advertises area-range prefixes via redistributed static
+// blackhole routes. Bound independently of Mikrotik:Enabled and
+// FirmwareUpgrade:Enabled; defaults to false (stage skipped).
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Configuration;
 
 /// <summary>

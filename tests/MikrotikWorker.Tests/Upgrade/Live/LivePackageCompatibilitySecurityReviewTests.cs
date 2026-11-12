@@ -1,3 +1,11 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilitySecurityReviewTests.cs
+//
+// Description:
+// Focused security/correctness coverage for the live read-only fleet audit.
+//
+// -----------------------------------------------------------------------------
+
 using System.Reflection;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,6 +23,10 @@ namespace MikrotikWorker.Tests.Upgrade.Live;
 /// </summary>
 public sealed class LivePackageCompatibilitySecurityReviewTests
 {
+    /// <summary>
+    /// <c>DescribeActivationFailure</c> returns null (live audit permitted) only when both the CLI flag and the
+    /// configuration flag are true. Each of the other three combinations must return a failure description.
+    /// </summary>
     [Theory]
     [InlineData(false, false, false)]
     [InlineData(false, true, false)]
@@ -33,6 +45,11 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         }
     }
 
+    /// <summary>
+    /// Program checks live first; fixture is never reached when live is requested. With both flags in the
+    /// arguments, <c>IsLiveAuditRequested</c> and <c>IsFixtureAuditRequested</c> are each true, so the live check
+    /// alone decides.
+    /// </summary>
     [Fact]
     public void LiveAuditFlag_TakesPrecedenceOverFixtureFlag_WithoutFallingThrough()
     {
@@ -48,6 +65,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         // Program checks live first; fixture is never reached when live is requested.
     }
 
+    /// <summary>
+    /// A default <c>FirmwareUpgradeOptions</c>, <c>LivePackageCompatibilityAuditOptions</c> and
+    /// <c>MikroTikOptions</c> each have <c>Enabled</c> false, so nothing is switched on by default.
+    /// </summary>
     [Fact]
     public void LiveAudit_DoesNotEnableFirmwareUpgradeOptions()
     {
@@ -56,6 +77,12 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.False(new MikroTikOptions().Enabled);
     }
 
+    /// <summary>
+    /// <c>EnsureAllowed</c> throws <c>InvalidOperationException</c> for each InlineData command. These include
+    /// mutating commands (fetch, reboot, backup save, export, routerboard upgrade, package
+    /// update/disable/uninstall), <c>/file/print</c>, near misses (trailing space or newline, a chained <c>;
+    /// /system/reboot</c>, a truncated <c>/system/package</c>, a missing leading slash).
+    /// </summary>
     [Theory]
     [InlineData("/tool/fetch")]
     [InlineData("/system/reboot")]
@@ -76,6 +103,11 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Throws<InvalidOperationException>(() => ReadOnlyTikCommandExecutor.EnsureAllowed(command));
     }
 
+    /// <summary>
+    /// <c>EnsureAllowed</c> accepts the four exact print commands (<c>/system/identity/print</c>,
+    /// <c>/system/resource/print</c>, <c>/system/package/print</c>, <c>/system/routerboard/print</c>) without
+    /// throwing.
+    /// </summary>
     [Theory]
     [InlineData("/system/identity/print")]
     [InlineData("/system/resource/print")]
@@ -86,6 +118,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         ReadOnlyTikCommandExecutor.EnsureAllowed(command);
     }
 
+    /// <summary>
+    /// Collecting from a recording connection issues exactly the identity, resource, package and routerboard print
+    /// commands in that order. <c>CommandsIssued</c> matches the recorded list and the connection is disposed once.
+    /// </summary>
     [Fact]
     public async Task Collector_IssuesExactPrintCommands_WithoutParameters()
     {
@@ -115,6 +151,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Equal(1, recording.DisposeCount);
     }
 
+    /// <summary>
+    /// Reflection over the declared methods of <c>ReadOnlyMikrotikInventoryCollector</c> finds no method with a
+    /// string parameter whose name contains 'command', so callers cannot supply arbitrary commands.
+    /// </summary>
     [Fact]
     public void Collector_HasNoCommandStringApi()
     {
@@ -128,6 +168,12 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
                 && p.Name.Contains("command", StringComparison.OrdinalIgnoreCase)));
     }
 
+    /// <summary>
+    /// <c>IsAuthenticationFailure</c> is true for a <c>TikConnectionLoginException</c>, for one nested inside
+    /// another exception, and for messages 'cannot log in' and 'invalid user name or password'. It is false for
+    /// <c>IOException</c> 'connection refused', <c>TimeoutException</c> and a 'TLS authentication cipher
+    /// unavailable' error.
+    /// </summary>
     [Fact]
     public void Authentication_UsesTikConnectionLoginException()
     {
@@ -147,6 +193,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
             new InvalidOperationException("TLS authentication cipher unavailable")));
     }
 
+    /// <summary>
+    /// A login failure gives <c>AuthenticationFailed</c> with no usable inventory and no packages. The failure
+    /// detail is exactly 'Authentication failed.' and does not echo the password 'SuperSecret!'.
+    /// </summary>
     [Fact]
     public async Task AuthenticationFailure_NeverProducesPartialOrCompatibleInventory()
     {
@@ -164,6 +214,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Empty(result.Packages);
     }
 
+    /// <summary>
+    /// A factory that throws an <c>IOException</c> 'connection refused' gives <c>ConnectionFailed</c> with no
+    /// usable inventory, and the failure detail is the generic 'Connection failed.'.
+    /// </summary>
     [Fact]
     public async Task ConnectionRefused_IsConnectionFailed_NotCompatible()
     {
@@ -178,6 +232,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Equal("Connection failed.", result.FailureDetail);
     }
 
+    /// <summary>
+    /// A router with an empty identity gets identity status <c>Unavailable</c> and a null <c>Identity</c>.
+    /// Collection still ends <c>Succeeded</c> with a usable inventory.
+    /// </summary>
     [Fact]
     public async Task EmptyIdentity_RemainsEligible_AndInventoryCanSucceed()
     {
@@ -193,6 +251,9 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.True(result.HasUsableInventory);
     }
 
+    /// <summary>
+    /// If the resource print has no version, collection is <c>Partial</c> and the inventory is not usable.
+    /// </summary>
     [Fact]
     public async Task MissingVersion_IsPartial_NotUsable()
     {
@@ -202,6 +263,9 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.False(result.HasUsableInventory);
     }
 
+    /// <summary>
+    /// If the resource print has no architecture, collection is <c>Partial</c> and the inventory is not usable.
+    /// </summary>
     [Fact]
     public async Task MissingArchitecture_IsPartial_NotUsable()
     {
@@ -211,6 +275,9 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.False(result.HasUsableInventory);
     }
 
+    /// <summary>
+    /// If the package print returns no rows, collection is <c>Partial</c> and the inventory is not usable.
+    /// </summary>
     [Fact]
     public async Task MissingPackages_IsPartial_NotUsable()
     {
@@ -220,6 +287,11 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.False(result.HasUsableInventory);
     }
 
+    /// <summary>
+    /// A package row with no name, next to a valid <c>routeros-mipsbe</c> row, makes collection <c>Partial</c> with
+    /// no usable inventory. The failure detail says 'unparsable', and the valid <c>routeros-mipsbe</c> package is
+    /// still in the result.
+    /// </summary>
     [Fact]
     public async Task UnparsablePackageRow_MarksIncomplete()
     {
@@ -265,6 +337,11 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Contains(result.Packages, static p => p.Name == "routeros-mipsbe");
     }
 
+    /// <summary>
+    /// Collection succeeds. <c>ipv6</c> keeps the router-reported bundle <c>routeros-mipsbe</c> and its disabled
+    /// flag, so it counts as a bundled component. <c>user-manager</c> has no bundle and is not a bundled component,
+    /// so nothing is guessed from package names.
+    /// </summary>
     [Fact]
     public async Task PackageInventory_PreservesBundleAndDoesNotInferFromNames()
     {
@@ -286,6 +363,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Null(userManager.Bundle);
     }
 
+    /// <summary>
+    /// A RouterOS 7 layout collects successfully with no bundled components. The independent <c>routeros</c> and
+    /// <c>wifiwave2</c> packages are both present in the result.
+    /// </summary>
     [Fact]
     public async Task V7PackageLayout_PreservesIndependentMainAndOptionals()
     {
@@ -332,6 +413,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Contains(result.Packages, static p => p.Name == "wifiwave2");
     }
 
+    /// <summary>
+    /// The 3 second timeout given to <c>CollectAsync</c> reaches the connection factory options as
+    /// <c>ConnectTimeout</c>.
+    /// </summary>
     [Fact]
     public async Task ConnectTimeout_IsPassedToConnectionFactory()
     {
@@ -350,6 +435,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Equal(TimeSpan.FromSeconds(3), seen);
     }
 
+    /// <summary>
+    /// A fleet row whose collection is <c>Partial</c> has a null <c>Compatibility</c>. The summary shows 0 fully
+    /// compatible devices and 1 partial inventory.
+    /// </summary>
     [Fact]
     public async Task PartialInventory_IsNeverAssessedCompatible()
     {
@@ -372,6 +461,11 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Equal(1, report.Summary.PartialInventories);
     }
 
+    /// <summary>
+    /// With a 50 ms total timeout and collectors that never return, the summary is <c>Cancelled</c> and not
+    /// <c>Completed</c>. At least one router row has collection status <c>Cancelled</c>, and the summary notes say
+    /// the audit 'timed out'.
+    /// </summary>
     [Fact]
     public async Task TotalAuditTimeout_MarksIncomplete()
     {
@@ -400,6 +494,14 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Contains("timed out", report.Summary.Notes!, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Scenario: A router name is injected through the input CSV as a quoted field with embedded quotes (Edge,
+    /// "Site"), and the collected identity contains a comma, quotes and a newline. The audit report is written to a
+    /// temporary directory as CSV and JSON.
+    /// Expected: The CSV escapes both values by quoting the field and doubling the embedded quotes. The JSON contains
+    /// neither password nor secret, and its summary marks the audit completed and not cancelled.
+    /// Invariant: Untrusted router names cannot break out of a CSV cell, and no secrets reach the reports.
+    /// </summary>
     [Fact]
     public async Task Report_EscapesCsvAndOmitsSecrets()
     {
@@ -427,6 +529,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.True(doc.RootElement.GetProperty("summary").GetProperty("completed").GetBoolean());
     }
 
+    /// <summary>
+    /// <c>IsPathEqualOrUnder</c> is true for a <c>Reports</c> folder inside the firmware root and for the root
+    /// itself, and false for an unrelated temp folder.
+    /// </summary>
     [Fact]
     public void OutputPath_UnderFirmwareFiles_IsRejected()
     {
@@ -439,6 +545,10 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
             firmware));
     }
 
+    /// <summary>
+    /// Four input rows give 2 valid unique addresses, 1 duplicate and 1 invalid row. One router is collected and
+    /// one has a connection failure. <c>TotalInputRows</c> is 4, equal to the number of per-router rows.
+    /// </summary>
     [Fact]
     public async Task SummaryCounts_ReconcileWithPerRouterRows()
     {
@@ -475,12 +585,21 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         Assert.Equal(report.Routers.Count, report.Summary.TotalInputRows);
     }
 
+    /// <summary>
+    /// Runs the real read-only inventory collector against a scripted fake RouterOS connection for a fixed host and
+    /// returns its collection result.
+    /// </summary>
     private static async Task<ReadOnlyInventoryCollectionResult> Collect(TikFakeConnection fake) =>
         await new ReadOnlyMikrotikInventoryCollector(
                 new ScriptedMikrotikConnectionFactory(_ => fake),
                 NullLogger<ReadOnlyMikrotikInventoryCollector>.Instance)
             .CollectAsync("10.0.0.100", "admin", "x", 8728, TimeSpan.FromSeconds(5));
 
+    /// <summary>Builds a fake connection that answers the read-only inventory commands.</summary>
+    /// <param name="version">Version in the resource print, or null to omit it.</param>
+    /// <param name="architecture">Architecture in the resource print, or null to omit it.</param>
+    /// <param name="includePackages">Whether the package print succeeds.</param>
+    /// <returns>The scripted fake connection.</returns>
     private static TikFakeConnection BuildInventoryFake(
         string? version,
         string? architecture,
@@ -535,12 +654,19 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
         return fake.WithTrap(static rows => rows.First() == "/system/routerboard/print", "no such command");
     }
 
+    /// <summary>
+    /// Wraps the CSV text in a <c>StringReader</c> and runs it through <c>LiveAuditRouterCsvParser.Parse</c>.
+    /// </summary>
     private static LiveAuditRouterCsvParser.ParseResult Parse(string csv)
     {
         using StringReader reader = new(csv);
         return LiveAuditRouterCsvParser.Parse(reader);
     }
 
+    /// <summary>Creates a successful inventory result for <paramref name="ip"/>.</summary>
+    /// <param name="ip">Router IP address recorded on the result.</param>
+    /// <param name="identity">Router identity.</param>
+    /// <param name="routerName">Optional router name from the CSV.</param>
     private static ReadOnlyInventoryCollectionResult Success(
         string ip,
         string identity = "AP01.POP001.001.access",
@@ -571,6 +697,11 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
             ],
         };
 
+    /// <summary>Creates a fleet auditor over a temp firmware catalogue and a fixed RouterOS 7.23.8 target.</summary>
+    /// <param name="collector">Inventory collector fake driving the audit.</param>
+    /// <param name="totalTimeout">Optional overall audit timeout.</param>
+    /// <param name="maxConcurrent">Maximum concurrent router collections.</param>
+    /// <returns>The configured auditor.</returns>
     private static LivePackageCompatibilityFleetAuditor CreateAuditor(
         FakeCollector collector,
         TimeSpan? totalTimeout = null,
@@ -607,10 +738,23 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
             NullLogger<LivePackageCompatibilityFleetAuditor>.Instance);
     }
 
+    /// <summary>
+    /// Inventory collector fake that delegates to a scripted async factory keyed by router IP and cancellation
+    /// token, ignoring credentials and timeouts.
+    /// </summary>
     private sealed class FakeCollector(
         Func<string, CancellationToken, Task<ReadOnlyInventoryCollectionResult>> factory)
         : IReadOnlyMikrotikInventoryCollector
     {
+        /// <summary>Delegates to the scripted factory using only the router IP and cancellation token.</summary>
+        /// <param name="routerIp">Router IP address.</param>
+        /// <param name="username">User name (ignored).</param>
+        /// <param name="password">Password (ignored).</param>
+        /// <param name="port">API port (ignored).</param>
+        /// <param name="connectionTimeout">Connect timeout (ignored).</param>
+        /// <param name="routerName">Router name (ignored).</param>
+        /// <param name="cancellationToken">Token passed to the scripted factory.</param>
+        /// <returns>The scripted collection result.</returns>
         public Task<ReadOnlyInventoryCollectionResult> CollectAsync(
             string routerIp,
             string username,
@@ -622,11 +766,17 @@ public sealed class LivePackageCompatibilitySecurityReviewTests
             factory(routerIp, cancellationToken);
     }
 
+    /// <summary>
+    /// Firmware package catalogue fake that enumerates <c>*.npk</c> files under a temp root and parses each file
+    /// name into a package entry.
+    /// </summary>
     private sealed class DirectoryCatalog(string root) : IFirmwarePackageCatalog
     {
+        /// <summary>Gets only the main <c>routeros</c> packages from <see cref="GetPackages"/>.</summary>
         public IReadOnlyList<FirmwarePackageInfo> GetRouterOsPackages() =>
             GetPackages().Where(static p => p.PackageName.Equals("routeros", StringComparison.Ordinal)).ToList();
 
+        /// <summary>Enumerates <c>*.npk</c> files under the fixture root and parses each name into a firmware package.</summary>
         public IReadOnlyList<FirmwarePackageInfo> GetPackages()
         {
             List<FirmwarePackageInfo> list = [];

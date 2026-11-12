@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: RouterboardFirmwareUpgradeService.cs
+//
+// Description:
+// Post–RouterOS-7 RouterBOARD (RouterBOOT) assessment, optional upgrade,
+// reboot, and verification.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
 using MikrotikWorker.Configuration;
@@ -19,6 +28,19 @@ internal sealed class RouterboardFirmwareUpgradeService(
     TimeProvider timeProvider,
     ILogger<RouterboardFirmwareUpgradeService> logger)
 {
+    /// <summary>
+    /// Assesses the RouterBOARD firmware and, when needed, upgrades it, reboots, reconnects, and verifies the result.
+    /// Reports success without a reboot when no upgrade is required, and a failure when the assessment is inconclusive or the upgrade cannot be confirmed.
+    /// </summary>
+    /// <param name="connection">Open connection to the router.</param>
+    /// <param name="job">Scheduled job being executed.</param>
+    /// <param name="preInfo">Device information read before this stage.</param>
+    /// <param name="username">RouterOS user name used to reconnect.</param>
+    /// <param name="password">RouterOS password used to reconnect.</param>
+    /// <param name="priorRebootInitiated">Whether an earlier stage already rebooted the router.</param>
+    /// <param name="completedStageBefore">Last stage completed before this one, reported when this stage fails.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>The outcome of the RouterBOARD stage.</returns>
     public async Task<UpgradeExecutionResult> ExecuteAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -317,6 +339,11 @@ internal sealed class RouterboardFirmwareUpgradeService(
         }
     }
 
+    /// <summary>
+    /// Formats an elapsed or remaining time for log messages, as minutes and seconds or as seconds.
+    /// </summary>
+    /// <param name="value">Duration to format; negative values are treated as zero.</param>
+    /// <returns>The formatted text.</returns>
     private static string FormatDuration(TimeSpan value)
     {
         if (value < TimeSpan.Zero)

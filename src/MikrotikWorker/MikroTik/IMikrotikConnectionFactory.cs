@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: IMikrotikConnectionFactory.cs
+//
+// Description:
+// Abstraction over tik4net connection open for a single device. Callers own
+// disposal of the returned ITikConnection.
+//
+// -----------------------------------------------------------------------------
+
 using tik4net;
 
 namespace MikrotikWorker.MikroTik;
@@ -7,6 +16,9 @@ namespace MikrotikWorker.MikroTik;
 /// </summary>
 internal interface IMikrotikConnectionFactory
 {
+    /// <summary>
+    /// Validates <paramref name="connection"/> and opens a tik4net API session.
+    /// </summary>
     Task<ITikConnection> CreateAsync(
         MikrotikConnectionOptions connection,
         CancellationToken cancellationToken);

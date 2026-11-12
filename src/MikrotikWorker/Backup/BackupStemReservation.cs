@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: BackupStemReservation.cs
+//
+// Description:
+// Process-local claim of a backup stem via .stem.alloc marker. Complete() drops
+// the marker after real artefacts exist; Release()/Dispose() never deletes
+// content files and retains the marker if any content already exists.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Backup;
 
 /// <summary>
@@ -6,10 +16,22 @@ namespace MikrotikWorker.Backup;
 /// </summary>
 internal sealed class BackupStemReservation : IDisposable
 {
+    /// <summary>
+    /// Lock guarding the completed and released state.
+    /// </summary>
     private readonly object _gate = new();
+    /// <summary>
+    /// Set once the reservation was consumed by real artefact files.
+    /// </summary>
     private bool _completed;
+    /// <summary>
+    /// Set once the reservation has been completed or released, making further calls no-ops.
+    /// </summary>
     private bool _released;
 
+    /// <summary>
+    /// Creates a reservation for the given stem and absolute artefact paths.
+    /// </summary>
     public BackupStemReservation(
         string stem,
         string exportLocalPath,
@@ -25,20 +47,28 @@ internal sealed class BackupStemReservation : IDisposable
         MarkerPath = markerPath;
     }
 
+    /// <summary>Shared stem without extension.</summary>
     public string Stem { get; }
 
+    /// <summary>Absolute intended path for the <c>.rsc</c> export.</summary>
     public string ExportLocalPath { get; }
 
+    /// <summary>Absolute intended path for the <c>.backup</c> binary.</summary>
     public string BinaryLocalPath { get; }
 
+    /// <summary>Absolute intended path for the <c>.json</c> manifest.</summary>
     public string ManifestLocalPath { get; }
 
+    /// <summary>Absolute path of the <c>.stem.alloc</c> claim marker.</summary>
     public string MarkerPath { get; }
 
+    /// <summary><see cref="Stem"/> plus <c>.rsc</c>.</summary>
     public string ExportFileName => Stem + ".rsc";
 
+    /// <summary><see cref="Stem"/> plus <c>.backup</c>.</summary>
     public string BinaryFileName => Stem + ".backup";
 
+    /// <summary><see cref="Stem"/> plus <c>.json</c>.</summary>
     public string ManifestFileName => Stem + ".json";
 
     /// <summary>
@@ -87,8 +117,12 @@ internal sealed class BackupStemReservation : IDisposable
         }
     }
 
+    /// <inheritdoc cref="Release" />
     public void Dispose() => Release();
 
+    /// <summary>
+    /// Deletes the claim marker on a best-effort basis; if deletion fails the stem stays blocked.
+    /// </summary>
     private void TryDeleteMarker()
     {
         try

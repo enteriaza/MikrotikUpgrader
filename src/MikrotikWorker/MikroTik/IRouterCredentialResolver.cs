@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: IRouterCredentialResolver.cs
+//
+// Description:
+// Credential resolution for scheduled router jobs. CSV rows never supply
+// passwords; the production resolver returns shared Mikrotik:Username/Password.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
@@ -21,6 +30,8 @@ internal interface IRouterCredentialResolver
 /// <summary>
 /// Username/password for a single RouterOS API connection. Never log these values.
 /// </summary>
+/// <param name="Username">RouterOS API username.</param>
+/// <param name="Password">RouterOS API password.</param>
 internal sealed record RouterCredentials(string Username, string Password);
 
 /// <summary>
@@ -29,6 +40,11 @@ internal sealed record RouterCredentials(string Username, string Password);
 internal sealed class AppSettingsRouterCredentialResolver(IOptions<MikroTikOptions> options)
     : IRouterCredentialResolver
 {
+    /// <inheritdoc />
+    /// <remarks>
+    /// Returns <c>null</c> when username is whitespace or password is null/empty
+    /// (password may be intentionally empty only if configured as non-null empty — empty fails here).
+    /// </remarks>
     public ValueTask<RouterCredentials?> ResolveAsync(
         MikrotikScheduledJob job,
         CancellationToken cancellationToken)

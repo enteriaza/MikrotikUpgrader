@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: ReadOnlyMikrotikInventoryCollector.cs
+//
+// Description:
+// Connects with a short-lived API session and issues only
+// identity/resource/package/(optional)routerboard print commands. Structurally
+// independent from mutation methods and upgrade services. All RouterOS
+// commands are issued exclusively through .
+//
+// -----------------------------------------------------------------------------
+
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using MikrotikWorker.MikroTik;
@@ -14,6 +25,7 @@ internal sealed class ReadOnlyMikrotikInventoryCollector(
     IMikrotikConnectionFactory connectionFactory,
     ILogger<ReadOnlyMikrotikInventoryCollector> logger) : IReadOnlyMikrotikInventoryCollector
 {
+    /// <inheritdoc />
     public async Task<ReadOnlyInventoryCollectionResult> CollectAsync(
         string routerIp,
         string username,
@@ -293,6 +305,11 @@ internal sealed class ReadOnlyMikrotikInventoryCollector(
         }
     }
 
+    /// <summary>
+    /// Converts <c>/system/package/print</c> rows to package records. The <c>bundle</c> field is authoritative and is never inferred from names.
+    /// </summary>
+    /// <param name="rows">Package rows from the router.</param>
+    /// <returns>The parsed packages and the number of rows skipped because they had no name.</returns>
     internal static (List<InstalledPackageInfo> Packages, int UnparsableRows) ParsePackages(
         IEnumerable<ITikReSentence> rows)
     {
@@ -344,6 +361,21 @@ internal sealed class ReadOnlyMikrotikInventoryCollector(
         return false;
     }
 
+    /// <summary>
+    /// Assembles a collection result from the gathered data.
+    /// </summary>
+    /// <param name="routerIp">Router IP text.</param>
+    /// <param name="routerName">Display name from the CSV, if any.</param>
+    /// <param name="status">Overall collection status.</param>
+    /// <param name="identityStatus">Status of the identity read.</param>
+    /// <param name="identity">Router identity, if read.</param>
+    /// <param name="version">RouterOS version, if read.</param>
+    /// <param name="architecture">Architecture, if read.</param>
+    /// <param name="packages">Installed packages.</param>
+    /// <param name="detail">Failure or diagnostic detail.</param>
+    /// <param name="duration">Time the collection took.</param>
+    /// <param name="commands">Commands issued, as audit evidence.</param>
+    /// <returns>The result.</returns>
     private static ReadOnlyInventoryCollectionResult BuildResult(
         string routerIp,
         string? routerName,
@@ -371,6 +403,11 @@ internal sealed class ReadOnlyMikrotikInventoryCollector(
             CommandsIssued = commands.ToList(),
         };
 
+    /// <summary>
+    /// Trims a value, returning null for null or blank input.
+    /// </summary>
+    /// <param name="value">Text to normalise.</param>
+    /// <returns>The trimmed text, or null.</returns>
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

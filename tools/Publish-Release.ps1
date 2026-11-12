@@ -310,6 +310,7 @@ function Invoke-DotNetPublishWindowsHost {
         --self-contained true `
         -p:PublishAot=true `
         -p:SelfContained=true `
+        -p:NoWarn=NU1507 `
         -o $OutputDir `
         --nologo
     Assert-LastExitCode "dotnet publish ($Rid)"
@@ -325,7 +326,7 @@ function Invoke-DotNetPublishViaWsl {
     Assert-LastExitCode 'wslpath output'
 
     Write-Host "WSL: dotnet publish MikrotikWorker -c Release -r linux-x64 --self-contained true -p:PublishAot=true"
-    & wsl -d Ubuntu -- bash -lc "dotnet publish '$wslProject' -c Release -r linux-x64 --self-contained true -p:PublishAot=true -p:SelfContained=true -o '$wslOutput' --nologo"
+    & wsl -d Ubuntu -- bash -lc "dotnet publish '$wslProject' -c Release -r linux-x64 --self-contained true -p:PublishAot=true -p:SelfContained=true -p:NoWarn=NU1507 -o '$wslOutput' --nologo"
     Assert-LastExitCode 'WSL dotnet publish (linux-x64)'
 }
 
@@ -452,7 +453,7 @@ try {
         }
 
         Write-Host "Restoring $($mapped.Rid) assets for MikrotikWorker"
-        & dotnet restore $Project -r $mapped.Rid --nologo
+        & dotnet restore $Project -r $mapped.Rid -p:NoWarn=NU1507 --nologo
         Assert-LastExitCode "dotnet restore ($($mapped.Rid))"
 
         Publish-Platform -Folder $mapped.Folder -Rid $mapped.Rid -ExeSuffix $mapped.ExeSuffix

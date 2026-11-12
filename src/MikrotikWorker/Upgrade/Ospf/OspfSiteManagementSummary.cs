@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfSiteManagementSummary.cs
+//
+// Description:
+// Derives the mandatory site management summary /24 from interface-assigned
+// addresses inside 10.0.0.0/8, excluding Loopback /32 and designated backhaul
+// /30s.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Net.Sockets;
 
@@ -9,8 +19,21 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal static class OspfSiteManagementSummary
 {
+    /// <summary>
+    /// Infrastructure address space <c>10.0.0.0/8</c>; only addresses inside it can form the management summary.
+    /// </summary>
     private static readonly OspfIpPrefix TenDotZero = ParseRequired("10.0.0.0/8");
 
+    /// <summary>
+    /// Derives the site management <c>/24</c> from interface addresses.
+    /// Loopback, PPPoE, backhaul, and out-of-scope addresses are excluded. When several candidates remain, one is chosen only if exactly one is corroborated by a hint.
+    /// </summary>
+    /// <param name="ipAddresses">Captured <c>/ip/address</c> rows.</param>
+    /// <param name="loopback">Resolved Loopback Router ID result; must have succeeded.</param>
+    /// <param name="backhauls">Planned active backhauls whose <c>/30</c> subnets are excluded.</param>
+    /// <param name="corroboratingManagementCidrs">Optional management CIDR hints used to break ties.</param>
+    /// <returns>A successful result with the chosen <c>/24</c>, or a failed result describing why none could be chosen unambiguously.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when a required argument is null.</exception>
     public static OspfSiteManagementSummaryResult Derive(
         IReadOnlyList<OspfIpAddressRow> ipAddresses,
         OspfLoopbackRouterIdResult loopback,
@@ -190,6 +213,11 @@ internal static class OspfSiteManagementSummary
         return hints.OrderBy(static s => s, StringComparer.Ordinal).ToList();
     }
 
+    /// <summary>
+    /// Determines whether an interface name denotes a PPPoE role interface, whose addresses never contribute to management.
+    /// </summary>
+    /// <param name="interfaceName">Interface name from <c>/ip/address</c>.</param>
+    /// <returns><see langword="true"/> when the name contains <c>pppoe</c> or starts with <c>&lt;pppoe-</c>.</returns>
     internal static bool IsPppoeRoleInterface(string interfaceName)
     {
         string n = interfaceName.Trim();
@@ -197,6 +225,13 @@ internal static class OspfSiteManagementSummary
                || n.StartsWith("<pppoe-", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Parses the IPv4 host address of an interface address row.
+    /// </summary>
+    /// <param name="row">Address row to parse.</param>
+    /// <param name="host">Receives the address as a 32-bit value on success.</param>
+    /// <param name="error">Receives the failure reason when parsing fails.</param>
+    /// <returns><see langword="true"/> when the address and any prefix length are valid.</returns>
     private static bool TryParseAssignedHost(OspfIpAddressRow row, out uint host, out string? error)
     {
         host = 0;
@@ -224,6 +259,11 @@ internal static class OspfSiteManagementSummary
         return true;
     }
 
+    /// <summary>
+    /// Formats a 32-bit IPv4 value as dotted-quad text.
+    /// </summary>
+    /// <param name="host">IPv4 address as a 32-bit value.</param>
+    /// <returns>The dotted-quad address.</returns>
     private static string FormatHost(uint host)
     {
         byte[] bytes =
@@ -236,13 +276,29 @@ internal static class OspfSiteManagementSummary
         return new IPAddress(bytes).ToString();
     }
 
+    /// <summary>
+    /// Parses a compile-time constant CIDR, failing fast if it is invalid.
+    /// </summary>
+    /// <param name="cidr">CIDR text to parse.</param>
+    /// <returns>The parsed prefix.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when <paramref name="cidr"/> cannot be parsed.</exception>
     private static OspfIpPrefix ParseRequired(string cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p)
             ? p
             : throw new InvalidOperationException(cidr);
 
+    /// <summary>
+    /// Creates a failed result carrying a single error.
+    /// </summary>
+    /// <param name="error">Description of why derivation failed.</param>
+    /// <returns>A failed result.</returns>
     private static OspfSiteManagementSummaryResult Failed(string error) => Failed([error]);
 
+    /// <summary>
+    /// Creates a failed result carrying the supplied errors.
+    /// </summary>
+    /// <param name="errors">Reasons derivation failed.</param>
+    /// <returns>A failed result.</returns>
     private static OspfSiteManagementSummaryResult Failed(IReadOnlyList<string> errors) =>
         new()
         {
@@ -251,19 +307,47 @@ internal static class OspfSiteManagementSummary
         };
 }
 
+/// <summary>
+/// Derived site management summary /24 and supporting details.
+/// </summary>
 internal sealed class OspfSiteManagementSummaryResult
 {
+    /// <summary>
+    /// Gets a value indicating whether a single management <c>/24</c> was derived.
+    /// </summary>
     public required bool Succeeded { get; init; }
 
+    /// <summary>
+    /// The single site management <c>/24</c> in CIDR form (for example <c>10.20.30.0/24</c>) that the
+    /// in-scope interface addresses collapse into. <see langword="null"/> when derivation failed.
+    /// </summary>
     public string? ManagementCidr { get; init; }
 
+    /// <summary>
+    /// Evidence trail of the addresses that produced <see cref="ManagementCidr"/>, one entry per address
+    /// formatted as <c>interface=address-&gt;cidr</c> (the interface, its address, and the <c>/24</c> it maps to).
+    /// </summary>
     public IReadOnlyList<string> ContributingAddresses { get; init; } = [];
 
+    /// <summary>
+    /// Gets addresses outside <c>10.0.0.0/8</c> that were ignored.
+    /// </summary>
     public IReadOnlyList<string> IgnoredOutsideRangeAddresses { get; init; } = [];
 
+    /// <summary>
+    /// Gets PPPoE role interface addresses that were ignored.
+    /// </summary>
     public IReadOnlyList<string> IgnoredPppoeAddresses { get; init; } = [];
 
+    /// <summary>
+    /// Human-readable reasons no single management <c>/24</c> could be derived. Always empty when
+    /// <see cref="Succeeded"/> is <see langword="true"/>.
+    /// </summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
 
+    /// <summary>
+    /// Single-line failure message built by joining <see cref="Errors"/> with <c>"; "</c>, suitable for
+    /// logs and gate failures. <see langword="null"/> when derivation succeeded.
+    /// </summary>
     public string? Detail => Succeeded ? null : string.Join("; ", Errors);
 }

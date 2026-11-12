@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: JobTransientRetryTests.cs
+//
+// Description:
+// JobRetry behaviour for connection and authentication failures: independent
+// counters, delay eligibility, worker slot release, reset on success,
+// permanent failures, cancellation not consuming attempts, and ordered
+// dispatch after delayed retries.
+//
+// -----------------------------------------------------------------------------
+
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -10,8 +21,15 @@ using tik4net.Testing;
 
 namespace MikrotikWorker.Tests.Scheduling;
 
+/// <summary>
+/// Covers transient connect/login retry counters, delays, and terminal exhaustion.
+/// </summary>
 public sealed class JobTransientRetryTests
 {
+    /// <summary>
+    /// TimeoutException on connect.
+    /// Expects ConnectionFailureCount=1, NextRetryUtc ≈ now+10m, queued not dispatched.
+    /// </summary>
     [Fact]
     public async Task ConnectionTimeout_FirstFailure_RequeuesAboutTenMinutesLater()
     {
@@ -31,6 +49,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(1, factory.Attempts);
     }
 
+    /// <summary>
+    /// IOException with MaximumUnsuccessfulAttempts=10.
+    /// Expects ten requeues then eleventh failure untracks the import with no NextRetryUtc.
+    /// </summary>
     [Fact]
     public async Task ConnectionFailures_AttemptsOneThroughTen_AreRetryable_EleventhIsTerminal()
     {
@@ -63,6 +85,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(11, factory.Attempts);
     }
 
+    /// <summary>
+    /// After first failure, advance 9m (no retry) then +1m.
+    /// Expects attempt count unchanged until full delay elapses.
+    /// </summary>
     [Fact]
     public async Task DelayedJob_IsNotDispatchedBeforeRetryTime_AndBecomesEligibleAfter()
     {
@@ -91,6 +117,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(2, job.ConnectionFailureCount);
     }
 
+    /// <summary>
+    /// One host always fails connect; peer succeeds.
+    /// Expects failing job requeued and peer host recorded successful while import tracked.
+    /// </summary>
     [Fact]
     public async Task OtherDevicesContinue_WhileOneWaitsForRetry_AndWorkerSlotIsReleased()
     {
@@ -115,6 +145,10 @@ public sealed class JobTransientRetryTests
         Assert.True(harness.Scheduler.IsTracked(importId));
     }
 
+    /// <summary>
+    /// Fail twice then succeed (tik4net atomic connect+login).
+    /// Expects both counters cleared and pending drained after the successful attempt.
+    /// </summary>
     [Fact]
     public async Task SuccessfulAuthenticatedConnect_ResetsBothRetryCounters()
     {
@@ -139,6 +173,10 @@ public sealed class JobTransientRetryTests
         Assert.Null(job.NextRetryUtc);
     }
 
+    /// <summary>
+    /// TikConnectionLoginRefusedException.
+    /// Expects auth counter incremented, connection counter untouched, retry scheduled.
+    /// </summary>
     [Fact]
     public async Task AuthenticationRejection_Requeues_AndDoesNotConsumeConnectionAttempts()
     {
@@ -154,6 +192,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(time.GetUtcNow().AddMinutes(10), job.NextRetryUtc);
     }
 
+    /// <summary>
+    /// Ten auth retries then eleventh.
+    /// Expects import untracked after exhausting MaximumUnsuccessfulAttempts.
+    /// </summary>
     [Fact]
     public async Task AuthenticationFailures_EleventhAttempt_IsTerminal()
     {
@@ -180,6 +222,10 @@ public sealed class JobTransientRetryTests
         await WaitForAsync(() => !harness.Scheduler.IsTracked(job.ImportId), TimeSpan.FromSeconds(5));
     }
 
+    /// <summary>
+    /// Pre-seeded auth count 4 then SocketException connect failure.
+    /// Expects auth count unchanged when connection fails.
+    /// </summary>
     [Fact]
     public async Task ConnectionFailure_DoesNotConsumeAuthenticationAttempts()
     {
@@ -193,6 +239,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(4, job.AuthenticationFailureCount);
     }
 
+    /// <summary>
+    /// InvalidOperationException from factory.
+    /// Expects single attempt, counters 0, import untracked immediately.
+    /// </summary>
     [Fact]
     public async Task PermanentInvalidOperation_IsNotRetried()
     {
@@ -207,6 +257,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(1, factory.Attempts);
     }
 
+    /// <summary>
+    /// AggregateException of Timeout + OperationCanceledException.
+    /// Expects no retry counters/NextRetryUtc; treated as cancellation/terminal without retry budget use.
+    /// </summary>
     [Fact]
     public async Task AggregateTimeoutPlusCancellation_DoesNotIncrementCounters_OrScheduleRetry()
     {
@@ -227,6 +281,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(1, factory.Attempts);
     }
 
+    /// <summary>
+    /// AggregateException of Timeout + InvalidOperationException.
+    /// Expects terminal without incrementing retry counters.
+    /// </summary>
     [Fact]
     public async Task AggregateTimeoutPlusPermanent_DoesNotConsumeRetryAttempts()
     {
@@ -245,6 +303,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(1, factory.Attempts);
     }
 
+    /// <summary>
+    /// Enqueue A@+10m, B@+1m, C@+3m with gated factory.
+    /// Expects dispatch order B, C, A as each becomes due — no HOL blocking by A.
+    /// </summary>
     [Fact]
     public async Task DelayedEligibility_AbcOrdering_DispatchesInEligibleTimeOrder()
     {
@@ -309,6 +371,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(1, factory.DispatchOrder.Count(static h => h == "10.0.0.12"));
     }
 
+    /// <summary>
+    /// After first connection failure.
+    /// Expects same JobId and a single queued/pending entry.
+    /// </summary>
     [Fact]
     public async Task RetryPreservesJobIdentity_AndDoesNotDuplicateQueueEntries()
     {
@@ -325,6 +391,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(1, harness.Scheduler.PendingCount);
     }
 
+    /// <summary>
+    /// Cancel execution while CreateAsync is gated mid-connect.
+    /// Expects connection/auth counters remain 0.
+    /// </summary>
     [Fact]
     public async Task CancellationDuringConnect_DoesNotIncrementCounters()
     {
@@ -353,6 +423,10 @@ public sealed class JobTransientRetryTests
         await parts.DisposeAsync();
     }
 
+    /// <summary>
+    /// Dispose after first failure then advance past retry time.
+    /// Expects no further factory attempts and pending 0.
+    /// </summary>
     [Fact]
     public async Task Shutdown_DiscardsDelayedRetry_WithoutDispatch()
     {
@@ -370,6 +444,10 @@ public sealed class JobTransientRetryTests
         Assert.Equal(0, harness.Scheduler.PendingCount);
     }
 
+    /// <summary>
+    /// One IOException then success.
+    /// Expects two attempts, counters cleared, import completed/untracked.
+    /// </summary>
     [Fact]
     public async Task SuccessfulRetry_ProceedsThroughUpgradeWorkflowOnce()
     {
@@ -387,6 +465,9 @@ public sealed class JobTransientRetryTests
         Assert.Equal(0, job.ConnectionFailureCount);
     }
 
+    /// <summary>
+    /// Due job (start −1m) for the given import/row/IP.
+    /// </summary>
     private static MikrotikScheduledJob CreateJob(
         Guid importId,
         int row,
@@ -394,6 +475,9 @@ public sealed class JobTransientRetryTests
         string ip) =>
         CreateJobAt(importId, row, time, ip, TimeSpan.FromMinutes(-1), "R" + row);
 
+    /// <summary>
+    /// Job with configurable start offset from FakeTimeProvider now.
+    /// </summary>
     private static MikrotikScheduledJob CreateJobAt(
         Guid importId,
         int row,
@@ -412,6 +496,9 @@ public sealed class JobTransientRetryTests
             DateStopUtc = time.GetUtcNow().UtcDateTime.AddHours(6),
         };
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -428,12 +515,29 @@ public sealed class JobTransientRetryTests
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
+    /// <summary>
+    /// Always throws the supplied exception; counts CreateAsync attempts.
+    /// </summary>
+    /// <param name="exception">Exception thrown on every connection attempt.</param>
     private sealed class CountingFailFactory(Exception exception) : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Number of <see cref="CreateAsync"/> calls observed so far.
+        /// </summary>
         private int _attempts;
 
+        /// <summary>
+        /// Number of connect attempts made against this factory. Every attempt throws, so the value equals the number
+        /// of tries the executor made. Read with <c>Volatile.Read</c> because attempts arrive from worker threads.
+        /// </summary>
         public int Attempts => Volatile.Read(ref _attempts);
 
+        /// <summary>
+        /// Counts the attempt and then throws the configured exception instead of connecting.
+        /// </summary>
+        /// <param name="connection">Connection options for the attempted router (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
+        /// <returns>Never returns; always throws.</returns>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -443,13 +547,31 @@ public sealed class JobTransientRetryTests
         }
     }
 
+    /// <summary>
+    /// Throws N times then returns a populated fake connection.
+    /// </summary>
+    /// <param name="failuresBeforeSuccess">Number of initial attempts that fail before one succeeds.</param>
+    /// <param name="exception">Exception thrown for each failing attempt.</param>
     private sealed class FailThenSucceedFactory(int failuresBeforeSuccess, Exception exception)
         : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Number of <see cref="CreateAsync"/> calls observed so far.
+        /// </summary>
         private int _attempts;
 
+        /// <summary>
+        /// Number of connect attempts made against this factory, counting the initial failures and the final success.
+        /// Read with <c>Volatile.Read</c> because attempts arrive from worker threads.
+        /// </summary>
         public int Attempts => Volatile.Read(ref _attempts);
 
+        /// <summary>
+        /// Throws the configured exception for the first N attempts, then returns a fully populated fake connection.
+        /// </summary>
+        /// <param name="connection">Connection options for the attempted router (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
+        /// <returns>A populated fake connection once the failure budget is exhausted.</returns>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -464,10 +586,24 @@ public sealed class JobTransientRetryTests
         }
     }
 
+    /// <summary>
+    /// Fails one host; records successful peer hosts.
+    /// </summary>
+    /// <param name="failHost">Host address whose connection attempts always fail.</param>
     private sealed class SelectiveHostFactory(string failHost) : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Hosts for which a connection was created successfully; the configured failing host never appears, so tests
+        /// can show the other routers still ran.
+        /// </summary>
         public ConcurrentBag<string> SuccessHosts { get; } = [];
 
+        /// <summary>
+        /// Throws <see cref="IOException"/> for the configured failing host; otherwise records the host and returns a fake connection.
+        /// </summary>
+        /// <param name="connection">Connection options identifying the target host.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
+        /// <returns>A populated fake connection for hosts other than the failing one.</returns>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -482,19 +618,51 @@ public sealed class JobTransientRetryTests
         }
     }
 
+    /// <summary>
+    /// Records dispatch order and holds connects until ReleaseHost.
+    /// </summary>
     private sealed class OrderedGateFactory : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Serializes order recording and release/active registration for a connect attempt.
+        /// </summary>
         private readonly object _gate = new();
+
+        /// <summary>
+        /// Hosts in the order their connect attempts began.
+        /// </summary>
         private readonly ConcurrentQueue<string> _order = new();
+
+        /// <summary>
+        /// Per-host gates that hold a connect attempt until <see cref="ReleaseHost"/> is called.
+        /// </summary>
         private readonly ConcurrentDictionary<string, TaskCompletionSource> _releases = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Hosts whose connect attempt is currently blocked at the gate.
+        /// </summary>
         private readonly ConcurrentDictionary<string, byte> _active = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Gets a snapshot of hosts in the order their connect attempts were dispatched.
+        /// </summary>
         public IReadOnlyCollection<string> DispatchOrder => _order.ToArray();
 
+        /// <summary>
+        /// Hosts whose connect attempts are currently blocked at the gate, waiting for <see cref="ReleaseHost"/>.
+        /// </summary>
         public ICollection<string> ActiveHosts => _active.Keys;
 
+        /// <summary>
+        /// Number of connect attempts currently blocked at the gate, so tests can tell when the expected attempts
+        /// have arrived.
+        /// </summary>
         public int ActiveCount => _active.Count;
 
+        /// <summary>
+        /// Opens the gate for a host so its pending connect attempt completes.
+        /// </summary>
+        /// <param name="host">Host whose connect attempt should be released.</param>
         public void ReleaseHost(string host)
         {
             if (_releases.TryGetValue(host, out TaskCompletionSource? tcs))
@@ -503,6 +671,12 @@ public sealed class JobTransientRetryTests
             }
         }
 
+        /// <summary>
+        /// Records the host, then blocks until <see cref="ReleaseHost"/> is called for it or the token is cancelled.
+        /// </summary>
+        /// <param name="connection">Connection options identifying the target host.</param>
+        /// <param name="cancellationToken">Token that aborts the wait at the gate.</param>
+        /// <returns>A populated fake connection after the gate opens.</returns>
         public async Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -527,17 +701,42 @@ public sealed class JobTransientRetryTests
         }
     }
 
+    /// <summary>
+    /// Blocks in CreateAsync until Release; exposes Entered/Completed.
+    /// </summary>
     private sealed class CancelOnConnectFactory : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Completed once the first connect attempt has entered <see cref="CreateAsync"/>.
+        /// </summary>
         private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>
+        /// Gate that holds the connect attempt until <see cref="Release"/> is called.
+        /// </summary>
         private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>
+        /// Gets a value indicating whether a connect attempt has reached the gate.
+        /// </summary>
         public bool Entered => _entered.Task.IsCompleted;
 
+        /// <summary>
+        /// Gets a value indicating whether the connect attempt has finished (normally, cancelled, or faulted).
+        /// </summary>
         public bool Completed { get; private set; }
 
+        /// <summary>
+        /// Opens the gate so the pending connect attempt can proceed.
+        /// </summary>
         public void Release() => _release.TrySetResult();
 
+        /// <summary>
+        /// Signals entry, waits for <see cref="Release"/> or cancellation, and marks the attempt completed.
+        /// </summary>
+        /// <param name="connection">Connection options for the attempted router (ignored).</param>
+        /// <param name="cancellationToken">Token whose cancellation aborts the wait with <see cref="OperationCanceledException"/>.</param>
+        /// <returns>A populated fake connection when released without cancellation.</returns>
         public async Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -556,16 +755,41 @@ public sealed class JobTransientRetryTests
         }
     }
 
+    /// <summary>
+    /// Full scheduler+workers host with configurable factory, retry options, and
+    /// ScheduleSingleAsync helper over a temp Accepted CSV.
+    /// </summary>
     private sealed class RetryHarness : IAsyncDisposable
     {
+        /// <summary>
+        /// Underlying scheduler, workers, and temp folders shared with the cancellation scenarios.
+        /// </summary>
         private readonly ExecutionHarnessParts _parts;
 
+        /// <summary>
+        /// Wraps an already started set of harness parts.
+        /// </summary>
+        /// <param name="parts">Started scheduler/worker parts to expose.</param>
         private RetryHarness(ExecutionHarnessParts parts) => _parts = parts;
 
+        /// <summary>
+        /// Scheduler under test, owned by the shared execution parts of this harness.
+        /// </summary>
         public InMemoryJobScheduler Scheduler => _parts.Scheduler;
 
+        /// <summary>
+        /// Path of the placeholder Accepted CSV that scheduled imports are bound to.
+        /// </summary>
         public string AcceptedCsv => _parts.AcceptedCsv;
 
+        /// <summary>
+        /// Creates the temp jobs tree and starts the scheduler loop plus execution workers with the supplied factory.
+        /// </summary>
+        /// <param name="time">Fake clock driving scheduler and retry eligibility.</param>
+        /// <param name="factory">Connection factory used by the router job executor.</param>
+        /// <param name="retryOptions">Retry delays and limits; defaults are used when <see langword="null"/>.</param>
+        /// <param name="maxConcurrentRouterJobs">Execution worker/concurrency limit.</param>
+        /// <returns>A started harness; dispose it to stop loops and clean up.</returns>
         public static async Task<RetryHarness> CreateAsync(
             FakeTimeProvider time,
             IMikrotikConnectionFactory factory,
@@ -580,6 +804,9 @@ public sealed class JobTransientRetryTests
             return new RetryHarness(parts);
         }
 
+        /// <summary>
+        /// Registers a one-row import, schedules it, and binds Accepted path.
+        /// </summary>
         public async Task<MikrotikScheduledJob> ScheduleSingleAsync(string ip = "10.0.0.50")
         {
             Guid importId = Guid.NewGuid();
@@ -590,16 +817,47 @@ public sealed class JobTransientRetryTests
             return job;
         }
 
+        /// <summary>
+        /// Stops the scheduler and workers and removes temporary directories.
+        /// </summary>
+        /// <returns>A task that completes when disposal has finished.</returns>
         public ValueTask DisposeAsync() => _parts.DisposeAsync();
     }
 
+    /// <summary>
+    /// Shared scheduler + execution workers used by retry scenarios.
+    /// </summary>
     private sealed class ExecutionHarnessParts : IAsyncDisposable
     {
+        /// <summary>
+        /// Cancels the scheduler run loop during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _schedulerCts = new();
+
+        /// <summary>
+        /// Task running the scheduler loop.
+        /// </summary>
         private readonly Task _schedulerTask;
+
+        /// <summary>
+        /// Task running the router execution workers.
+        /// </summary>
         private readonly Task _executionTask;
+
+        /// <summary>
+        /// Temporary ScheduledJobs root deleted on disposal.
+        /// </summary>
         private readonly string _root;
 
+        /// <summary>
+        /// Initializes the parts and starts the scheduler run loop.
+        /// </summary>
+        /// <param name="scheduler">Scheduler under test.</param>
+        /// <param name="time">Clock shared with the scheduler and executor.</param>
+        /// <param name="acceptedCsv">Placeholder Accepted CSV path.</param>
+        /// <param name="root">Temporary ScheduledJobs root to delete on disposal.</param>
+        /// <param name="executionTask">Task running the execution workers.</param>
+        /// <param name="executionCts">Cancellation source that stops the execution workers.</param>
         private ExecutionHarnessParts(
             InMemoryJobScheduler scheduler,
             TimeProvider time,
@@ -617,14 +875,35 @@ public sealed class JobTransientRetryTests
             _schedulerTask = scheduler.RunAsync(_schedulerCts.Token);
         }
 
+        /// <summary>
+        /// Scheduler under test; it is run by the loop and execution workers these parts start.
+        /// </summary>
         public InMemoryJobScheduler Scheduler { get; }
 
+        /// <summary>
+        /// Clock shared by the scheduler and executor, so retry eligibility and scheduling see the same time.
+        /// </summary>
         public TimeProvider Time { get; }
 
+        /// <summary>
+        /// Path of the placeholder Accepted CSV that scheduled imports are bound to.
+        /// </summary>
         public string AcceptedCsv { get; }
 
+        /// <summary>
+        /// Cancellation source that stops the execution workers; cancelling it simulates host shutdown while jobs are
+        /// in flight.
+        /// </summary>
         public CancellationTokenSource ExecutionCts { get; }
 
+        /// <summary>
+        /// Builds the temp ScheduledJobs tree and Accepted CSV, then wires the scheduler and execution workers.
+        /// </summary>
+        /// <param name="time">Fake clock driving scheduling and retries.</param>
+        /// <param name="factory">Connection factory used by the router job executor.</param>
+        /// <param name="retryOptions">Retry delays and limits for connect/auth failures.</param>
+        /// <param name="maxConcurrentRouterJobs">Maximum concurrent router jobs and worker count.</param>
+        /// <returns>The started harness parts.</returns>
         public static Task<ExecutionHarnessParts> CreateAsync(
             FakeTimeProvider time,
             IMikrotikConnectionFactory factory,
@@ -663,6 +942,9 @@ public sealed class JobTransientRetryTests
                 executionCts));
         }
 
+        /// <summary>
+        /// Stops background loops and deletes temporary directories.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             _schedulerCts.Cancel();

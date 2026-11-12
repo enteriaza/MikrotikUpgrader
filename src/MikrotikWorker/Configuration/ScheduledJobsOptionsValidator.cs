@@ -1,9 +1,22 @@
+// -----------------------------------------------------------------------------
+// File: ScheduledJobsOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for ScheduledJobsOptions: non-empty path, positive intervals
+// and capacities, and MaxConcurrentRouterJobs at least 12.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="ScheduledJobsOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class ScheduledJobsOptionsValidator : IValidateOptions<ScheduledJobsOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, ScheduledJobsOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

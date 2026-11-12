@@ -1,9 +1,26 @@
+// -----------------------------------------------------------------------------
+// File: DeviceLogNaming.cs
+//
+// Description:
+// Shared Serilog property names and filesystem stem helpers for per-device logs
+// ({Identity}_{IP}.log), pending IP-only names, and identity→IP registration
+// via DeviceLogIdentityRegistry.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 
 namespace MikrotikWorker.Logging;
 
+/// <summary>
+/// Serilog property names and filesystem naming helpers for per-device log files.
+/// </summary>
 internal static class DeviceLogNaming
 {
+    /// <summary>
+    /// LogContext / event property whose value is the active device log file key
+    /// (pending or identity-based filename).
+    /// </summary>
     public const string DeviceLogKeyPropertyName = "DeviceLogKey";
 
     /// <summary>
@@ -38,6 +55,9 @@ internal static class DeviceLogNaming
         return $"{label}_{SanitizeIp(routerIp)}";
     }
 
+    /// <summary>
+    /// Pre-identity log file name: <c>pending_{IP}.log</c>.
+    /// </summary>
     public static string BuildPendingLogFileName(IPAddress routerIp)
     {
         ArgumentNullException.ThrowIfNull(routerIp);
@@ -62,6 +82,9 @@ internal static class DeviceLogNaming
         return stem + ".log";
     }
 
+    /// <summary>
+    /// Sanitises an IP for use in filenames (IPv4 dots kept; IPv6 <c>:</c> becomes <c>_</c>).
+    /// </summary>
     public static string SanitizeIp(IPAddress routerIp)
     {
         ArgumentNullException.ThrowIfNull(routerIp);
@@ -69,6 +92,10 @@ internal static class DeviceLogNaming
         return Sanitize(routerIp.ToString());
     }
 
+    /// <summary>
+    /// Keeps ASCII letters/digits, <c>-</c>, <c>_</c>, <c>.</c>; maps common separators to <c>_</c>;
+    /// truncates to 120 characters; returns <c>router</c> when nothing remains.
+    /// </summary>
     public static string Sanitize(string value)
     {
         ArgumentNullException.ThrowIfNull(value);

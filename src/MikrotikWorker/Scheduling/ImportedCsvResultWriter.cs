@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: ImportedCsvResultWriter.cs
+//
+// Description:
+// Thread-safe in-place updater for Accepted CSV result columns (UpgradeStarted,
+// UpgradeCompleted, Result). Resolves paths via <see cref="IImportedCsvPathResolver"/>,
+// serializes writers with a semaphore, writes through a temp file, and never lets
+// I/O failures change in-memory job outcomes. Also defines the path-resolver contract.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Text;
 using CsvHelper;
@@ -9,12 +20,18 @@ namespace MikrotikWorker.Scheduling;
 /// <summary>
 /// Thread-safe in-place updater for the imported Accepted CSV identified by import path + row number.
 /// </summary>
+/// <param name="pathResolver">Resolves Accepted CSV path for an import id.</param>
+/// <param name="logger">Service-only logging for skip/error/success.</param>
 internal sealed class ImportedCsvResultWriter(
     IImportedCsvPathResolver pathResolver,
     ILogger<ImportedCsvResultWriter> logger) : IImportedCsvResultWriter
 {
+    /// <summary>
+    /// Serializes result updates so concurrent jobs never rewrite the same CSV at once.
+    /// </summary>
     private readonly SemaphoreSlim _gate = new(1, 1);
 
+    /// <inheritdoc />
     public async Task RecordUpgradeStartedAsync(
         MikrotikScheduledJob job,
         DateTimeOffset startedAt,
@@ -30,6 +47,7 @@ internal sealed class ImportedCsvResultWriter(
             .ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task RecordJobCompletedAsync(
         MikrotikScheduledJob job,
         DateTimeOffset completedAt,
@@ -47,6 +65,10 @@ internal sealed class ImportedCsvResultWriter(
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Resolves the Accepted path, takes the writer gate, and updates the matching row.
+    /// Missing path is a logged no-op; other failures are logged without rethrowing (except cancel).
+    /// </summary>
     private async Task ApplyAsync(
         MikrotikScheduledJob job,
         string? startedAt,
@@ -93,6 +115,9 @@ internal sealed class ImportedCsvResultWriter(
         }
     }
 
+    /// <summary>
+    /// Loads the CSV, ensures result headers, patches the job's row, and atomically replaces via <c>.results.tmp</c>.
+    /// </summary>
     private async Task UpdateFileAsync(
         string csvPath,
         MikrotikScheduledJob job,
@@ -156,6 +181,7 @@ internal sealed class ImportedCsvResultWriter(
         }
     }
 
+    /// <summary>Reads header + data rows with CsvHelper; file row numbers come from the parser context.</summary>
     private static async Task<CsvDocument> ReadDocumentAsync(string path, CancellationToken cancellationToken)
     {
         await using FileStream stream = new(
@@ -197,6 +223,7 @@ internal sealed class ImportedCsvResultWriter(
         return new CsvDocument(headers, rows);
     }
 
+    /// <summary>Writes the in-memory document as UTF-8 CSV without a BOM.</summary>
     private static async Task WriteDocumentAsync(
         string path,
         CsvDocument document,
@@ -234,6 +261,7 @@ internal sealed class ImportedCsvResultWriter(
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Appends any missing result columns to the header list (case-insensitive check).</summary>
     private static void EnsureResultHeaders(CsvDocument document)
     {
         foreach (string column in ImportedCsvResultColumns.All)
@@ -246,6 +274,7 @@ internal sealed class ImportedCsvResultWriter(
         }
     }
 
+    /// <summary>CsvHelper settings: invariant culture, no trim, permissive missing/bad-data callbacks.</summary>
     private static CsvConfiguration CreateConfiguration() =>
         new(CultureInfo.InvariantCulture)
         {
@@ -257,6 +286,7 @@ internal sealed class ImportedCsvResultWriter(
             BadDataFound = null,
         };
 
+    /// <summary>Best-effort delete of a temp path; swallows all failures.</summary>
     private static void TryDelete(string path)
     {
         try
@@ -271,20 +301,31 @@ internal sealed class ImportedCsvResultWriter(
         }
     }
 
+    /// <summary>In-memory CSV header + row model used for rewrite.</summary>
+    /// <param name="headers">Ordered header names.</param>
+    /// <param name="rows">Data rows with original file row numbers.</param>
     private sealed class CsvDocument(List<string> headers, List<CsvDataRow> rows)
     {
+        /// <summary>Ordered header names (may grow when result columns are appended).</summary>
         public List<string> Headers { get; } = headers;
 
+        /// <summary>Data rows keyed for lookup by <see cref="CsvDataRow.FileRowNumber"/>.</summary>
         public List<CsvDataRow> Rows { get; } = rows;
     }
 
+    /// <summary>One CSV data row with case-insensitive field map.</summary>
+    /// <param name="fileRowNumber">Parser row number matching <see cref="MikrotikScheduledJob.RowNumber"/>.</param>
+    /// <param name="fields">Header→value map.</param>
     private sealed class CsvDataRow(int fileRowNumber, Dictionary<string, string> fields)
     {
+        /// <summary>Original 1-based file row number from CsvHelper.</summary>
         public int FileRowNumber { get; } = fileRowNumber;
 
+        /// <summary>Returns the field for <paramref name="header"/>, or empty when absent.</summary>
         public string Get(string header) =>
             fields.TryGetValue(header, out string? value) ? value : string.Empty;
 
+        /// <summary>Sets or overwrites the field for <paramref name="header"/>.</summary>
         public void Set(string header, string value) => fields[header] = value;
     }
 }
@@ -294,5 +335,11 @@ internal sealed class ImportedCsvResultWriter(
 /// </summary>
 internal interface IImportedCsvPathResolver
 {
+    /// <summary>
+    /// Looks up the Accepted CSV path registered for <paramref name="importId"/>.
+    /// </summary>
+    /// <param name="importId">Import whose path is requested.</param>
+    /// <param name="path">Full path when found; otherwise null.</param>
+    /// <returns><c>true</c> when a path is registered.</returns>
     bool TryGetAcceptedCsvPath(Guid importId, out string? path);
 }

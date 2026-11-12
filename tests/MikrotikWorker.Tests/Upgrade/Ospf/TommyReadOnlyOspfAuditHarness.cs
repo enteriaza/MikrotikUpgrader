@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: TommyReadOnlyOspfAuditHarness.cs
+//
+// Description:
+// Strictly read-only Tommy OSPF/state audit. No mutations, no job replay, no
+// backup create.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
@@ -17,10 +26,17 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class TommyReadOnlyOspfAuditHarness
 {
+    /// <summary>Environment variable naming the directory where audit evidence is written.</summary>
     public const string EvidenceRootEnv = "TOMMY_RO_AUDIT_EVIDENCE_DIR";
 
+    /// <summary>Indented JSON options used for evidence files.</summary>
     private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
 
+    /// <summary>
+    /// Scenario: live, read-only audit of the Tommy lab router after a full upgrade attempt, capturing OSPF inventory, addresses, neighbours and routes to an evidence folder.
+    /// Expected: FirmwareUpgrade stays disabled, the router reports the expected identity and mipsbe architecture, the audit JSON file is written and the inventory still contains a default-v2 instance.
+    /// Invariant: the audit performs no mutations and only runs when the live-test gate is armed.
+    /// </summary>
     [Fact]
     [Trait("Category", "Live")]
     public async Task Inspect_Tommy_ReadOnly_AfterFullUpgradeAttempt()
@@ -190,6 +206,10 @@ public sealed class TommyReadOnlyOspfAuditHarness
             i => string.Equals(i.Name, "default-v2", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Registers the options, validators, device log writer, Tik4net connection factory, API client and OSPF
+    /// operations that the harness needs.
+    /// </summary>
     private static void ConfigureServices(IServiceCollection services, IConfiguration configuration)
     {
         services.AddOptions<MikroTikOptions>()
@@ -218,6 +238,10 @@ public sealed class TommyReadOnlyOspfAuditHarness
         services.AddSingleton<IOspfMikrotikOperations, OspfMikrotikOperations>();
     }
 
+    /// <summary>Runs a read-only <c>print</c> command and returns each row as a dictionary of words.</summary>
+    /// <param name="connection">Open router connection.</param>
+    /// <param name="command">Print command path.</param>
+    /// <param name="cancellationToken">Token that cancels the command.</param>
     private static async Task<List<Dictionary<string, string>>> PrintAsync(
         ITikConnection connection,
         string command,

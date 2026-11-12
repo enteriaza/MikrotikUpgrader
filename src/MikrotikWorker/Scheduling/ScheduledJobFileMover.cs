@@ -1,12 +1,30 @@
+// -----------------------------------------------------------------------------
+// File: ScheduledJobFileMover.cs
+//
+// Description:
+// Static helper that performs non-destructive CSV moves across ScheduledJobs
+// lifecycle folders. On destination name collision it chooses a timestamped
+// unique name instead of overwriting, preserving both files for inspection.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Scheduling;
 
+/// <summary>
+/// Filesystem helper for moving scheduled CSV files without overwriting existing destinations.
+/// </summary>
 internal static class ScheduledJobFileMover
 {
     /// <summary>
     /// Moves <paramref name="sourcePath"/> into <paramref name="destinationDirectory"/> using the preferred file name.
     /// On collision, uses a timestamped unique name instead of overwriting.
     /// </summary>
+    /// <param name="sourcePath">Existing file to move.</param>
+    /// <param name="destinationDirectory">Target folder; created when absent.</param>
+    /// <param name="preferredFileName">Desired destination file name.</param>
+    /// <param name="logger">Optional logger for collision warnings.</param>
     /// <returns>The full destination path actually used.</returns>
+    /// <exception cref="ArgumentException">Thrown when any path argument is null or whitespace.</exception>
     public static string MoveSafely(
         string sourcePath,
         string destinationDirectory,

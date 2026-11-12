@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: PackageCompatibilityWorkflowGuardTests.cs
+//
+// Description:
+// Proves incompatible catalogues block upload/reboot and that ACE/BR skip v7
+// resolution.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -15,6 +24,12 @@ namespace MikrotikWorker.Tests.Upgrade;
 /// </summary>
 public sealed class PackageCompatibilityWorkflowGuardTests
 {
+    /// <summary>
+    /// Wrong arch only — mipsbe device cannot resolve.
+    /// With only an <c>arm</c> 6.49.23 package in the catalogue, a mipsbe router cannot resolve its v6 stepping
+    /// package. The executor must return <c>PackageResolutionFailed</c> without fetching, rebooting or taking a
+    /// backup (<c>CallCount</c> stays 0).
+    /// </summary>
     [Fact]
     public async Task IncompatibleV6Catalogue_BlocksBeforeUploadOrReboot()
     {
@@ -41,6 +56,12 @@ public sealed class PackageCompatibilityWorkflowGuardTests
         Assert.Equal(0, backup.CallCount);
     }
 
+    /// <summary>
+    /// No v7 package.
+    /// With a mipsbe 6.49.23 package but no RouterOS 7 package, the v6 stage runs to completion (one reboot,
+    /// 6.49.23 fetched) and the executor then returns <c>PackageResolutionFailed</c>. No 7.23.8 file may be
+    /// fetched.
+    /// </summary>
     [Fact]
     public async Task IncompatibleV7Catalogue_BlocksAfterSuccessfulV6_BeforeV7Upload()
     {
@@ -71,6 +92,11 @@ public sealed class PackageCompatibilityWorkflowGuardTests
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// An ACE identity with both a mipsbe 6.49.23 package and a 7.23.8 package in the catalogue must audit as
+    /// <c>Compatible</c> for the v6 stepping stage and for the RouterOS 7 stage, with
+    /// <c>Classification.ShouldUpgradeToV7</c> true.
+    /// </summary>
     [Fact]
     public void Ace_ResolvesV7InAudit()
     {
@@ -95,6 +121,12 @@ public sealed class PackageCompatibilityWorkflowGuardTests
         Assert.True(report.Classification.ShouldUpgradeToV7);
     }
 
+    /// <summary>
+    /// Auditor type only depends on resolver/catalog/target provider — no router ops.
+    /// Reflects over the first <c>PackageCompatibilityAuditor</c> constructor and asserts that none of its
+    /// parameters is an <c>IMikrotikRouterOperations</c> or an <c>IRouterOsV6UpgradeExecutor</c>, so the audit
+    /// cannot reach a router.
+    /// </summary>
     [Fact]
     public void Audit_DoesNotExposeMutationSurface()
     {
@@ -108,6 +140,11 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             static p => typeof(IRouterOsV6UpgradeExecutor).IsAssignableFrom(p.ParameterType));
     }
 
+    /// <summary>
+    /// Builds a <see cref="RouterOsV6UpgradeExecutor"/> over the supplied fakes with short test timeouts and a
+    /// RouterOS 7.23.8 target; reconnects throw unless a factory is supplied and backups default to a new <see
+    /// cref="CountingBackup"/>.
+    /// </summary>
     private static RouterOsV6UpgradeExecutor CreateExecutor(
         IMikrotikRouterOperations ops,
         string firmwareRoot,
@@ -158,6 +195,7 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             NullLogger<RouterOsV6UpgradeExecutor>.Instance);
     }
 
+    /// <summary>Builds a minimal scheduled job (router <c>R1</c>, 10.0.0.50) for executor calls.</summary>
     private static MikrotikScheduledJob CreateJob() =>
         new()
         {
@@ -170,6 +208,9 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             DateStopUtc = DateTime.UtcNow.AddHours(1),
         };
 
+    /// <summary>
+    /// Builds <see cref="MikrotikDeviceInfo"/> (mipsbe, hEX PoE) with the given identity and version.
+    /// </summary>
     private static MikrotikDeviceInfo CreateDevice(string identity, string version) =>
         new()
         {
@@ -179,6 +220,7 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             BoardName = "hEX PoE",
         };
 
+    /// <summary>Builds a ready-for-upgrade, compatible assessment targeting RouterOS 7.23.8.</summary>
     private static DeviceCompatibilityAssessment CreateAssessment() =>
         new()
         {
@@ -192,10 +234,13 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             AssessedAtUtc = DateTimeOffset.UtcNow,
         };
 
+    /// <summary>Backup fake that always succeeds and counts how many backups were requested.</summary>
     private sealed class CountingBackup : IDeviceBackupService
     {
+        /// <summary>Number of pre-upgrade backups requested.</summary>
         public int CallCount { get; private set; }
 
+        /// <summary>Counts the call and returns success with remote cleanup completed.</summary>
         public Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
             ITikConnection connection,
             MikrotikScheduledJob job,
@@ -209,25 +254,40 @@ public sealed class PackageCompatibilityWorkflowGuardTests
         }
     }
 
+    /// <summary>
+    /// Router operations fake for a RouterOS 6.49.10 access router that records fetch, reboot and backup-export calls
+    /// so tests can prove none happen when the package-compatibility guard blocks the upgrade.
+    /// </summary>
     private sealed class TrackingOps : IMikrotikRouterOperations
     {
+        /// <summary>
+        /// True once <see cref="FetchUrlToFileAsync"/> has been invoked, i.e. the firmware package fetch was
+        /// attempted.
+        /// </summary>
         public bool FetchCalled { get; private set; }
 
+        /// <summary>
+        /// True once <see cref="RebootAsync"/> has been invoked, i.e. the executor requested a router reboot.
+        /// </summary>
         public bool RebootCalled { get; private set; }
 
+        /// <summary>Number of configuration exports requested (the first backup step).</summary>
         public int BackupCalls { get; private set; }
 
+        /// <summary>Returns RouterOS 6.49.10 device info for <c>AP01.POP001.001.access</c>.</summary>
         public Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
             string host,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(CreateDevice("AP01.POP001.001.access", "6.49.10"));
 
+        /// <summary>Returns a single enabled <c>routeros-mipsbe</c> 6.49.10 package.</summary>
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<InstalledPackageInfo>>([new("routeros-mipsbe", "6.49.10", false)]);
 
+        /// <summary>Counts the export in <see cref="BackupCalls"/> without writing a file.</summary>
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -237,6 +297,7 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             return Task.CompletedTask;
         }
 
+        /// <summary>No-op: pretends the binary <c>.backup</c> system backup was saved on the router.</summary>
         public Task SaveSystemBackupAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -244,12 +305,16 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>Always reports the file as missing.</summary>
         public Task<RouterFileInfo?> FindFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<RouterFileInfo?>(null);
 
+        /// <summary>
+        /// No-op: files are reported ready immediately, so the executor never waits on backup-file polling.
+        /// </summary>
         public Task WaitForFileAsync(
             ITikConnection connection,
             string fileName,
@@ -258,12 +323,14 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>No-op: pretends the file was deleted from the router.</summary>
         public Task RemoveFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>Marks the fetch as called; no data is transferred.</summary>
         public Task FetchUrlToFileAsync(
             ITikConnection connection,
             string url,
@@ -275,30 +342,39 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             return Task.CompletedTask;
         }
 
+        /// <summary>Marks the reboot as requested.</summary>
         public Task RebootAsync(ITikConnection connection, CancellationToken cancellationToken = default)
         {
             RebootCalled = true;
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Reports zero matching system scripts, so legacy automation cleanup finds nothing to inspect.
+        /// </summary>
         public Task<int> CountSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>No-op: there are no legacy scripts to remove.</summary>
         public Task RemoveSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Reports zero matching schedulers, so legacy automation cleanup finds nothing to inspect.
+        /// </summary>
         public Task<int> CountSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>No-op: there are no legacy schedulers to remove.</summary>
         public Task RemoveSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
@@ -306,21 +382,36 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Stateful router operations fake for a given identity: the reported version starts at 6.49.10 and follows <see
+    /// cref="VersionsAfterReboot"/> after each reboot.
+    /// </summary>
     private sealed class StageOps(string identity) : IMikrotikRouterOperations
     {
+        /// <summary>
+        /// 1-based index of the latest reboot into <see cref="VersionsAfterReboot"/>; zero before any reboot.
+        /// </summary>
         private int _rebootIndex;
 
+        /// <summary>Versions reported after each successive reboot; the last entry repeats once exhausted.</summary>
         public List<string> VersionsAfterReboot { get; init; } = [];
 
+        /// <summary>Number of reboots requested so far.</summary>
         public int RebootCount { get; private set; }
 
+        /// <summary>Destination file names passed to <see cref="FetchUrlToFileAsync"/>, in call order.</summary>
         public List<string> FetchedFiles { get; } = [];
 
+        /// <summary>
+        /// Version reported now: 6.49.10 before any reboot, then the entry of <see cref="VersionsAfterReboot"/>
+        /// selected by the latest reboot.
+        /// </summary>
         private string CurrentVersion =>
             RebootCount == 0
                 ? "6.49.10"
                 : VersionsAfterReboot[Math.Min(_rebootIndex - 1, VersionsAfterReboot.Count - 1)];
 
+        /// <summary>Returns device info for the configured identity at the current version.</summary>
         public Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
             string host,
@@ -333,6 +424,10 @@ public sealed class PackageCompatibilityWorkflowGuardTests
                 BoardName = "hEX",
             });
 
+        /// <summary>
+        /// Returns a single main package (<c>routeros-mipsbe</c> on RouterOS 6, <c>routeros</c> on 7+) at the current
+        /// version.
+        /// </summary>
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default)
@@ -344,12 +439,14 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             ]);
         }
 
+        /// <summary>No-op: pretends the <c>.rsc</c> configuration export was written on the router.</summary>
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>No-op: pretends the binary <c>.backup</c> system backup was saved on the router.</summary>
         public Task SaveSystemBackupAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -357,12 +454,16 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>Reports every file as present with 4 bytes, matching the stub firmware payloads.</summary>
         public Task<RouterFileInfo?> FindFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, 4));
 
+        /// <summary>
+        /// No-op: files are reported ready immediately, so the executor never waits on backup-file polling.
+        /// </summary>
         public Task WaitForFileAsync(
             ITikConnection connection,
             string fileName,
@@ -371,12 +472,14 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>No-op: pretends the file was deleted from the router.</summary>
         public Task RemoveFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>Records the destination file name without transferring anything.</summary>
         public Task FetchUrlToFileAsync(
             ITikConnection connection,
             string url,
@@ -388,6 +491,7 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             return Task.CompletedTask;
         }
 
+        /// <summary>Counts the reboot and selects the next post-reboot version.</summary>
         public Task RebootAsync(ITikConnection connection, CancellationToken cancellationToken = default)
         {
             RebootCount++;
@@ -395,24 +499,32 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Reports zero matching system scripts, so legacy automation cleanup finds nothing to inspect.
+        /// </summary>
         public Task<int> CountSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>No-op: there are no legacy scripts to remove.</summary>
         public Task RemoveSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Reports zero matching schedulers, so legacy automation cleanup finds nothing to inspect.
+        /// </summary>
         public Task<int> CountSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>No-op: there are no legacy schedulers to remove.</summary>
         public Task RemoveSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
@@ -420,11 +532,20 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Firmware package catalog that enumerates <c>.npk</c> files under a directory and parses their names, so tests
+    /// can use stub packages without the production catalog.
+    /// </summary>
     private sealed class DirectoryCatalog(string root) : IFirmwarePackageCatalog
     {
+        /// <summary>Returns only the main <c>routeros</c> packages from <see cref="GetPackages"/>.</summary>
         public IReadOnlyList<FirmwarePackageInfo> GetRouterOsPackages() =>
             GetPackages().Where(static p => p.PackageName.Equals("routeros", StringComparison.Ordinal)).ToList();
 
+        /// <summary>
+        /// Scans the directory recursively and returns an entry for each <c>.npk</c> whose file name parses as a
+        /// firmware package.
+        /// </summary>
         public IReadOnlyList<FirmwarePackageInfo> GetPackages()
         {
             List<FirmwarePackageInfo> list = [];

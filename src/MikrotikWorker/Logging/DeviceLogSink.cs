@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: DeviceLogSink.cs
+//
+// Description:
+// Serilog ILogEventSink that forwards events carrying DeviceLogKey into
+// DeviceLogWriter, skipping events marked ServiceOnly.
+//
+// -----------------------------------------------------------------------------
+
 using Serilog.Core;
 using Serilog.Events;
 
@@ -8,6 +17,7 @@ namespace MikrotikWorker.Logging;
 /// </summary>
 internal sealed class DeviceLogSink(DeviceLogWriter writer) : ILogEventSink
 {
+    /// <inheritdoc />
     public void Emit(LogEvent logEvent)
     {
         ArgumentNullException.ThrowIfNull(logEvent);

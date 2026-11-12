@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityReadOnlyGuardTests.cs
+//
+// Description:
+// Guards that live-audit command paths remain allowlisted read-only print
+// operations.
+//
+// -----------------------------------------------------------------------------
+
 using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -10,8 +19,16 @@ using MikrotikWorker.Upgrade;
 using tik4net;
 
 namespace MikrotikWorker.Tests.Upgrade.Live;
+    /// <summary>
+    /// Scenario: live fleet auditor wired with a throwing upgrade executor, counting backup, and tracking ops.
+    /// Expected: audit completes using the fake collector/catalogue path without invoking upgrade/backup mutation surfaces.
+    /// Invariant: read-only package-compatibility audit must never call the upgrade executor or create backups.
+    /// </summary>
 public sealed class LivePackageCompatibilityReadOnlyGuardTests
 {
+    /// <summary>
+    /// Read-only RouterOS print commands the live audit collector is permitted to issue (identity, resource, package and routerboard).
+    /// </summary>
     private static readonly HashSet<string> Allowed = new(StringComparer.Ordinal)
     {
         "/system/identity/print",
@@ -20,6 +37,11 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         "/system/routerboard/print",
     };
 
+    /// <summary>
+    /// A recording connection must see only commands in the allow-list, and at least one. None of them contains
+    /// fetch, reboot, backup, export, install or uninstall, and collection ends <c>Succeeded</c> with
+    /// <c>CommandsIssued</c> equal to the recorded commands.
+    /// </summary>
     [Fact]
     public async Task LiveCollector_IssuesOnlyPermittedPrintCommands()
     {
@@ -48,6 +70,10 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         Assert.Equal(recording.Commands, result.CommandsIssued);
     }
 
+    /// <summary>
+    /// The collector's constructor takes no <c>IMikrotikRouterOperations</c>, <c>IRouterOsV6UpgradeExecutor</c>,
+    /// <c>IDeviceBackupService</c> or <c>IMikrotikApiClient</c> parameter.
+    /// </summary>
     [Fact]
     public void LiveCollector_DoesNotDependOnMutationServices()
     {
@@ -58,6 +84,10 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         Assert.DoesNotContain(ctor.GetParameters(), static p => typeof(IMikrotikApiClient).IsAssignableFrom(p.ParameterType));
     }
 
+    /// <summary>
+    /// The fleet auditor's constructor takes no router-operations, upgrade-executor or backup-service parameter. It
+    /// does take an <c>IReadOnlyMikrotikInventoryCollector</c> and an <c>IPackageCompatibilityAuditor</c>.
+    /// </summary>
     [Fact]
     public void FleetAuditor_DoesNotDependOnMutationServices()
     {
@@ -69,6 +99,10 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         Assert.Contains(ctor.GetParameters(), static p => typeof(IPackageCompatibilityAuditor).IsAssignableFrom(p.ParameterType));
     }
 
+    /// <summary>
+    /// Structural: the collector only needs a connection factory and a logger. Its constructor has exactly two
+    /// parameters, so it cannot reach an upgrade executor.
+    /// </summary>
     [Fact]
     public void LiveAuditPath_CannotResolveUpgradeExecutorFromCollectorGraph()
     {
@@ -77,6 +111,11 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         Assert.Equal(2, collector.GetConstructors()[0].GetParameters().Length);
     }
 
+    /// <summary>
+    /// Scenario: fleet auditor with throwing upgrade executor plus counting backup/tracking ops.
+    /// Expected: audit completes via collector/catalogue without upgrade or backup mutations.
+    /// Invariant: read-only package-compatibility audit never touches the upgrade executor.
+    /// </summary>
     [Fact]
     public async Task FleetAuditor_NeverTouchesUpgradeExecutor()
     {
@@ -137,9 +176,16 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         Assert.NotNull(ops);
     }
 
+    /// <summary>
+    /// Inventory collector fake that returns the result produced by a synchronous factory for the router IP,
+    /// ignoring credentials and timeouts.
+    /// </summary>
     private sealed class FakeCollector(Func<string, ReadOnlyInventoryCollectionResult> factory)
         : IReadOnlyMikrotikInventoryCollector
     {
+        /// <summary>
+        /// Returns the result produced by the supplied factory for <paramref name="routerIp"/>, ignoring credentials and timeouts.
+        /// </summary>
         public Task<ReadOnlyInventoryCollectionResult> CollectAsync(
             string routerIp,
             string username,
@@ -151,10 +197,20 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
             Task.FromResult(factory(routerIp));
     }
 
+    /// <summary>
+    /// Upgrade executor fake that counts calls and always throws, proving the upgrade path is unreachable from the
+    /// live audit.
+    /// </summary>
     private sealed class ThrowingUpgradeExecutor : IRouterOsV6UpgradeExecutor
     {
+        /// <summary>
+        /// Number of times <see cref="ExecuteAsync"/> was invoked; must stay zero during a live audit.
+        /// </summary>
         public int CallCount { get; private set; }
 
+        /// <summary>
+        /// Records the call and always throws, proving the upgrade executor is unreachable from the live audit path.
+        /// </summary>
         public Task<UpgradeExecutionResult> ExecuteAsync(
             ITikConnection connection,
             MikrotikScheduledJob job,
@@ -170,10 +226,20 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         }
     }
 
+    /// <summary>
+    /// Backup service fake that counts calls and always throws, proving backups are unreachable from the live audit
+    /// path.
+    /// </summary>
     private sealed class CountingBackup : IDeviceBackupService
     {
+        /// <summary>
+        /// Number of times <see cref="CreatePreUpgradeBackupAsync"/> was invoked; must stay zero during a live audit.
+        /// </summary>
         public int CallCount { get; private set; }
 
+        /// <summary>
+        /// Records the call and always throws, proving backups are unreachable from the live audit path.
+        /// </summary>
         public Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
             ITikConnection connection,
             MikrotikScheduledJob job,
@@ -187,25 +253,47 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         }
     }
 
+    /// <summary>
+    /// Router operations fake for the live audit read-only guard: device reads, exports, backups, fetches and
+    /// reboots throw or record the attempt, while file lookups, waits and removals are harmless no-ops.
+    /// </summary>
     private sealed class TrackingOps : IMikrotikRouterOperations
     {
+        /// <summary>
+        /// Whether a firmware fetch was attempted; must stay <see langword="false"/> during a live audit.
+        /// </summary>
         public bool FetchCalled { get; private set; }
 
+        /// <summary>
+        /// Whether a reboot was attempted; must stay <see langword="false"/> during a live audit.
+        /// </summary>
         public bool RebootCalled { get; private set; }
 
+        /// <summary>
+        /// Number of configuration export or system backup attempts; must stay zero during a live audit.
+        /// </summary>
         public int BackupCalls { get; private set; }
 
+        /// <summary>
+        /// Always throws, since the mutation-capable API client must not be used by the live audit.
+        /// </summary>
         public Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
             string host,
             CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Mutation-capable API client must not be used.");
 
+        /// <summary>
+        /// Always throws, since the mutation-capable API client must not be used by the live audit.
+        /// </summary>
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Mutation-capable API client must not be used.");
 
+        /// <summary>
+        /// Counts the attempt and throws, since configuration export must not be used by the live audit.
+        /// </summary>
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -215,6 +303,9 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
             throw new InvalidOperationException("export must not be used.");
         }
 
+        /// <summary>
+        /// Counts the attempt and throws, since system backups must not be used by the live audit.
+        /// </summary>
         public Task SaveSystemBackupAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -225,12 +316,18 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
             throw new InvalidOperationException("backup must not be used.");
         }
 
+        /// <summary>
+        /// Reports that the file does not exist.
+        /// </summary>
         public Task<RouterFileInfo?> FindFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<RouterFileInfo?>(null);
 
+        /// <summary>
+        /// No-op; there is nothing to wait for.
+        /// </summary>
         public Task WaitForFileAsync(
             ITikConnection connection,
             string fileName,
@@ -239,12 +336,18 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op; there is nothing to remove.
+        /// </summary>
         public Task RemoveFileAsync(
             ITikConnection connection,
             string fileName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Records the attempt and throws, since firmware fetches must not be used by the live audit.
+        /// </summary>
         public Task FetchUrlToFileAsync(
             ITikConnection connection,
             string url,
@@ -256,6 +359,9 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
             throw new InvalidOperationException("fetch must not be used.");
         }
 
+        /// <summary>
+        /// Records the attempt and throws, since reboots must not be used by the live audit.
+        /// </summary>
         public Task RebootAsync(ITikConnection connection, CancellationToken cancellationToken = default)
         {
             RebootCalled = true;
@@ -263,11 +369,21 @@ public sealed class LivePackageCompatibilityReadOnlyGuardTests
         }
     }
 
+    /// <summary>
+    /// Firmware package catalogue fake that enumerates <c>*.npk</c> files under a temp root and parses each file
+    /// name into a package entry.
+    /// </summary>
     private sealed class DirectoryCatalog(string root) : IFirmwarePackageCatalog
     {
+        /// <summary>
+        /// Returns only the catalogued packages named <c>routeros</c> (the main RouterOS package).
+        /// </summary>
         public IReadOnlyList<FirmwarePackageInfo> GetRouterOsPackages() =>
             GetPackages().Where(static p => p.PackageName.Equals("routeros", StringComparison.Ordinal)).ToList();
 
+        /// <summary>
+        /// Enumerates every <c>*.npk</c> file under the root directory and returns those whose file names parse as RouterOS packages.
+        /// </summary>
         public IReadOnlyList<FirmwarePackageInfo> GetPackages()
         {
             List<FirmwarePackageInfo> list = [];

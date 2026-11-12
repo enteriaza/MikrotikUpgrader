@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: OspfStaticSummaryRedistribution.cs
+//
+// Description:
+// Optional stage: advertise OSPF area-range prefixes as redistributed static
+// blackhole routes through the managed ospf-v2-out filter. Does not claim
+// Type-3 LSA summarisation; redistributed statics produce Type-5 external LSAs
+// when originated.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Options;
@@ -29,18 +40,30 @@ internal interface IOspfStaticSummaryRedistributionService
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Outcome of the optional static-summary redistribution stage.
+/// </summary>
 internal sealed class OspfStaticSummaryRedistributionResult
 {
+    /// <summary>True when the stage completed successfully or was intentionally skipped.</summary>
     public bool Succeeded { get; private init; }
+    /// <summary>True when the stage did nothing because <c>RedistributeSummaryviaStatics</c> is disabled.</summary>
     public bool Skipped { get; private init; }
+    /// <summary>Upgrade outcome to report on failure; meaningful only when <see cref="Succeeded"/> is false.</summary>
     public UpgradeOutcome FailureOutcome { get; private init; }
+    /// <summary>Human-readable result or failure text, including compensation information when compensation ran.</summary>
     public string? Detail { get; private init; }
+    /// <summary>True when an in-process rollback of the OSPF instance was attempted after a post-enable failure.</summary>
     public bool CompensationAttempted { get; private init; }
+    /// <summary>Whether the compensation restored the pre-stage instance state; null when no compensation was attempted.</summary>
     public bool? CompensationSucceeded { get; private init; }
+    /// <summary>Compensation failure or success note (for example a read-back mismatch); null when compensation was not attempted.</summary>
     public string? CompensationDetail { get; private init; }
 
+    /// <summary>Creates a successful result for a stage that applied and verified its configuration.</summary>
     public static OspfStaticSummaryRedistributionResult Ok() => new() { Succeeded = true };
 
+    /// <summary>Creates a successful result for a stage that was skipped because static-summary redistribution is disabled.</summary>
     public static OspfStaticSummaryRedistributionResult SkippedDisabled() => new()
     {
         Succeeded = true,
@@ -48,6 +71,14 @@ internal sealed class OspfStaticSummaryRedistributionResult
         Detail = "OSPF static summary redistribution skipped (RedistributeSummaryviaStatics=false).",
     };
 
+    /// <summary>
+    /// Creates a failed result tagged with <see cref="UpgradeOutcome.OspfStaticSummaryRedistributionFailed"/>.
+    /// </summary>
+    /// <param name="detail">Failure description.</param>
+    /// <param name="compensationAttempted">True when rollback of the OSPF instance was attempted; appends a rollback sentence to the detail.</param>
+    /// <param name="compensationSucceeded">Whether the rollback restored the pre-stage state; anything other than true is reported as a failed rollback needing manual inspection.</param>
+    /// <param name="compensationDetail">Rollback failure or read-back text appended when the rollback did not succeed.</param>
+    /// <returns>A failed result carrying the combined detail and compensation fields.</returns>
     public static OspfStaticSummaryRedistributionResult Failed(
         string detail,
         bool compensationAttempted = false,
@@ -78,10 +109,19 @@ internal sealed class OspfStaticSummaryRedistributionResult
 /// <summary>Fleet-managed constants for the optional static-summary redistribution stage.</summary>
 internal static class OspfStaticSummaryRedistributionConstants
 {
+    /// <summary>Name of the managed routing-filter chain that gates which static routes are redistributed into OSPFv2.</summary>
     public const string OutFilterChainName = "ospf-v2-out";
+    /// <summary>Administrative distance given to the managed blackhole routes; also used to recognise them (and distinguish them from unrelated routes).</summary>
     public const int BlackholeDistance = 250;
+    /// <summary>Terminating rule of the managed chain; anything not explicitly accepted is rejected.</summary>
     public const string FinalRejectRule = "reject";
 
+    /// <summary>
+    /// Builds the filter rule that accepts exactly one managed blackhole static route.
+    /// </summary>
+    /// <param name="cidr">Canonical CIDR of the summary prefix.</param>
+    /// <param name="prefixLength">Prefix length that the rule must match (<c>dst-len</c>).</param>
+    /// <returns>RouterOS v7 filter rule text matching protocol static, the blackhole distance, the destination and length, with an <c>accept</c> action.</returns>
     public static string BuildAcceptRule(string cidr, int prefixLength) =>
         "if (protocol static && distance == "
         + BlackholeDistance.ToString(CultureInfo.InvariantCulture)
@@ -92,11 +132,18 @@ internal static class OspfStaticSummaryRedistributionConstants
         + ") { accept }";
 }
 
+/// <summary>
+/// Applies and verifies optional blackhole static routes and ospf-v2-out filter chaining.
+/// </summary>
+/// <param name="ops">RouterOS OSPF operations used to read the inventory and IP addresses for identity resolution.</param>
+/// <param name="options">Supplies the <c>RedistributeSummaryviaStatics</c> switch that enables or skips the stage.</param>
+/// <param name="logger">Logger for stage progress, compensation and failures.</param>
 internal sealed class OspfStaticSummaryRedistributionService(
     IOspfMikrotikOperations ops,
     IOptions<OspfSummaryRedistributionOptions> options,
     ILogger<OspfStaticSummaryRedistributionService> logger) : IOspfStaticSummaryRedistributionService
 {
+    /// <summary>Applies the stage in order: static blackhole routes, the <c>ospf-v2-out</c> chain, chain attachment, then enabling static redistribution, verifying each step. A failure after redistribution was enabled triggers compensation that restores the original instance settings.</summary>
     public async Task<OspfStaticSummaryRedistributionResult> ApplyAndVerifyAsync(
         ITikConnection connection,
         OspfMigrationPlan? plan,
@@ -250,6 +297,12 @@ internal sealed class OspfStaticSummaryRedistributionService(
         return OspfStaticSummaryRedistributionResult.Ok();
     }
 
+    /// <summary>
+    /// Extracts the distinct IPv4 area-range prefixes from the plan.
+    /// </summary>
+    /// <param name="plan">Migration plan providing the area ranges.</param>
+    /// <returns>Unique prefixes ordered by their canonical CIDR text.</returns>
+    /// <exception cref="InvalidOperationException">The plan has no area ranges, a range is not an IPv4 CIDR, or no usable prefix remains.</exception>
     internal static IReadOnlyList<OspfIpPrefix> CollectUniqueAreaRangePrefixes(OspfMigrationPlan plan)
     {
         if (plan.AreaRanges.Count == 0)
@@ -283,6 +336,15 @@ internal sealed class OspfStaticSummaryRedistributionService(
             .ToList();
     }
 
+    /// <summary>
+    /// Restores the OSPFv2 instance to its pre-stage <c>redistribute</c> and <c>out-filter-chain</c> after a failure that occurred once redistribution enabling had started.
+    /// </summary>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="liveInstanceName">Name of the live OSPFv2 instance that was modified.</param>
+    /// <param name="original">Instance snapshot captured before the stage mutated anything.</param>
+    /// <param name="stageFailureDetail">Original failure text to report alongside the compensation result.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A failed result whose compensation fields state whether the read-back matched the original snapshot.</returns>
     private async Task<OspfStaticSummaryRedistributionResult> CompensateAfterEnableFailureAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -341,6 +403,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         }
     }
 
+    /// <summary>Ensures one managed blackhole static route exists per prefix: missing routes are added; an existing route that is not the managed blackhole, or duplicate managed routes, cause a fail-closed exception rather than an overwrite.</summary>
     private async Task ReconcileBlackholeRoutesAsync(
         ITikConnection connection,
         IReadOnlyList<OspfIpPrefix> prefixes,
@@ -400,6 +463,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         }
     }
 
+    /// <summary>Verifies each prefix has exactly one managed blackhole route (blackhole flag set, expected distance).</summary>
     private async Task VerifyBlackholeRoutesAsync(
         ITikConnection connection,
         IReadOnlyList<OspfIpPrefix> prefixes,
@@ -428,6 +492,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         }
     }
 
+    /// <summary>Makes the <c>ospf-v2-out</c> chain equal the expected rules in order. If it already matches nothing changes; otherwise existing managed rules are removed, the final reject is added as an anchor, and each accept rule is inserted before it using <c>place-before</c>.</summary>
     private async Task ReconcileOutFilterChainAsync(
         ITikConnection connection,
         IReadOnlyList<OspfIpPrefix> prefixes,
@@ -496,6 +561,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         }
     }
 
+    /// <summary>Verifies the chain has exactly the expected rules in order, accept rules contain <c>protocol static</c> (never <c>protocol == static</c>), and the reject rule is uniquely last.</summary>
     private async Task VerifyOutFilterChainAsync(
         ITikConnection connection,
         IReadOnlyList<OspfIpPrefix> prefixes,
@@ -562,6 +628,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
             live.Count);
     }
 
+    /// <summary>Sets <c>out-filter-chain</c> on the live OSPFv2 instance to the managed chain; a no-op when already set. Runs before redistribution is enabled so no unfiltered window exists.</summary>
     private async Task AttachOutFilterChainAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -596,6 +663,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Verifies the live OSPFv2 instance references the managed out-filter chain.</summary>
     private async Task VerifyOutFilterAttachedAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -615,6 +683,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         }
     }
 
+    /// <summary>Adds <c>static</c> to the instance <c>redistribute</c> list, preserving existing sources; a no-op when static is already included.</summary>
     private async Task EnableStaticRedistributionAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -652,6 +721,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Verifies the instance still redistributes static and still references the managed out-filter chain after the change.</summary>
     private async Task VerifyInstanceRedistributionAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -684,6 +754,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
             Field(row, "out-filter-chain"));
     }
 
+    /// <summary>Rewrites <c>redistribute</c> and <c>out-filter-chain</c> from the snapshot: blank original values are cleared (<c>redistribute</c> set empty, <c>out-filter-chain</c> unset), other values are set back if they differ.</summary>
     private async Task RestoreInstanceSnapshotAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -741,6 +812,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         }
     }
 
+    /// <summary>Reads the current <c>redistribute</c> and <c>out-filter-chain</c> values of the live OSPFv2 instance.</summary>
     private async Task<InstanceSnapshot> ReadInstanceSnapshotAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -753,6 +825,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
             NormalizeOptional(Field(row, "out-filter-chain")));
     }
 
+    /// <summary>Returns the <c>.id</c> of the last reject rule in the managed chain, which serves as the <c>place-before</c> anchor.</summary>
     private async Task<string> FindRejectRuleIdAsync(
         ITikConnection connection,
         CancellationToken cancellationToken)
@@ -774,6 +847,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
             $"Cannot locate reject rule in chain {OspfStaticSummaryRedistributionConstants.OutFilterChainName} for place-before ordering.");
     }
 
+    /// <summary>Reads the rules of the managed chain (id and rule text) in router print order, which is treated as evaluation order.</summary>
     private async Task<List<(string Id, string Rule)>> ReadManagedChainRulesAsync(
         ITikConnection connection,
         CancellationToken cancellationToken)
@@ -809,6 +883,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         return result;
     }
 
+    /// <summary>Finds the live non-OSPFv3 instance with the given name; throws <see cref="OspfStaticSummaryRedistributionException"/> when absent.</summary>
     private async Task<ITikReSentence> FindV2InstanceAsync(
         ITikConnection connection,
         string liveInstanceName,
@@ -828,6 +903,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
                    $"Live OSPFv2 instance '{liveInstanceName}' not found.");
     }
 
+    /// <summary>Builds the expected managed chain content: one accept rule per prefix followed by the final reject.</summary>
     internal static IReadOnlyList<string> BuildExpectedRuleTexts(IReadOnlyList<OspfIpPrefix> prefixes)
     {
         List<string> rules = prefixes
@@ -839,6 +915,11 @@ internal sealed class OspfStaticSummaryRedistributionService(
         return rules;
     }
 
+    /// <summary>
+    /// Adds <c>static</c> to a comma-separated <c>redistribute</c> list without duplicating or reordering other sources.
+    /// </summary>
+    /// <param name="existing">Current redistribute value; may be null/blank.</param>
+    /// <returns>The existing sources (deduplicated, case-insensitively) followed by <c>static</c>.</returns>
     internal static string MergeRedistributeWithStatic(string? existing)
     {
         List<string> parts = [];
@@ -860,6 +941,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
         return string.Join(",", parts);
     }
 
+    /// <summary>Returns true when the comma-separated redistribute list contains <c>static</c> (case-insensitive).</summary>
     internal static bool RedistributeIncludesStatic(string? redistribute)
     {
         if (string.IsNullOrWhiteSpace(redistribute))
@@ -872,6 +954,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
             .Any(static p => string.Equals(p, "static", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>Normalises a redistribute list for comparison: blank becomes empty, otherwise entries are trimmed and sorted case-insensitively.</summary>
     internal static string NormalizeRedistribute(string? value) =>
         string.IsNullOrWhiteSpace(value)
             ? string.Empty
@@ -880,6 +963,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
                 value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .OrderBy(static s => s, StringComparer.OrdinalIgnoreCase));
 
+    /// <summary>Compares two snapshots using order-insensitive redistribute lists and case-insensitive out-filter-chain names (null equals empty).</summary>
     private static bool SnapshotEquals(InstanceSnapshot expected, InstanceSnapshot observed) =>
         string.Equals(
             NormalizeRedistribute(expected.Redistribute),
@@ -890,9 +974,11 @@ internal sealed class OspfStaticSummaryRedistributionService(
             observed.OutFilterChain ?? string.Empty,
             StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Trims a RouterOS field, mapping null/blank to null.</summary>
     private static string? NormalizeOptional(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    /// <summary>Returns true when the route row is a blackhole route at the managed distance.</summary>
     private static bool IsManagedBlackhole(ITikReSentence row)
     {
         if (!IsTruthyFlag(Field(row, "blackhole")))
@@ -907,6 +993,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
             StringComparison.Ordinal);
     }
 
+    /// <summary>Interprets a RouterOS boolean field; an empty value (flag present without value) counts as true, as do <c>true</c>, <c>yes</c> and <c>1</c>.</summary>
     private static bool IsTruthyFlag(string? value) =>
         value is not null
         && (value.Length == 0
@@ -914,6 +1001,7 @@ internal sealed class OspfStaticSummaryRedistributionService(
             || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
             || value == "1");
 
+    /// <summary>Collapses runs of whitespace to single spaces and trims, so rule texts compare independently of formatting.</summary>
     private static string NormalizeRule(string rule)
     {
         StringBuilder sb = new(rule.Length);
@@ -938,14 +1026,24 @@ internal sealed class OspfStaticSummaryRedistributionService(
         return sb.ToString();
     }
 
+    /// <summary>Reads a field from a RouterOS sentence, returning null when the row or field is missing.</summary>
     private static string? Field(ITikReSentence? row, string name) =>
         row?.GetResponseFieldOrDefault(name, null);
 
+    /// <summary>
+    /// Snapshot of OSPFv2 instance redistribute and out-filter-chain fields for verification.
+    /// </summary>
+    /// <param name="Redistribute">Raw redistribute property value.</param>
+    /// <param name="OutFilterChain">Raw out-filter-chain property value.</param>
     private readonly record struct InstanceSnapshot(string? Redistribute, string? OutFilterChain);
 }
 
+/// <summary>
+/// Thrown when static-summary redistribution hits an unexpected RouterOS/API failure.
+/// </summary>
 internal sealed class OspfStaticSummaryRedistributionException : InvalidOperationException
 {
+    /// <summary>Initialises the exception with a message describing the RouterOS verification or reconciliation failure.</summary>
     public OspfStaticSummaryRedistributionException(string message)
         : base(message)
     {

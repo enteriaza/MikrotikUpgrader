@@ -1,7 +1,22 @@
+// -----------------------------------------------------------------------------
+// File: UpgradeOutcome.cs
+//
+// Description:
+// Terminal upgrade outcomes, completed-stage labels, and the UpgradeExecutionResult
+// DTO returned by RouterOsV6UpgradeExecutor and related upgrade services. Stage
+// labels are reported only after that stage's required verification succeeds.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// Terminal outcome of an upgrade job or stage. Some values are skips that must still
+/// map to a failed/blocked job terminal (for example <see cref="SkippedUpgradeDisabled"/>).
+/// </summary>
 public enum UpgradeOutcome
 {
+    /// <summary>Upgrade path was not entered or no attempt was made.</summary>
     NotAttempted = 0,
 
     /// <summary>Device already runs the configured RouterOS 7 target; verified, no upgrade needed.</summary>
@@ -16,14 +31,31 @@ public enum UpgradeOutcome
     /// <summary>Full multi-stage success ending on the configured RouterOS 7 target.</summary>
     UpgradeSucceeded = 3,
 
+    /// <summary>Package fetch, staging, or a non-specific package-stage failure.</summary>
     UpgradeFailed = 4,
+
+    /// <summary>Reboot reconnect or post-reboot verification window timed out.</summary>
     UpgradeTimedOut = 5,
+
+    /// <summary>Post-reboot RouterOS version did not match the stage target.</summary>
     UpgradeVersionMismatch = 6,
+
+    /// <summary>Post-reboot package inventory failed strict verification.</summary>
     UpgradePackageMismatch = 7,
+
+    /// <summary>Caller cancellation interrupted an in-progress upgrade stage.</summary>
     UpgradeInterrupted = 8,
+
+    /// <summary>Automated path cannot safely decide; operator review required.</summary>
     ManualReviewRequired = 9,
+
+    /// <summary>Pre-upgrade or pre-OSPF central backup failed verification.</summary>
     BackupFailed = 10,
+
+    /// <summary>Catalogue resolution could not select required .npk packages.</summary>
     PackageResolutionFailed = 11,
+
+    /// <summary>Assessment, schedule window, identity policy, or similar gate blocked the job.</summary>
     PolicyBlocked = 12,
 
     // 13 was UpgradeSucceededV6Only (removed: the workflow never stops after v6 and reports success).
@@ -107,12 +139,18 @@ public static class UpgradeCompletedStages
     public const string RouterboardFirmware = "routerboard-firmware";
 }
 
+/// <summary>
+/// Result returned by the upgrade executor and RouterBOARD service for one job attempt.
+/// </summary>
 public sealed class UpgradeExecutionResult
 {
+    /// <summary>Terminal outcome for this attempt.</summary>
     public required UpgradeOutcome Outcome { get; init; }
 
+    /// <summary>Optional human-readable detail explaining skips and failures.</summary>
     public string? Detail { get; init; }
 
+    /// <summary>Last observed RouterOS version after the attempt (when known).</summary>
     public string? PostUpgradeVersion { get; init; }
 
     /// <summary>

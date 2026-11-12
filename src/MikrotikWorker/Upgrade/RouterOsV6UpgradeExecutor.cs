@@ -1,3 +1,16 @@
+// -----------------------------------------------------------------------------
+// File: RouterOsV6UpgradeExecutor.cs
+//
+// Description:
+// Orchestrates the multi-stage RouterOS upgrade workflow for a single scheduled
+// job: policy gates, UpgradeStarted CSV boundary, legacy FleetUpgrade cleanup,
+// optional v6 stepping, OSPF capture/validate, RouterOS 7 package stage,
+// verified backup before OSPF mutation, OSPF apply/verify, optional static-
+// summary redistribution, and RouterBOARD firmware. Owns intermediate
+// post-reboot connections; never disposes the caller-owned Conn₀.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
 using MikrotikWorker.Backup;
@@ -10,8 +23,16 @@ using tik4net;
 
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// Executes the fleet RouterOS upgrade path for one job on an already-open API connection.
+/// </summary>
 internal interface IRouterOsV6UpgradeExecutor
 {
+    /// <summary>
+    /// Runs the full upgrade workflow after connect/preflight have already succeeded.
+    /// Records <c>UpgradeStarted</c> only after administrative, version, assessment, and
+    /// schedule-window gates pass — before any mutation (legacy cleanup, backup, fetch, reboot, OSPF).
+    /// </summary>
     Task<UpgradeExecutionResult> ExecuteAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -23,6 +44,10 @@ internal interface IRouterOsV6UpgradeExecutor
         CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Multi-stage upgrade executor: v6 stepping when needed, then RouterOS 7, then
+/// backup-before-OSPF, OSPF migration, optional summary redistribution, RouterBOARD.
+/// </summary>
 internal sealed class RouterOsV6UpgradeExecutor(
     IMikrotikRouterOperations routerOperations,
     IMikrotikConnectionFactory connectionFactory,
@@ -39,9 +64,13 @@ internal sealed class RouterOsV6UpgradeExecutor(
     ILogger<RouterOsV6UpgradeExecutor> logger,
     IImportedCsvResultWriter? csvResultWriter = null) : IRouterOsV6UpgradeExecutor
 {
+    /// <summary>
+    /// Writes progress and results back to the imported CSV; a no-op writer when none is registered.
+    /// </summary>
     private readonly IImportedCsvResultWriter _csvResultWriter =
         csvResultWriter ?? NullImportedCsvResultWriter.Instance;
 
+    /// <inheritdoc />
     public async Task<UpgradeExecutionResult> ExecuteAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -680,6 +709,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
     }
 
+    /// <summary>
+    /// Copies an execution result with optional completed-stage / architecture overrides.
+    /// </summary>
     private static UpgradeExecutionResult WithOverrides(
         UpgradeExecutionResult result,
         string? completedStage = null,
@@ -694,6 +726,10 @@ internal sealed class RouterOsV6UpgradeExecutor(
             CompletedStage = completedStage ?? result.CompletedStage,
         };
 
+    /// <summary>
+    /// Re-reads identity when possible and classifies for RouterOS 7 eligibility.
+    /// Identity re-read failures keep the last known identity; empty becomes Unknown.
+    /// </summary>
     private async Task<DeviceIdentityClassification> ClassifyIdentityAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -730,6 +766,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
         return DeviceIdentityClassifier.Classify(identity);
     }
 
+    /// <summary>
+    /// Logs identity classification and second-stage eligibility reason.
+    /// </summary>
     private void LogClassification(DeviceIdentityClassification classification)
     {
         logger.LogInformation(
@@ -743,6 +782,8 @@ internal sealed class RouterOsV6UpgradeExecutor(
 
     /// <summary>
     /// Runs the optional static-summary redistribution stage after OSPF verify and before RouterBOARD.
+    /// Skipped results do not advance <see cref="UpgradeCompletedStages"/>; failures preserve the plan
+    /// and block RouterBOARD by returning a failed execution result.
     /// </summary>
     private async Task<OptionalSummaryStageGate> RunOptionalStaticSummaryRedistributionAsync(
         ITikConnection connection,
@@ -785,19 +826,44 @@ internal sealed class RouterOsV6UpgradeExecutor(
         return OptionalSummaryStageGate.Completed();
     }
 
+    /// <summary>
+    /// Outcome of the optional OSPF static-summary redistribution stage.
+    /// </summary>
     private readonly struct OptionalSummaryStageGate
     {
+        /// <summary>Non-null when redistribution failed and RouterBOARD must not proceed.</summary>
         public UpgradeExecutionResult? Failure { get; private init; }
+
+        /// <summary>True when redistribution ran and verified (not when skipped).</summary>
         public bool StageCompleted { get; private init; }
 
+        /// <summary>
+        /// Creates the outcome for when the redistribution stage did not run.
+        /// </summary>
+        /// <returns>A gate with no failure and the stage not completed.</returns>
         public static OptionalSummaryStageGate Skipped() => new();
 
+        /// <summary>
+        /// Creates the outcome for when redistribution ran and verified.
+        /// </summary>
+        /// <returns>A gate with no failure and the stage completed.</returns>
         public static OptionalSummaryStageGate Completed() => new() { StageCompleted = true };
 
+        /// <summary>
+        /// Creates the outcome for when redistribution failed.
+        /// </summary>
+        /// <param name="failure">Result to return to the caller.</param>
+        /// <returns>A gate carrying the failure.</returns>
         public static OptionalSummaryStageGate Failed(UpgradeExecutionResult failure) =>
             new() { Failure = failure };
     }
 
+    /// <summary>
+    /// One package-upgrade stage (v6 stepping or RouterOS 7): resolve packages, backup,
+    /// fetch/stage .npk files, reboot, reconnect, verify version/arch/packages.
+    /// Never disposes the input connection; transfers ownership of a post-reboot connection
+    /// via <see cref="StageExecutionResult.LiveConnection"/> on success.
+    /// </summary>
     private async Task<StageExecutionResult> ExecuteStageAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -1360,6 +1426,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
     }
 
+    /// <summary>
+    /// Polls until the staged package file exists on the router at the exact expected size, or times out.
+    /// </summary>
     private async Task<RouterFileInfo?> WaitForFetchedPackageSizeAsync(
         ITikConnection connection,
         string fileName,
@@ -1386,6 +1455,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
         return null;
     }
 
+    /// <summary>
+    /// Builds a <see cref="UpgradeOutcome.PolicyBlocked"/> result and logs the reason.
+    /// </summary>
     private UpgradeExecutionResult PolicyBlock(string detail)
     {
         logger.LogWarning("Upgrade policy blocked device: {Detail}", detail);
@@ -1396,6 +1468,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
         };
     }
 
+    /// <summary>
+    /// Builds a post-reboot timeout result with elapsed-time logging.
+    /// </summary>
     private UpgradeExecutionResult TimedOutAfterReboot(
         bool rebootInitiated,
         DateTimeOffset rebootInitiatedAt,
@@ -1421,9 +1496,15 @@ internal sealed class RouterOsV6UpgradeExecutor(
     internal static bool IsCentralBackupVerified(DeviceBackupResult backup) =>
         backup.Succeeded || backup.RemoteCleanupFailed;
 
+    /// <summary>
+    /// Whether a package stage outcome counts as verified success for continuing the workflow.
+    /// </summary>
     private static bool IsStageSuccess(UpgradeOutcome outcome) =>
         outcome is UpgradeOutcome.UpgradeSucceeded or UpgradeOutcome.SkippedAlreadyAtTarget;
 
+    /// <summary>
+    /// Formats a duration for reconnection/timeout log messages.
+    /// </summary>
     private static string FormatDuration(TimeSpan value)
     {
         if (value < TimeSpan.Zero)
@@ -1436,16 +1517,26 @@ internal sealed class RouterOsV6UpgradeExecutor(
             : $"{value.TotalSeconds:0.###}s";
     }
 
+    /// <summary>
+    /// Result of one package stage, including an owned live connection on success.
+    /// </summary>
     private sealed class StageExecutionResult
     {
+        /// <summary>Stage outcome reported to the caller.</summary>
         public required UpgradeExecutionResult Execution { get; init; }
 
+        /// <summary>
+        /// Post-reboot connection owned by the executor on success; null on failure.
+        /// </summary>
         public ITikConnection? LiveConnection { get; init; }
 
+        /// <summary>Device info read after successful version verification.</summary>
         public MikrotikDeviceInfo? PostDeviceInfo { get; init; }
 
+        /// <summary>Installed package inventory after successful verification.</summary>
         public IReadOnlyList<InstalledPackageInfo>? PostPackages { get; init; }
 
+        /// <summary>Creates a failed stage result with no live connection transfer.</summary>
         public static StageExecutionResult Failed(UpgradeExecutionResult execution) =>
             new() { Execution = execution };
     }

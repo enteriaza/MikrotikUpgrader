@@ -1,11 +1,27 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikConnectFailureClassifierTests.cs
+//
+// Description:
+// Unit tests for MikrotikConnectFailureClassifier covering cancellation, auth,
+// connection, permanent outcomes, AggregateException precedence, and LoginNoAnswer ambiguity.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net.Sockets;
 using MikrotikWorker.MikroTik;
 using tik4net;
 
 namespace MikrotikWorker.Tests.MikroTik;
 
+/// <summary>
+/// Covers connect-failure classification for retry counters.
+/// </summary>
 public sealed class MikrotikConnectFailureClassifierTests
 {
+    /// <summary>
+    /// TikConnectionLoginRefusedException.
+    /// Expects RetryableAuthentication.
+    /// </summary>
     [Fact]
     public void LoginRefused_IsRetryableAuthentication()
     {
@@ -15,6 +31,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(ex));
     }
 
+    /// <summary>
+    /// TikConnectionLoginException wrapper.
+    /// Expects RetryableAuthentication.
+    /// </summary>
     [Fact]
     public void LoginException_IsRetryableAuthentication()
     {
@@ -24,6 +44,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(ex));
     }
 
+    /// <summary>
+    /// TikConnectionLoginNoAnswerException (ambiguous timeout during login).
+    /// Expects RetryableConnection so auth budgets are not consumed.
+    /// </summary>
     [Fact]
     public void LoginNoAnswer_IsRetryableConnection_NotAuthentication()
     {
@@ -33,6 +57,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(ex));
     }
 
+    /// <summary>
+    /// TikConnectionReceiveTimeoutException.
+    /// Expects RetryableConnection.
+    /// </summary>
     [Fact]
     public void ReceiveTimeout_IsRetryableConnection()
     {
@@ -42,6 +70,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(ex));
     }
 
+    /// <summary>
+    /// TimeoutException, SocketException, IOException.
+    /// Expects RetryableConnection for each.
+    /// </summary>
     [Theory]
     [InlineData(typeof(TimeoutException))]
     [InlineData(typeof(SocketException))]
@@ -57,6 +89,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(ex));
     }
 
+    /// <summary>
+    /// Timeout nested under Exception and as sole AggregateException inner.
+    /// Expects RetryableConnection in both shapes.
+    /// </summary>
     [Fact]
     public void TimeoutWrappedInOuterException_IsRetryableConnection()
     {
@@ -71,6 +107,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// TikConnectionProtocolMismatchException.
+    /// Expects Permanent (no retry).
+    /// </summary>
     [Fact]
     public void ProtocolMismatch_IsPermanent()
     {
@@ -80,6 +120,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(ex));
     }
 
+    /// <summary>
+    /// ArgumentException and InvalidOperationException.
+    /// Expects Permanent for programming/config defects.
+    /// </summary>
     [Fact]
     public void ArgumentAndInvalidOperation_ArePermanent()
     {
@@ -91,6 +135,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(new InvalidOperationException("bug")));
     }
 
+    /// <summary>
+    /// OperationCanceledException from a cancelled token.
+    /// Expects Cancellation kind (must not increment retry counters).
+    /// </summary>
     [Fact]
     public void Cancellation_IsNotCountedAsRetry()
     {
@@ -101,6 +149,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(new OperationCanceledException(cts.Token)));
     }
 
+    /// <summary>
+    /// Aggregate of Timeout + OperationCanceledException.
+    /// Expects Cancellation wins over transient timeout.
+    /// </summary>
     [Fact]
     public void Aggregate_TimeoutPlusCancellation_IsCancellation()
     {
@@ -115,6 +167,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// IOException plus nested Aggregate containing cancellation.
+    /// Expects Cancellation.
+    /// </summary>
     [Fact]
     public void Aggregate_IoPlusNestedCancellation_IsCancellation()
     {
@@ -129,6 +185,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// Deeply nested Aggregate containing cancellation among transport failures.
+    /// Expects Cancellation.
+    /// </summary>
     [Fact]
     public void Aggregate_NestedAggregateWithCancellation_IsCancellation()
     {
@@ -143,6 +203,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(nested));
     }
 
+    /// <summary>
+    /// Timeout + InvalidOperationException.
+    /// Expects Permanent — defect outranks transient timeout for retry budgeting.
+    /// </summary>
     [Fact]
     public void Aggregate_TimeoutPlusInvalidOperation_IsPermanent()
     {
@@ -155,6 +219,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// SocketException + protocol mismatch.
+    /// Expects Permanent.
+    /// </summary>
     [Fact]
     public void Aggregate_SocketPlusProtocolFailure_IsPermanent()
     {
@@ -167,6 +235,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// Timeout + login refused.
+    /// Expects RetryableAuthentication (auth signal preserved).
+    /// </summary>
     [Fact]
     public void Aggregate_TimeoutPlusLoginRefusal_IsRetryableAuthentication()
     {
@@ -179,6 +251,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// InvalidOperation + login refused.
+    /// Expects RetryableAuthentication so auth retries still apply.
+    /// </summary>
     [Fact]
     public void Aggregate_PermanentPlusLoginRefusal_IsRetryableAuthentication()
     {
@@ -191,6 +267,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// Timeout + SocketException.
+    /// Expects RetryableConnection.
+    /// </summary>
     [Fact]
     public void Aggregate_TimeoutPlusSocket_IsRetryableConnection()
     {
@@ -203,6 +283,10 @@ public sealed class MikrotikConnectFailureClassifierTests
             MikrotikConnectFailureClassifier.Classify(aggregate));
     }
 
+    /// <summary>
+    /// Two opaque Exception instances.
+    /// Expects Permanent (fail closed when unclassified).
+    /// </summary>
     [Fact]
     public void Aggregate_UnknownPlusUnknown_IsPermanent()
     {

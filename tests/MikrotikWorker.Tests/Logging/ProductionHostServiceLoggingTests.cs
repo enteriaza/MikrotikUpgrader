@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: ProductionHostServiceLoggingTests.cs
+//
+// Description:
+// Verifies production host emits lifecycle/config summary logs (including independent
+// Mikrotik:Enabled vs FirmwareUpgrade:Enabled) through the real Serilog pipeline.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Text;
 using Microsoft.Extensions.Options;
@@ -13,11 +22,24 @@ namespace MikrotikWorker.Tests.Logging;
 /// Starts the actual production host (Serilog + Kestrel + hosted services) and proves
 /// the application log tells the service lifecycle story while device details stay isolated.
 /// </summary>
+/// <remarks>Covers production host lifecycle and config summary logging.</remarks>
 [Collection("Serilog")]
 public sealed class ProductionHostServiceLoggingTests
 {
+    /// <summary>Upper bound for waiting on production host startup and log output.</summary>
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Scenario: The production host starts on a free port with Serilog file logging and per-device logs enabled, a
+    /// fake clock and a scripted connection factory for two routers (DeviceA at 10.10.0.1, DeviceB at 10.10.0.2). The
+    /// fake clock begins before the CSV datestart because imports require a future start; a two-router CSV is
+    /// imported, the clock is advanced so both jobs become eligible and run to completion, and the host is stopped.
+    /// Expected: The firmware endpoint answers 200 and the CSV is accepted (not rejected) with at least two pending
+    /// jobs. The application log records the start-up, configuration summary, HTTP request, watcher, scheduler,
+    /// worker and shutdown lifecycle entries. Each router gets its own device log carrying its identity and address.
+    /// Invariant: Service-level events never appear in device logs, device operational detail never appears in the
+    /// application log, and the router password is written to neither.
+    /// </summary>
     [Fact]
     public async Task ProductionHost_EmitsServiceLifecycle_AndIsolatesDeviceLogs()
     {
@@ -246,6 +268,9 @@ public sealed class ProductionHostServiceLoggingTests
         }
     }
 
+    /// <summary>
+    /// Asserts that the log text contains the expected fragment, reporting the log length and its tail on failure.
+    /// </summary>
     private static void AssertLogContains(string log, string expected)
     {
         Assert.True(
@@ -271,6 +296,10 @@ public sealed class ProductionHostServiceLoggingTests
         });
     }
 
+    /// <summary>
+    /// Helper used by this suite.
+    /// Key steps: if (string.IsNullOrEmpty(text)); {; return string.Empty;.
+    /// </summary>
     private static string Tail(string text, int max)
     {
         if (string.IsNullOrEmpty(text))
@@ -281,6 +310,9 @@ public sealed class ProductionHostServiceLoggingTests
         return text.Length <= max ? text : text[^max..];
     }
 
+    /// <summary>
+    /// Private helper <c>ValidTwoRouterCsv</c> supporting the scenarios in this file.
+    /// </summary>
     private static string ValidTwoRouterCsv() =>
         """
         datestart,datestop,routername,routerip
@@ -288,6 +320,9 @@ public sealed class ProductionHostServiceLoggingTests
         01/12/2026 08:00:00,02/12/2026 18:00:00,CSV-B,10.10.0.2
         """;
 
+    /// <summary>
+    /// Private helper <c>AssertContainsAny</c> supporting the scenarios in this file.
+    /// </summary>
     private static void AssertContainsAny(string haystack, params string[] needles)
     {
         Assert.True(
@@ -295,6 +330,9 @@ public sealed class ProductionHostServiceLoggingTests
             "Expected one of: " + string.Join(", ", needles));
     }
 
+    /// <summary>
+    /// Private helper <c>BuildEvidenceSummary</c> supporting the scenarios in this file.
+    /// </summary>
     private static string BuildEvidenceSummary(string appLog, string deviceA, string deviceB, int port)
     {
         static string Snip(string source, string marker, int context = 160)
@@ -332,6 +370,9 @@ public sealed class ProductionHostServiceLoggingTests
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout, Func<string>? detail = null)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -349,6 +390,10 @@ public sealed class ProductionHostServiceLoggingTests
             "Condition was not met before timeout." + (detail is null ? string.Empty : " " + detail()));
     }
 
+    /// <summary>
+    /// Helper used by this suite.
+    /// Key steps: DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;; while (DateTimeOffset.UtcNow &lt; deadline); {.
+    /// </summary>
     private static async Task<string> WaitForLogContentsAsync(
         string directory,
         string pattern,
@@ -386,6 +431,10 @@ public sealed class ProductionHostServiceLoggingTests
             "Log contents did not satisfy predicate before timeout. Last length=" + contents.Length);
     }
 
+    /// <summary>
+    /// Helper used by this suite.
+    /// Key steps: DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;; string contents = string.Empty;; while (DateTimeOffset.UtcNow &lt; deadline).
+    /// </summary>
     private static void TryDelete(string path)
     {
         try

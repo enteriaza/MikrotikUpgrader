@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: ImportedCsvPathRegistrationTests.cs
+//
+// Description:
+// Regression suite ensuring Accepted CSV path registration precedes dispatch
+// and that concurrent imports cannot cross-write result columns into each
+// other's CSVs. Covers hold-until-registered, terminal failure after bind,
+// and interleaved dual-import completions.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -13,11 +24,15 @@ using tik4net;
 namespace MikrotikWorker.Tests.Scheduling;
 
 /// <summary>
-/// Regression: Accepted CSV path must be registered before jobs can dispatch,
-/// and concurrent imports must not cross-write results.
+/// Regression: Accepted CSV path must be registered before jobs can dispatch, and concurrent imports must not cross-write results.
 /// </summary>
 public sealed class ImportedCsvPathRegistrationTests
 {
+    /// <summary>
+    /// Schedule a due job before SetAcceptedPath.
+    /// Expects zero dispatch and blank start until path registration; then Success with
+    /// start/completion surviving into Completed archive.
+    /// </summary>
     [Fact]
     public async Task JobsHeldUntilAcceptedPathRegistered_ThenUpgradeStartedPersists()
     {
@@ -55,6 +70,10 @@ public sealed class ImportedCsvPathRegistrationTests
         Assert.False(string.IsNullOrWhiteSpace(ReadColumn(completed, 2, ImportedCsvResultColumns.UpgradeCompleted)));
     }
 
+    /// <summary>
+    /// Always-timeout factory with MaximumUnsuccessfulAttempts=0; path set after schedule.
+    /// Expects Failed - Connection with blank UpgradeStarted once dispatchable.
+    /// </summary>
     [Fact]
     public async Task TerminalConnectionFailure_BeforeUpgrade_PersistsAfterPathRegistration()
     {
@@ -90,6 +109,10 @@ public sealed class ImportedCsvPathRegistrationTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Two Accepted CSVs; overlapping IP on different imports; interleaved writer calls.
+    /// Expects each file's rows keep their own Result/identity; archiving one leaves the other intact.
+    /// </summary>
     [Fact]
     public async Task DualImports_InterleavedCompletions_DoNotCrossWrite()
     {
@@ -167,6 +190,9 @@ public sealed class ImportedCsvPathRegistrationTests
         Assert.Equal("Cancelled", ReadColumn(completedB, 3, ImportedCsvResultColumns.Result));
     }
 
+    /// <summary>
+    /// Polls a condition until timeout; asserts on expiry.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTime deadline = DateTime.UtcNow + timeout;
@@ -183,6 +209,9 @@ public sealed class ImportedCsvPathRegistrationTests
         Assert.True(condition(), "Condition was not met before timeout.");
     }
 
+    /// <summary>
+    /// Reads a named column for a 1-based row from a CSV path.
+    /// </summary>
     private static string ReadColumn(string path, int rowNumber, string column)
     {
         using StreamReader reader = new(path, Encoding.UTF8);
@@ -211,16 +240,40 @@ public sealed class ImportedCsvPathRegistrationTests
         throw new InvalidOperationException($"Row {rowNumber} not found in {path}");
     }
 
+    /// <summary>
+    /// Throws TimeoutException on CreateAsync.
+    /// </summary>
     private sealed class AlwaysTimeoutConnectFactory : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Always fails the connection attempt with a <see cref="TimeoutException"/>.
+        /// </summary>
+        /// <param name="connection">Connection options for the attempted router (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken) =>
             throw new TimeoutException("Connection timeout");
     }
 
+    /// <summary>
+    /// Records UpgradeStarted then returns UpgradeSucceeded.
+    /// </summary>
+    /// <param name="writer">CSV result writer used to stamp the UpgradeStarted column.</param>
     private sealed class StartRecordingUpgradeExecutor(IImportedCsvResultWriter writer) : IRouterOsV6UpgradeExecutor
     {
+        /// <summary>
+        /// Records UpgradeStarted for the job via the CSV writer and reports a successful upgrade without touching the router.
+        /// </summary>
+        /// <param name="connection">Open router connection (ignored).</param>
+        /// <param name="job">Scheduled job whose row receives the UpgradeStarted timestamp.</param>
+        /// <param name="deviceInfo">Device information gathered before the upgrade (ignored).</param>
+        /// <param name="assessment">Compatibility assessment for the device (ignored).</param>
+        /// <param name="username">Router username (ignored).</param>
+        /// <param name="password">Router password (ignored).</param>
+        /// <param name="isWithinScheduleWindow">Callback reporting whether the schedule window is still open (ignored).</param>
+        /// <param name="cancellationToken">Token passed to the CSV writer.</param>
+        /// <returns>An <see cref="UpgradeOutcome.UpgradeSucceeded"/> result.</returns>
         public async Task<UpgradeExecutionResult> ExecuteAsync(
             ITikConnection connection,
             MikrotikScheduledJob job,
@@ -240,22 +293,65 @@ public sealed class ImportedCsvPathRegistrationTests
         }
     }
 
+    /// <summary>
+    /// Returns a fully populated fake connection.
+    /// </summary>
     private sealed class ImmediateSuccessConnectFactory : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Immediately returns a fully populated fake connection.
+        /// </summary>
+        /// <param name="connection">Connection options for the attempted router (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
+        /// <returns>A completed task containing the fake connection.</returns>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken) =>
             Task.FromResult((ITikConnection)FakeMikrotikConnections.CreateFullyPopulated());
     }
 
+    /// <summary>
+    /// Scheduler/workers with injectable connection factory and optional start-recording
+    /// upgrade executor; helpers read Started/Result from Accepted or Completed.
+    /// </summary>
     private sealed class PathRaceHarness : IAsyncDisposable
     {
+        /// <summary>
+        /// Temporary ScheduledJobs root deleted on disposal.
+        /// </summary>
         private readonly string _root;
+
+        /// <summary>
+        /// Cancels the scheduler run loop during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _schedulerCts = new();
+
+        /// <summary>
+        /// Task running the scheduler loop.
+        /// </summary>
         private readonly Task _schedulerTask;
+
+        /// <summary>
+        /// Task running the router execution workers.
+        /// </summary>
         private readonly Task _executionTask;
+
+        /// <summary>
+        /// Cancels the router execution workers during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _executionCts;
 
+        /// <summary>
+        /// Initializes the harness state and starts the scheduler run loop.
+        /// </summary>
+        /// <param name="scheduler">Scheduler under test.</param>
+        /// <param name="time">Fake clock shared with scheduler and executor.</param>
+        /// <param name="pathStore">Accepted CSV path store shared with the scheduler and writer.</param>
+        /// <param name="acceptedCsv">Path of the seeded Accepted CSV.</param>
+        /// <param name="completedDir">Completed folder path.</param>
+        /// <param name="root">Temporary ScheduledJobs root to delete on disposal.</param>
+        /// <param name="executionTask">Task running the execution workers.</param>
+        /// <param name="executionCts">Cancellation source that stops the execution workers.</param>
         private PathRaceHarness(
             InMemoryJobScheduler scheduler,
             FakeTimeProvider time,
@@ -277,12 +373,43 @@ public sealed class ImportedCsvPathRegistrationTests
             _schedulerTask = scheduler.RunAsync(_schedulerCts.Token);
         }
 
+        /// <summary>
+        /// Scheduler under test; it accepts the seeded import and is driven by the loop and execution workers this
+        /// harness starts.
+        /// </summary>
         public InMemoryJobScheduler Scheduler { get; }
+
+        /// <summary>
+        /// Fake clock shared by the scheduler and executor; tests advance it to make jobs eligible and to control
+        /// timestamps.
+        /// </summary>
         public FakeTimeProvider Time { get; }
+
+        /// <summary>
+        /// Accepted CSV path store shared by the scheduler and the result writer, so the path registered at import is
+        /// the one the writer later updates.
+        /// </summary>
         public ImportedCsvPathStore PathStore { get; }
+
+        /// <summary>
+        /// Path of the seeded Accepted CSV that the imported jobs are registered against.
+        /// </summary>
         public string AcceptedCsv { get; }
+
+        /// <summary>
+        /// Completed folder inside the temporary jobs tree; finished CSVs are archived here, so tests can tell
+        /// whether an import finished.
+        /// </summary>
         public string CompletedDir { get; }
 
+        /// <summary>
+        /// Creates the temp jobs tree with a seeded Accepted CSV and starts the scheduler plus execution workers.
+        /// </summary>
+        /// <param name="time">Fake clock driving scheduling.</param>
+        /// <param name="connectionFactory">Connection factory for the executor; defaults to an immediate-success fake.</param>
+        /// <param name="retryOptions">Retry delays and limits; defaults are used when <see langword="null"/>.</param>
+        /// <param name="upgradeRecordsStart">When true the upgrade executor stamps UpgradeStarted; otherwise a stub is used.</param>
+        /// <returns>A started harness; dispose it to stop loops and clean up.</returns>
         public static Task<PathRaceHarness> CreateAsync(
             FakeTimeProvider time,
             IMikrotikConnectionFactory? connectionFactory = null,
@@ -373,6 +500,14 @@ public sealed class ImportedCsvPathRegistrationTests
                 execCts));
         }
 
+        /// <summary>
+        /// Builds a MikrotikScheduledJob for the harness clock and import.
+        /// </summary>
+        /// <param name="importId">Import the job belongs to.</param>
+        /// <param name="rowNumber">1-based CSV row number of the job.</param>
+        /// <param name="ip">Router IP address.</param>
+        /// <param name="name">Router name.</param>
+        /// <returns>A job whose window is already open relative to the harness clock.</returns>
         public MikrotikScheduledJob CreateJob(Guid importId, int rowNumber, string ip, string name) =>
             new()
             {
@@ -385,18 +520,52 @@ public sealed class ImportedCsvPathRegistrationTests
                 DateStopUtc = Time.GetUtcNow().UtcDateTime.AddHours(2),
             };
 
+        /// <summary>
+        /// Reads the UpgradeStarted cell for a row from the Accepted CSV.
+        /// </summary>
+        /// <param name="row">1-based CSV row number.</param>
+        /// <returns>The cell value, <see langword="null"/> when the file is missing, or empty when unreadable.</returns>
         public string? TryReadStarted(int row) => TryRead(AcceptedCsv, row, ImportedCsvResultColumns.UpgradeStarted);
+
+        /// <summary>
+        /// Reads the UpgradeCompleted cell for a row from the Accepted CSV.
+        /// </summary>
+        /// <param name="row">1-based CSV row number.</param>
+        /// <returns>The cell value, <see langword="null"/> when the file is missing, or empty when unreadable.</returns>
         public string? TryReadCompleted(int row) => TryRead(AcceptedCsv, row, ImportedCsvResultColumns.UpgradeCompleted);
+
+        /// <summary>
+        /// Reads the Result cell for a row from the Accepted CSV.
+        /// </summary>
+        /// <param name="row">1-based CSV row number.</param>
+        /// <returns>The cell value, <see langword="null"/> when the file is missing, or empty when unreadable.</returns>
         public string? TryReadResult(int row) => TryRead(AcceptedCsv, row, ImportedCsvResultColumns.Result);
 
+        /// <summary>
+        /// Reads the Result cell from the Accepted CSV, falling back to the archived copy in Completed.
+        /// </summary>
+        /// <param name="row">1-based CSV row number.</param>
+        /// <returns>The cell value from whichever file exists, or <see langword="null"/> when neither does.</returns>
         public string? TryReadResultFromAcceptedOrCompleted(int row) =>
             TryRead(AcceptedCsv, row, ImportedCsvResultColumns.Result)
             ?? TryRead(Path.Combine(CompletedDir, Path.GetFileName(AcceptedCsv)), row, ImportedCsvResultColumns.Result);
 
+        /// <summary>
+        /// Reads the UpgradeStarted cell from the Accepted CSV, falling back to the archived copy in Completed.
+        /// </summary>
+        /// <param name="row">1-based CSV row number.</param>
+        /// <returns>The cell value from whichever file exists, or <see langword="null"/> when neither does.</returns>
         public string? TryReadStartedFromAcceptedOrCompleted(int row) =>
             TryRead(AcceptedCsv, row, ImportedCsvResultColumns.UpgradeStarted)
             ?? TryRead(Path.Combine(CompletedDir, Path.GetFileName(AcceptedCsv)), row, ImportedCsvResultColumns.UpgradeStarted);
 
+        /// <summary>
+        /// Reads a CSV cell without throwing, tolerating a missing file or a file being rewritten.
+        /// </summary>
+        /// <param name="path">CSV file path.</param>
+        /// <param name="rowNumber">1-based CSV row number.</param>
+        /// <param name="column">Column header name.</param>
+        /// <returns>The cell value, <see langword="null"/> when the file does not exist, or empty on read errors.</returns>
         private static string? TryRead(string path, int rowNumber, string column)
         {
             if (!File.Exists(path))
@@ -414,6 +583,15 @@ public sealed class ImportedCsvPathRegistrationTests
             }
         }
 
+        /// <summary>
+        /// Runs the requested number of queue-draining workers until cancellation.
+        /// </summary>
+        /// <param name="queue">Execution queue to drain.</param>
+        /// <param name="executor">Executor invoked for each work item.</param>
+        /// <param name="completer">Completer notified when a job finishes.</param>
+        /// <param name="workerCount">Number of parallel workers to start.</param>
+        /// <param name="cancellationToken">Token that stops the workers.</param>
+        /// <returns>A task that completes when all workers have stopped.</returns>
         private static async Task RunWorkersAsync(
             RouterJobExecutionQueue queue,
             RouterJobExecutor executor,
@@ -434,6 +612,14 @@ public sealed class ImportedCsvPathRegistrationTests
             }
         }
 
+        /// <summary>
+        /// Single worker loop that reads work items from the queue and executes them until cancelled.
+        /// </summary>
+        /// <param name="queue">Execution queue to read from.</param>
+        /// <param name="executor">Executor invoked for each work item.</param>
+        /// <param name="completer">Completer notified when a job finishes.</param>
+        /// <param name="cancellationToken">Token that stops the worker.</param>
+        /// <returns>A task that completes when the worker stops.</returns>
         private static async Task RunOneAsync(
             RouterJobExecutionQueue queue,
             RouterJobExecutor executor,
@@ -452,6 +638,9 @@ public sealed class ImportedCsvPathRegistrationTests
             }
         }
 
+        /// <summary>
+        /// Stops background loops and deletes temporary directories.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             _schedulerCts.Cancel();
@@ -465,10 +654,26 @@ public sealed class ImportedCsvPathRegistrationTests
         }
     }
 
+    /// <summary>
+    /// Shared path store/writer for two Accepted CSVs; AcceptImport/Job helpers for
+    /// cross-write scenarios.
+    /// </summary>
     private sealed class DualImportHarness : IAsyncDisposable
     {
+        /// <summary>
+        /// Temporary ScheduledJobs root deleted on disposal.
+        /// </summary>
         private readonly string _root;
 
+        /// <summary>
+        /// Initializes the harness state.
+        /// </summary>
+        /// <param name="scheduler">Scheduler under test.</param>
+        /// <param name="writer">Result writer shared by both imports.</param>
+        /// <param name="pathStore">Accepted CSV path store shared by both imports.</param>
+        /// <param name="paths">Resolved ScheduledJobs folder paths.</param>
+        /// <param name="time">Fake clock used to build job windows.</param>
+        /// <param name="root">Temporary ScheduledJobs root to delete on disposal.</param>
         private DualImportHarness(
             InMemoryJobScheduler scheduler,
             ImportedCsvResultWriter writer,
@@ -485,12 +690,38 @@ public sealed class ImportedCsvPathRegistrationTests
             _root = root;
         }
 
+        /// <summary>
+        /// Scheduler under test. It runs without execution workers, so tests write job completions directly instead
+        /// of waiting for execution.
+        /// </summary>
         public InMemoryJobScheduler Scheduler { get; }
+
+        /// <summary>
+        /// Result writer shared by both imports, so results from either import go through the same writer and path
+        /// store.
+        /// </summary>
         public ImportedCsvResultWriter Writer { get; }
+
+        /// <summary>
+        /// Accepted CSV path store shared by both imports; it records which CSV path belongs to each import.
+        /// </summary>
         public ImportedCsvPathStore PathStore { get; }
+
+        /// <summary>
+        /// Resolved ScheduledJobs folder paths for the temporary jobs tree this harness creates.
+        /// </summary>
         public ScheduledJobsPaths Paths { get; }
+
+        /// <summary>
+        /// Fake clock that supplies the base time for each import's job windows and drives the scheduler.
+        /// </summary>
         public FakeTimeProvider Time { get; }
 
+        /// <summary>
+        /// Creates the temp jobs tree and a scheduler wired to a shared path store and result writer.
+        /// </summary>
+        /// <param name="time">Fake clock driving the scheduler.</param>
+        /// <returns>A harness ready for <see cref="AcceptImport"/>; dispose it to clean up.</returns>
         public static Task<DualImportHarness> CreateAsync(FakeTimeProvider time)
         {
             string root = TestHostFactory.CreateScheduledJobsRoot();
@@ -519,6 +750,12 @@ public sealed class ImportedCsvPathRegistrationTests
             return Task.FromResult(new DualImportHarness(scheduler, writer, pathStore, paths, time, root));
         }
 
+        /// <summary>
+        /// Writes a CSV into Accepted, registers the import with the scheduler, and binds its Accepted path.
+        /// </summary>
+        /// <param name="fileName">File name to create under the Accepted folder.</param>
+        /// <param name="csvContent">Full CSV text including the header row.</param>
+        /// <returns>The new import id and the Accepted CSV path.</returns>
         public (Guid ImportId, string CsvPath) AcceptImport(string fileName, string csvContent)
         {
             Guid importId = Guid.NewGuid();
@@ -530,6 +767,14 @@ public sealed class ImportedCsvPathRegistrationTests
             return (importId, csvPath);
         }
 
+        /// <summary>
+        /// Builds a due scheduled job for the given import, row, router IP, and name.
+        /// </summary>
+        /// <param name="importId">Import the job belongs to.</param>
+        /// <param name="row">1-based CSV row number of the job.</param>
+        /// <param name="ip">Router IP address.</param>
+        /// <param name="name">Router name.</param>
+        /// <returns>A job whose window is open relative to the harness clock.</returns>
         public MikrotikScheduledJob Job(Guid importId, int row, string ip, string name) =>
             new()
             {
@@ -542,6 +787,9 @@ public sealed class ImportedCsvPathRegistrationTests
                 DateStopUtc = Time.GetUtcNow().UtcDateTime.AddHours(1),
             };
 
+        /// <summary>
+        /// Stops background loops and deletes temporary directories.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             await Scheduler.DisposeAsync();

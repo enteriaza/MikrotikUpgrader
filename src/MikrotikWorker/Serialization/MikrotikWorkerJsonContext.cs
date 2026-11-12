@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikWorkerJsonContext.cs
+//
+// Description:
+// Source-generated System.Text.Json serializer contexts used under Native AOT:
+// backup manifests (PascalCase), OSPF plan persistence/hash payloads (camelCase),
+// and catalogue-coverage audit report rows.
+//
+// -----------------------------------------------------------------------------
+
 using System.Text.Json.Serialization;
 using MikrotikWorker.Backup;
 using MikrotikWorker.Upgrade;

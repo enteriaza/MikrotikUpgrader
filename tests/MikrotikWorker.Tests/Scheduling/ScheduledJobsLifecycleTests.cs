@@ -1,13 +1,37 @@
+// -----------------------------------------------------------------------------
+// File: ScheduledJobsLifecycleTests.cs
+//
+// Description:
+// End-to-end ScheduledJobs folder lifecycle with the watcher/processor:
+// Incoming→Accepted→Completed, rejection reports, duplicate coalescing,
+// startup scan, Processing leftovers, manual re-import, and cancel safety.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
 
 namespace MikrotikWorker.Tests.Scheduling;
+/// <summary>
+/// Hosted lifecycle tests for CSV folder transitions and watcher ingestion.
+/// </summary>
 public sealed class ScheduledJobsLifecycleTests
 {
+    /// <summary>
+    /// Upper bound for awaiting file processing and polled filesystem conditions.
+    /// </summary>
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Fixed UTC "now" (2026-01-01) used as the default fake clock and CSV validation time.
+    /// </summary>
     private static readonly DateTime UtcNow = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>
+    /// Valid future-window CSV processed then clock advanced into window.
+    /// Expects Incoming removed, Accepted then Completed, pending 0.
+    /// </summary>
     [Fact]
     public async Task ValidCsv_MovesToAccepted_ThenCompleted_WhenJobsTerminal()
     {
@@ -41,6 +65,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Clock fixed inside an en-ZA local window already open.
+    /// Expects import and dispatch without needing further time advance.
+    /// </summary>
     [Fact]
     public async Task ActiveWindowCsv_IsAccepted_AndDispatchedImmediately()
     {
@@ -101,6 +129,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Bad routerip CSV.
+    /// Expects Rejected CSV plus .error.txt containing TotalErrors.
+    /// </summary>
     [Fact]
     public async Task InvalidCsv_MovesToRejected_WithErrorReport()
     {
@@ -131,6 +163,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Three bad rows with MaxValidationErrorsRetained=1.
+    /// Expects TotalErrorCount=3 but only one retained error detail.
+    /// </summary>
     [Fact]
     public async Task ValidationErrorRetention_TruncatesDetails_ButCountsAll()
     {
@@ -161,6 +197,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Concurrent ProcessIncomingAsync on the same Incoming path.
+    /// Expects a single Accepted file.
+    /// </summary>
     [Fact]
     public async Task DuplicateEvents_DoNotProcessSameFileTwice()
     {
@@ -185,6 +225,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Incoming CSV present before full app StartAsync.
+    /// Expects startup scan moves it to Accepted.
+    /// </summary>
     [Fact]
     public async Task StartupScan_ProcessesExistingIncomingCsv()
     {
@@ -215,6 +259,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// CSV left in Processing from a prior crash.
+    /// Expects warning log, file left in place, and no Accepted auto-import.
+    /// </summary>
     [Fact]
     public async Task ProcessingLeftovers_AreNotAutoImported_AtStartup()
     {
@@ -252,6 +300,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Copy Accepted back to Incoming and process again.
+    /// Expects a second Accepted artifact (unique name).
+    /// </summary>
     [Fact]
     public async Task AcceptedCsv_CanBeManuallyReImported()
     {
@@ -281,6 +333,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Dispose host after Accept; new host with PendingCount 0 re-imports the Accepted copy.
+    /// Expects fresh scheduler accepts the manual re-import.
+    /// </summary>
     [Fact]
     public async Task SimulatedRestart_AllowsManualReImportIntoFreshScheduler()
     {
@@ -316,6 +372,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Capacity blocker + cancel during ProcessIncomingAsync.
+    /// Expects file in Processing or Accepted, never Rejected.
+    /// </summary>
     [Fact]
     public async Task CancellationDuringIngestion_DoesNotRejectOrLoseFile()
     {
@@ -375,6 +435,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// notes.txt passed to ProcessIncomingAsync.
+    /// Expects file untouched and no Accepted/Rejected moves.
+    /// </summary>
     [Fact]
     public async Task NonCsvFiles_AreIgnored()
     {
@@ -398,6 +462,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// MoveSafely when destination batch.csv exists.
+    /// Expects unique target path; original destination content preserved.
+    /// </summary>
     [Fact]
     public void FileMove_UsesUniqueName_OnDestinationCollision()
     {
@@ -424,6 +492,10 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Full app resolves ScheduledJobsPaths.EnsureCreated.
+    /// Expects Root/Processing/Accepted/Completed/Rejected directories exist.
+    /// </summary>
     [Fact]
     public void ScheduledJobsDirectory_IncludesAccepted()
     {
@@ -448,6 +520,15 @@ public sealed class ScheduledJobsLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Builds the full production DI application with test paths, a fake clock, and a long scan interval.
+    /// </summary>
+    /// <param name="firmwareRoot">Temporary firmware root directory.</param>
+    /// <param name="jobsRoot">Temporary ScheduledJobs root directory.</param>
+    /// <param name="timeProvider">Fake clock to register; defaults to one fixed at <see cref="UtcNow"/>.</param>
+    /// <param name="configureLogging">Optional callback to attach test logger providers.</param>
+    /// <param name="additionalConfiguration">Optional configuration overrides applied after defaults.</param>
+    /// <returns>The built (not yet started) web application.</returns>
     private static WebApplication CreateFullApp(
         string firmwareRoot,
         string jobsRoot,
@@ -478,6 +559,10 @@ public sealed class ScheduledJobsLifecycleTests
         return MikrotikWorkerHost.BuildApplication(builder);
     }
 
+    /// <summary>
+    /// Returns a valid two-row import CSV whose December 2026 window lies after <see cref="UtcNow"/>.
+    /// </summary>
+    /// <returns>CSV text including the header row.</returns>
     private static string ValidCsv() =>
         """
         datestart,datestop,routername,routerip
@@ -485,6 +570,9 @@ public sealed class ScheduledJobsLifecycleTests
         01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-02,192.168.1.2
         """;
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -506,11 +594,33 @@ public sealed class ScheduledJobsLifecycleTests
     /// </summary>
     private sealed class SchedulerHost : IAsyncDisposable
     {
+        /// <summary>
+        /// Application whose service provider supplies the scheduler and processor.
+        /// </summary>
         private readonly WebApplication _app;
+
+        /// <summary>
+        /// Cancels the scheduler run loop during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _cts = new();
+
+        /// <summary>
+        /// Hosted router execution service started and stopped by the host.
+        /// </summary>
         private readonly RouterJobExecutionService _execution;
+
+        /// <summary>
+        /// Task running the scheduler loop.
+        /// </summary>
         private readonly Task _schedulerTask;
 
+        /// <summary>
+        /// Initializes the host and starts the scheduler run loop.
+        /// </summary>
+        /// <param name="app">Built application owning the services.</param>
+        /// <param name="scheduler">Scheduler resolved from the application.</param>
+        /// <param name="processor">CSV file processor resolved from the application.</param>
+        /// <param name="execution">Already started router execution service.</param>
         private SchedulerHost(
             WebApplication app,
             IInMemoryJobScheduler scheduler,
@@ -524,10 +634,27 @@ public sealed class ScheduledJobsLifecycleTests
             _schedulerTask = scheduler.RunAsync(_cts.Token);
         }
 
+        /// <summary>
+        /// In-memory scheduler resolved from the application's service provider, i.e. the instance the production
+        /// host itself uses.
+        /// </summary>
         public IInMemoryJobScheduler Scheduler { get; }
 
+        /// <summary>
+        /// CSV file processor resolved from the application; tests call it to import a CSV directly rather than
+        /// waiting for the file watcher.
+        /// </summary>
         public ScheduledJobFileProcessor Processor { get; }
 
+        /// <summary>
+        /// Builds the application, resolves the scheduler and processor, and starts the router execution service.
+        /// </summary>
+        /// <param name="firmwareRoot">Temporary firmware root directory.</param>
+        /// <param name="jobsRoot">Temporary ScheduledJobs root directory.</param>
+        /// <param name="timeProvider">Optional fake clock registered in the application.</param>
+        /// <param name="additionalConfiguration">Optional configuration overrides.</param>
+        /// <param name="configureLogging">Optional callback to attach test logger providers.</param>
+        /// <returns>A started host; dispose it to stop loops and the application.</returns>
         public static async Task<SchedulerHost> CreateAsync(
             string firmwareRoot,
             string jobsRoot,
@@ -551,6 +678,9 @@ public sealed class ScheduledJobsLifecycleTests
             return new SchedulerHost(app, scheduler, processor, execution);
         }
 
+        /// <summary>
+        /// Stops background loops and deletes temporary directories.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             _cts.Cancel();

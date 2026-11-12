@@ -1,11 +1,29 @@
+// -----------------------------------------------------------------------------
+// File: PackageCompatibilityAuditorTests.cs
+//
+// Description:
+// Unit tests for PackageCompatibilityAuditor against synthetic inventories and
+// catalogue fixtures.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Tests.Upgrade;
+    /// <summary>
+    /// Scenario: write catalogue coverage and a synthetic device report into a temp output directory.
+    /// Expected: both CSV and JSON artefacts exist for catalogue and device compatibility, containing fixture markers.
+    /// Invariant: report writer emits paired CSV/JSON without inventing NotApplicable rows for compatible fixtures.
+    /// </summary>
 public sealed class PackageCompatibilityAuditorTests
 {
+    /// <summary>
+    /// A mipsbe device whose catalogue has the exact <c>routeros-mipsbe-6.49.23.npk</c> gets a v6 stepping status
+    /// of <c>Compatible</c>. That file is the resolved package and nothing is reported missing.
+    /// </summary>
     [Fact]
     public void ExactArchitectureAndVersion_IsCompatible()
     {
@@ -19,6 +37,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Empty(v6.MissingPackageNames);
     }
 
+    /// <summary>
+    /// A mipsbe device against a catalogue holding only <c>routeros-arm-6.49.23.npk</c> gets
+    /// <c>ArchitectureMismatch</c> at the v6 stage, and <c>routeros</c> is listed in the missing package names.
+    /// </summary>
     [Fact]
     public void MissingMainPackage_IsReported()
     {
@@ -31,6 +53,12 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Contains("routeros", v6.MissingPackageNames);
     }
 
+    /// <summary>
+    /// A mipsbe device with installed <c>user-manager</c> and <c>tr069-client</c> against a catalogue containing
+    /// only the main package and <c>user-manager</c> gets <c>MissingOptionalPackage</c>, with <c>tr069-client</c>
+    /// named as missing. Bundled components such as <c>system</c> and <c>ipv6</c> are not listed among the
+    /// independent packages.
+    /// </summary>
     [Fact]
     public void MissingInstalledIndependentOptional_IsReported()
     {
@@ -45,6 +73,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.DoesNotContain(v6.IndependentPackageNames, static n => n is "system" or "ipv6");
     }
 
+    /// <summary>
+    /// A main-only mipsbe device stays <c>Compatible</c> when the catalogue also offers <c>user-manager</c>,
+    /// <c>tr069-client</c> and a RouterOS 7 file it has not installed. Only the main package is resolved.
+    /// </summary>
     [Fact]
     public void ExtraCatalogueOptionals_NotRequiredWhenNotInstalled()
     {
@@ -61,6 +93,11 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Single(v6.ResolvedPackageFileNames);
     }
 
+    /// <summary>
+    /// A device with three bundled components (<c>system</c>, <c>wireless</c>, <c>hotspot</c>) is <c>Compatible</c>
+    /// although the catalogue offers separate files for them. The resolved list is just
+    /// <c>routeros-mipsbe-6.49.23.npk</c> and <c>BundledComponentCount</c> is 3.
+    /// </summary>
     [Fact]
     public void BundledComponents_AreNotResolvedIndependently()
     {
@@ -78,6 +115,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Equal(3, v6.BundledComponentCount);
     }
 
+    /// <summary>
+    /// The same <c>routeros-mipsbe-6.49.23.npk</c> in the root and in a <c>dup</c> subfolder makes the v6 stage
+    /// <c>AmbiguousPackage</c>, with both files listed in <c>AmbiguousPackageCandidates</c>.
+    /// </summary>
     [Fact]
     public void DuplicateCandidatePackages_AreAmbiguous()
     {
@@ -102,6 +143,10 @@ public sealed class PackageCompatibilityAuditorTests
         }
     }
 
+    /// <summary>
+    /// A device with an unsupported architecture, against mipsbe-only catalogue files, gets
+    /// <c>ArchitectureMismatch</c> at the v6 stage.
+    /// </summary>
     [Fact]
     public void WrongArchitecture_IsArchitectureMismatch()
     {
@@ -113,6 +158,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Equal(CatalogueCompatibilityStatus.ArchitectureMismatch, v6.Status);
     }
 
+    /// <summary>
+    /// A mipsbe device whose catalogue has only <c>routeros-mipsbe-6.48.0.npk</c>, not 6.49.23, gets
+    /// <c>VersionMismatch</c>.
+    /// </summary>
     [Fact]
     public void WrongVersionOnly_IsVersionMismatch()
     {
@@ -124,6 +173,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Equal(CatalogueCompatibilityStatus.VersionMismatch, v6.Status);
     }
 
+    /// <summary>
+    /// An x86 device on 7.22.0 with target 7.23.8 is <c>Compatible</c> at the RouterOS 7 stage using
+    /// <c>routeros-7.23.8.npk</c>, a file name with no architecture suffix.
+    /// </summary>
     [Fact]
     public void X86ArchlessPackage_IsAcceptedForV7()
     {
@@ -137,6 +190,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Contains("routeros-7.23.8.npk", v7.ResolvedPackageFileNames);
     }
 
+    /// <summary>
+    /// A device reporting the powerpc architecture alias is <c>Compatible</c> at the v6 stage and resolves
+    /// <c>routeros-powerpc-6.49.23.npk</c>.
+    /// </summary>
     [Fact]
     public void PowerPcAlias_MatchesPpcPackage()
     {
@@ -149,6 +206,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Contains("routeros-powerpc-6.49.23.npk", v6.ResolvedPackageFileNames);
     }
 
+    /// <summary>
+    /// An smips device with installed <c>user-manager</c> and <c>tr069-client</c>, where the catalogue only has
+    /// <c>tr069-client</c>, gets <c>MissingOptionalPackage</c> and <c>user-manager</c> is named as missing.
+    /// </summary>
     [Fact]
     public void SparseOptionalCoverage_FailsClosed()
     {
@@ -164,6 +225,11 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Contains("user-manager", v6.MissingPackageNames);
     }
 
+    /// <summary>
+    /// Filename looks valid but does not satisfy the installed independent optional.
+    /// A catalogue file named <c>wireless-6.49.23-mipsbe.npk</c> does not stand in for the installed independent
+    /// optionals. The v6 stage is still <c>MissingOptionalPackage</c>.
+    /// </summary>
     [Fact]
     public void UnambiguousFilename_StillRequiresExactInstalledMapping()
     {
@@ -178,6 +244,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Equal(CatalogueCompatibilityStatus.MissingOptionalPackage, v6.Status);
     }
 
+    /// <summary>
+    /// A device with an empty package inventory gets <c>InvalidInventory</c> at the v6 stage even when a matching
+    /// main package exists in the catalogue.
+    /// </summary>
     [Fact]
     public void InvalidEmptyInventory_IsInvalid()
     {
@@ -189,6 +259,11 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Equal(CatalogueCompatibilityStatus.InvalidInventory, v6.Status);
     }
 
+    /// <summary>
+    /// For each InlineData fixture (ACE, BR, AP, DCL, an empty identity and an unknown identity) the classification
+    /// gives the expected <c>DeviceType</c> with <c>ShouldUpgradeToV7</c> true. The RouterOS 7 stage is
+    /// <c>Compatible</c> with at least one resolved package file.
+    /// </summary>
     [Theory]
     [InlineData("ace-identity", DeviceType.Ace)]
     [InlineData("br-identity", DeviceType.Br)]
@@ -214,6 +289,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.NotEmpty(v7.ResolvedPackageFileNames);
     }
 
+    /// <summary>
+    /// An AP identity with no RouterOS 7 target, even though a 7.23.8 file is in the catalogue, gets
+    /// <c>TargetUnavailable</c> at the RouterOS 7 stage.
+    /// </summary>
     [Fact]
     public void MissingV7Target_IsTargetUnavailable_ForEligibleDevice()
     {
@@ -226,6 +305,11 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Equal(CatalogueCompatibilityStatus.TargetUnavailable, v7.Status);
     }
 
+    /// <summary>
+    /// With 7.23.8 and 7.23.9 files both in the catalogue and a 7.23.8 target, the RouterOS 7 stage is
+    /// <c>Compatible</c> with <c>TargetRouterOsVersion</c> 7.23.8. It resolves the 7.23.8 file and never the 7.23.9
+    /// one.
+    /// </summary>
     [Fact]
     public void DynamicV7Snapshot_IsUsedExactly()
     {
@@ -241,6 +325,12 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.DoesNotContain(v7.ResolvedPackageFileNames, static f => f.Contains("7.23.9", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// tr069-client missing for v7.
+    /// The v6 stage is <c>Compatible</c> but the RouterOS 7 stage is <c>MissingOptionalPackage</c>, because the
+    /// catalogue has v7 files for <c>routeros</c> and <c>user-manager</c> but not <c>tr069-client</c>. That package
+    /// is named in the v7 missing list.
+    /// </summary>
     [Fact]
     public void SuccessfulV6_DoesNotImplyV7WhenOptionalMissingForV7()
     {
@@ -265,6 +355,10 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Contains("tr069-client", v7.MissingPackageNames);
     }
 
+    /// <summary>
+    /// A device already on 6.49.23 gets <c>NotApplicable</c> at the v6 stepping stage instead of being checked
+    /// against the catalogue.
+    /// </summary>
     [Fact]
     public void DeviceAlreadyAtOrNewerThanStepping_MarksV6NotApplicable()
     {
@@ -278,6 +372,11 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Equal(CatalogueCompatibilityStatus.NotApplicable, v6.Status);
     }
 
+    /// <summary>
+    /// The coverage report built for the 6.49.23 stepping version has eight rows, each with a main package file
+    /// name. The mipsbe row lists exactly one independent optional package and the smips row has status
+    /// <c>MainOnly</c>.
+    /// </summary>
     [Fact]
     public void CatalogueCoverage_ReportsAllEightArchitectures()
     {
@@ -301,6 +400,11 @@ public sealed class PackageCompatibilityAuditorTests
         Assert.Contains(rows, static r => r.Architecture == "smips" && r.CatalogueStatus == "MainOnly");
     }
 
+    /// <summary>
+    /// Scenario: write catalogue coverage and a synthetic device report to a temp directory.
+    /// Expected: paired CSV/JSON artefacts for catalogue and device compatibility with fixture markers.
+    /// Invariant: report writer emits CSV/JSON without inventing NotApplicable rows for compatible fixtures.
+    /// </summary>
     [Fact]
     public async Task ReportWriter_EmitsCsvAndJson()
     {
@@ -336,6 +440,9 @@ public sealed class PackageCompatibilityAuditorTests
         }
     }
 
+    /// <summary>
+    /// Assesses the device and returns the result for the requested upgrade stage.
+    /// </summary>
     private static PackageCompatibilityStageResult AssessStage(
         PackageCompatibilityAuditDevice device,
         PackageCompatibilityUpgradeStage stage,
@@ -343,6 +450,10 @@ public sealed class PackageCompatibilityAuditorTests
         string? v7Target = "7.23.8") =>
         AssessDevice(device, catalog, v7Target).Stages.Single(s => s.Stage == stage);
 
+    /// <summary>
+    /// Runs a <c>PackageCompatibilityAuditor</c> over the catalogue with the given v7 target and returns the report
+    /// for the device.
+    /// </summary>
     private static PackageCompatibilityDeviceReport AssessDevice(
         PackageCompatibilityAuditDevice device,
         IFirmwarePackageCatalog catalog,
@@ -357,9 +468,15 @@ public sealed class PackageCompatibilityAuditorTests
         return auditor.AssessDevice(device);
     }
 
+    /// <summary>
+    /// Returns the catalogue's root directory when it is a <c>DirectoryCatalog</c>, otherwise a new temp directory.
+    /// </summary>
     private static string GetRoot(IFirmwarePackageCatalog catalog) =>
         catalog is DirectoryCatalog dir ? dir.Root : Directory.CreateTempSubdirectory("compat-root-").FullName;
 
+    /// <summary>
+    /// Creates a temp directory containing placeholder files with the given names and returns a catalogue over it.
+    /// </summary>
     private static IFirmwarePackageCatalog CreateCatalog(params string[] fileNames)
     {
         string root = Directory.CreateTempSubdirectory("compat-cat-").FullName;
@@ -371,15 +488,24 @@ public sealed class PackageCompatibilityAuditorTests
         return new DirectoryCatalog(root);
     }
 
+    /// <summary>
+    /// Firmware package catalogue fake that enumerates <c>*.npk</c> files under its root directory and parses each
+    /// file name into a package entry.
+    /// </summary>
     private sealed class DirectoryCatalog : IFirmwarePackageCatalog
     {
+        /// <summary>Creates a catalogue over <paramref name="root"/>.</summary>
+        /// <param name="root">Directory scanned for <c>*.npk</c> files.</param>
         public DirectoryCatalog(string root) => Root = root;
 
+        /// <summary>Directory scanned for <c>*.npk</c> files.</summary>
         public string Root { get; }
 
+        /// <summary>Gets only the main <c>routeros</c> packages from <see cref="GetPackages"/>.</summary>
         public IReadOnlyList<FirmwarePackageInfo> GetRouterOsPackages() =>
             GetPackages().Where(static p => p.PackageName.Equals("routeros", StringComparison.Ordinal)).ToList();
 
+        /// <summary>Enumerates <c>*.npk</c> files under <see cref="Root"/> and parses each name into a firmware package.</summary>
         public IReadOnlyList<FirmwarePackageInfo> GetPackages()
         {
             List<FirmwarePackageInfo> list = [];

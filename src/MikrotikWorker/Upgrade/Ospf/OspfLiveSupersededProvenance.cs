@@ -1,3 +1,15 @@
+// -----------------------------------------------------------------------------
+// File: OspfLiveSupersededProvenance.cs
+//
+// Description:
+// Enriches a remapped migration plan with KnownLegacy provenance discovered
+// from the live ROS7 inventory. Pre-upgrade (ROS6) plans cannot foresee
+// auto-converted per-VLAN site templates; apply-time enrichment records their
+// complete semantic identity so cleanup can delete only templates proven
+// superseded by the planned consolidated site matcher.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
@@ -398,6 +410,12 @@ internal static class OspfLiveSupersededProvenance
         return true;
     }
 
+    /// <summary>
+    /// Determines whether every live network equals or lies inside a planned network.
+    /// </summary>
+    /// <param name="liveNets">Networks currently on the router.</param>
+    /// <param name="plannedNets">Networks in the plan.</param>
+    /// <returns><see langword="true"/> when there is at least one live network and all are covered.</returns>
     public static bool AllNetworksCoveredByPlanned(
         IReadOnlyList<OspfIpPrefix> liveNets,
         IReadOnlyList<OspfIpPrefix> plannedNets)
@@ -469,6 +487,12 @@ internal static class OspfLiveSupersededProvenance
         return true;
     }
 
+    /// <summary>
+    /// Converts a live interface-template row to an inventory row, resolving its area instance and authentication key.
+    /// </summary>
+    /// <param name="template">Live interface-template row.</param>
+    /// <param name="areaInstances">Instance names keyed by area name.</param>
+    /// <returns>The inventory row.</returns>
     public static OspfTemplateInventoryRow ToInventoryRow(
         OspfInterfaceTemplateRow template,
         IReadOnlyDictionary<string, string> areaInstances)
@@ -512,6 +536,11 @@ internal static class OspfLiveSupersededProvenance
         };
     }
 
+    /// <summary>
+    /// Maps area names to their instance names, ignoring areas missing either.
+    /// </summary>
+    /// <param name="areas">Live areas.</param>
+    /// <returns>Instance names keyed case-insensitively by area name.</returns>
     public static Dictionary<string, string> BuildAreaInstanceMap(IReadOnlyList<OspfAreaRow> areas)
     {
         Dictionary<string, string> map = new(StringComparer.OrdinalIgnoreCase);
@@ -528,6 +557,13 @@ internal static class OspfLiveSupersededProvenance
         return map;
     }
 
+    /// <summary>
+    /// Copies a plan with replacement superseded templates and notes.
+    /// </summary>
+    /// <param name="plan">Plan to copy.</param>
+    /// <param name="superseded">Superseded template identities for the copy.</param>
+    /// <param name="notes">Normalisation notes for the copy.</param>
+    /// <returns>The copied plan.</returns>
     private static OspfMigrationPlan CloneWithSuperseded(
         OspfMigrationPlan plan,
         IReadOnlyList<OspfSupersededTemplateIdentity> superseded,

@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: GlobalUsings.cs
+//
+// Description:
+// Project-wide global using directives for the MikrotikWorker.Tests assembly
+// (xUnit and common namespaces).
+//
+// -----------------------------------------------------------------------------
+
 global using System.Net;
 global using System.Net.Http.Headers;
 global using System.Net.Sockets;

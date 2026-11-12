@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: LiveMikrotikUpgradeTests.cs
+//
+// Description:
+// Live category upgrade workflow tests (explicit LiveUpgrade filter; not run
+// by default).
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -26,12 +35,36 @@ namespace MikrotikWorker.Tests.Upgrade.Live;
 [Trait("Category", "LiveUpgrade")]
 public sealed class LiveMikrotikUpgradeTests
 {
+    /// <summary>
+    /// IP address of the designated live test router; the only device this test is allowed to upgrade.
+    /// </summary>
     private const string LiveHost = "198.18.0.83";
+    /// <summary>
+    /// Address of the worker machine as seen by the router, used to build the advertised firmware download URL.
+    /// </summary>
     private const string WorkerAdvertisedHost = "198.18.0.66";
+    /// <summary>
+    /// TCP port on which the temporary firmware HTTP server listens.
+    /// </summary>
     private const int FirmwareHttpPort = 8080;
+    /// <summary>
+    /// Path of the JSON file in the temp directory that receives the upgrade result summary.
+    /// </summary>
     private static readonly string SummaryPath =
         Path.Combine(Path.GetTempPath(), "mikrotik-live-upgrade-result.json");
 
+    /// <summary>
+    /// Scenario: Live router 198.18.0.83 (hEX PoE, mipsbe, model 960PGS, RouterOS 6.49.19) is upgraded to 6.49.23
+    /// only when the extra LiveUpgrade environment gate is armed, so Category=LiveUpgrade cannot run by accident. The
+    /// test checks the local config, API and SSH reachability and the prior central backup, serves the package from a
+    /// temporary Kestrel server, then runs the production executor: backup, fetch of routeros-mipsbe-6.49.23.npk,
+    /// reboot and verify.
+    /// Expected: The pre-upgrade device is ReadyForUpgrade. The backup manifest records the router IP, identity,
+    /// SHA-256 hashes, sizes and a SucceededWithRemoteCleanup status, and the export (.rsc) and binary (.backup)
+    /// files exist and match their hashes. The upgrade reports a reboot, and the router returns on 6.49.23 with the
+    /// same architecture, board and model.
+    /// Invariant: The test never runs without explicit opt-in, and credentials are sanitised in failure messages.
+    /// </summary>
     [Fact]
     public async Task LiveRouter_Backup_Fetch_Reboot_Verify_6_49_23()
     {
@@ -544,18 +577,39 @@ public sealed class LiveMikrotikUpgradeTests
             string.Join(Environment.NewLine, [mainLogPath, deviceLogPath]));
     }
 
+    /// <summary>
+    /// Minimal <c>IHostEnvironment</c> fake reporting the Development environment, the test assembly name, the test
+    /// output directory as content root, and an empty file provider.
+    /// </summary>
     private sealed class LiveUpgradeHostEnvironment : Microsoft.Extensions.Hosting.IHostEnvironment
     {
+        /// <summary>
+        /// Environment name reported to hosted components; always <c>Development</c>.
+        /// </summary>
         public string EnvironmentName { get; set; } = "Development";
 
+        /// <summary>
+        /// Application name reported to hosted components.
+        /// </summary>
         public string ApplicationName { get; set; } = "MikrotikWorker.Tests";
 
+        /// <summary>
+        /// Content root path reported to hosted components; defaults to the test output directory.
+        /// </summary>
         public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
 
+        /// <summary>
+        /// Empty file provider, since no content files are needed by the components under test.
+        /// </summary>
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } =
             new NullFileProvider();
     }
 
+    /// <summary>
+    /// Starts a web host on all interfaces at the given port that serves the firmware directory as static files
+    /// (with <c>.npk</c> as octet-stream) under the firmware request path, so the router can fetch packages over
+    /// HTTP.
+    /// </summary>
     private static async Task<WebApplication> StartFirmwareServerAsync(string firmwareRoot, int port)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
@@ -576,6 +630,10 @@ public sealed class LiveMikrotikUpgradeTests
         return app;
     }
 
+    /// <summary>
+    /// Locates the <c>FirmwareFiles</c> directory by probing the test output folder, the repository root and the
+    /// current directory, returning the first that exists.
+    /// </summary>
     private static string FindFirmwareFilesRoot()
     {
         string[] candidates =
@@ -587,6 +645,10 @@ public sealed class LiveMikrotikUpgradeTests
         return candidates.First(Directory.Exists);
     }
 
+    /// <summary>
+    /// Looks for <c>appsettings.Development.local.json</c> in the worker project folder, the test output folder and
+    /// the current directory, returning the first existing path or null.
+    /// </summary>
     private static string? FindLocalConfigPath()
     {
         string[] candidates =
@@ -598,6 +660,10 @@ public sealed class LiveMikrotikUpgradeTests
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    /// <summary>
+    /// Asserts that the earlier live-test backup set (export, binary backup and manifest) still exists, is
+    /// non-empty, and that the manifest fields and SHA-256 hashes match the files and the expected values.
+    /// </summary>
     private static void VerifyPriorCentralBackupIntact()
     {
         string backupRoot = Path.GetFullPath(Path.Combine(
@@ -631,22 +697,39 @@ public sealed class LiveMikrotikUpgradeTests
             ignoreCase: true);
     }
 
+    /// <summary>
+    /// Streams the file at the given path through SHA-256 and returns the digest as lowercase hex.
+    /// </summary>
     private static string ComputeSha256Hex(string path)
     {
         using FileStream stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Serialises the summary object as indented JSON and writes it to the live upgrade summary file.
+    /// </summary>
     private static async Task WriteSummaryAsync(object summary) =>
         await File.WriteAllTextAsync(
             SummaryPath,
             JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
 
+    /// <summary>
+    /// Replaces every occurrence of the password in the message with <c>***</c>, leaving the message unchanged when
+    /// the password is empty.
+    /// </summary>
     private static string Sanitize(string message, string password) =>
         string.IsNullOrEmpty(password)
             ? message
             : message.Replace(password, "***", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Checks whether a TCP connection to <paramref name="host"/>:<paramref name="port"/> can be established within the timeout.
+    /// <param name="host">Host name or IP address.</param>
+    /// <param name="port">TCP port.</param>
+    /// <param name="timeout">Maximum time to wait for the connection.</param>
+    /// <returns><see langword="true"/> when the connection succeeds; <see langword="false"/> on timeout or any error.</returns>
+    /// </summary>
     private static async Task<bool> IsTcpReachableAsync(string host, int port, TimeSpan timeout)
     {
         try

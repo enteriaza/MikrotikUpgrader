@@ -1,10 +1,23 @@
+// -----------------------------------------------------------------------------
+// File: CsvOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for CsvOptions: resolvable CultureInfo and TimeZoneInfo, and
+// a non-empty DateTimeFormats array without blank entries.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="CsvOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class CsvOptionsValidator : IValidateOptions<CsvOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, CsvOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

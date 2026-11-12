@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfMigrationPlanStore.cs
+//
+// Description:
+// Persists and loads OSPF migration plans on disk keyed by scheduled job, with
+// identity-safe load checks.
+//
+// -----------------------------------------------------------------------------
+
 using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
@@ -11,31 +20,67 @@ using MikrotikWorker.Serialization;
 
 namespace MikrotikWorker.Upgrade.Ospf;
 
+/// <summary>
+/// Persists, loads, and deletes OSPF migration plans for scheduled jobs.
+/// </summary>
 internal interface IOspfMigrationPlanStore
 {
+    /// <summary>
+    /// Persists a validated migration plan.
+    /// </summary>
+    /// <param name="plan">Plan to write.</param>
+    /// <param name="cancellationToken">Token to cancel the write.</param>
+    /// <returns>A task that completes when the plan is on disk.</returns>
     Task SaveAsync(OspfMigrationPlan plan, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Loads the persisted plan for a job if it passes correlation and integrity checks.
+    /// </summary>
+    /// <param name="job">Scheduled job whose plan is wanted.</param>
+    /// <param name="identity">Router identity the plan must match.</param>
+    /// <param name="cancellationToken">Token to cancel the read.</param>
+    /// <returns>The plan, or null when missing, malformed, mismatched, or failing integrity checks.</returns>
     Task<OspfMigrationPlan?> TryLoadAsync(
         MikrotikScheduledJob job,
         string identity,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Deletes the persisted plan for a job.
+    /// </summary>
+    /// <param name="job">Scheduled job whose plan is removed.</param>
+    /// <param name="routerIp">Router address to use instead of the job address.</param>
     void Delete(MikrotikScheduledJob job, IPAddress? routerIp = null);
 
+    /// <summary>
+    /// Removes orphaned temporary plan files left by an earlier run and logs retained plans.
+    /// </summary>
     void CleanupOrphansOnStartup();
 }
 
+/// <summary>
+/// File-based OSPF migration plan store under the configured plans directory.
+/// </summary>
 internal sealed class OspfMigrationPlanStore(
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     ILogger<OspfMigrationPlanStore> logger) : IOspfMigrationPlanStore
 {
     // job-{sanitized}_import-{32 hex}_ip-{16 hex}.json
+    /// <summary>
+    /// Matches file names produced by <see cref="BuildFileName"/> so unrelated files are never touched.
+    /// </summary>
     private static readonly Regex OwnedPlanFileName = new(
         @"^job-[A-Za-z0-9\-]+_import-[0-9a-fA-F]{32}_ip-[0-9a-fA-F]{16}\.json$",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    /// <summary>
+    /// Plan paths currently being written or retained by this process, protected from cleanup.
+    /// </summary>
     private readonly ConcurrentDictionary<string, byte> _activePaths = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Persists a validated migration plan for the job.
+    /// </summary>
     public async Task SaveAsync(OspfMigrationPlan plan, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(plan);
@@ -63,6 +108,9 @@ internal sealed class OspfMigrationPlanStore(
         }
     }
 
+    /// <summary>
+    /// Loads a persisted plan for the job when present and identity-safe.
+    /// </summary>
     public async Task<OspfMigrationPlan?> TryLoadAsync(
         MikrotikScheduledJob job,
         string identity,
@@ -127,6 +175,9 @@ internal sealed class OspfMigrationPlanStore(
         return plan;
     }
 
+    /// <summary>
+    /// Deletes any persisted plan files for the job.
+    /// </summary>
     public void Delete(MikrotikScheduledJob job, IPAddress? routerIp = null)
     {
         ArgumentNullException.ThrowIfNull(job);
@@ -151,6 +202,9 @@ internal sealed class OspfMigrationPlanStore(
         }
     }
 
+    /// <summary>
+    /// Deletes orphaned owned temp files and logs retained plan JSON; unrelated files are ignored.
+    /// </summary>
     public void CleanupOrphansOnStartup()
     {
         string dir = GetDirectory();
@@ -188,6 +242,11 @@ internal sealed class OspfMigrationPlanStore(
         }
     }
 
+    /// <summary>
+    /// Deletes an owned temporary plan file unless its plan is actively being written.
+    /// </summary>
+    /// <param name="path">Full path of the temp file.</param>
+    /// <param name="name">File name, used for logging.</param>
     private void CleanupOwnedTempIfSafe(string path, string name)
     {
         string jsonPath = path[..^4]; // strip ".tmp"
@@ -210,6 +269,11 @@ internal sealed class OspfMigrationPlanStore(
         }
     }
 
+    /// <summary>
+    /// Logs why a plan file is retained, without deleting it.
+    /// </summary>
+    /// <param name="path">Full path of the plan JSON.</param>
+    /// <param name="name">File name, used for logging.</param>
     private void LogRetainedPlanDiagnostics(string path, string name)
     {
         if (_activePaths.ContainsKey(path))
@@ -254,6 +318,11 @@ internal sealed class OspfMigrationPlanStore(
         }
     }
 
+    /// <summary>
+    /// Deletes a file if it exists, logging a warning instead of throwing on failure.
+    /// </summary>
+    /// <param name="path">File to delete.</param>
+    /// <param name="warningMessage">Message logged when deletion fails.</param>
     private void TryDeleteFile(string path, string warningMessage)
     {
         try
@@ -269,15 +338,34 @@ internal sealed class OspfMigrationPlanStore(
         }
     }
 
+    /// <summary>
+    /// Resolves the folder that holds persisted migration plan files: an <c>OspfPlans</c> subfolder of the
+    /// configured absolute backup directory. The path is computed only; the folder is not created here.
+    /// </summary>
+    /// <returns>The absolute plans directory path.</returns>
     private string GetDirectory()
     {
         string root = upgradeOptions.Value.GetAbsoluteBackupDirectory();
         return Path.Combine(root, "OspfPlans");
     }
 
+    /// <summary>
+    /// Builds the full path of the plan file for a job, import, and router.
+    /// </summary>
+    /// <param name="jobId">Scheduled job identifier.</param>
+    /// <param name="importId">Import identifier.</param>
+    /// <param name="routerIp">Router IP address text.</param>
+    /// <returns>The full file path.</returns>
     private string GetFilePath(string jobId, Guid importId, string routerIp) =>
         Path.Combine(GetDirectory(), BuildFileName(jobId, importId, routerIp));
 
+    /// <summary>
+    /// Builds the deterministic plan file name from sanitised job ID, import ID, and a hash of the router IP.
+    /// </summary>
+    /// <param name="jobId">Scheduled job identifier.</param>
+    /// <param name="importId">Import identifier.</param>
+    /// <param name="routerIp">Router IP address text.</param>
+    /// <returns>The plan file name.</returns>
     internal static string BuildFileName(string jobId, Guid importId, string routerIp)
     {
         static string Sanitize(string value) => string.Concat(value.Select(ch => char.IsLetterOrDigit(ch) ? ch : '-'));
@@ -285,18 +373,36 @@ internal sealed class OspfMigrationPlanStore(
         return $"job-{Sanitize(jobId)}_import-{importId:N}_ip-{ipKey}.json";
     }
 
+    /// <summary>
+    /// Determines whether a file name has the plan JSON naming pattern.
+    /// </summary>
+    /// <param name="fileName">File name without directory.</param>
+    /// <returns><see langword="true"/> when the name matches.</returns>
     internal static bool IsOwnedPlanJsonFileName(string fileName) =>
         OwnedPlanFileName.IsMatch(fileName);
 
+    /// <summary>
+    /// Determines whether a file name is a plan JSON name with a <c>.tmp</c> suffix.
+    /// </summary>
+    /// <param name="fileName">File name without directory.</param>
+    /// <returns><see langword="true"/> when the name matches.</returns>
     internal static bool IsOwnedPlanTempFileName(string fileName) =>
         fileName.EndsWith(".json.tmp", StringComparison.OrdinalIgnoreCase)
         && IsOwnedPlanJsonFileName(fileName[..^4]);
 }
 
+/// <summary>
+/// Hosted service that periodically cleans expired OSPF migration plan files.
+/// </summary>
 internal sealed class OspfMigrationPlanStoreCleanupHostedService(
     IOspfMigrationPlanStore store,
     ILogger<OspfMigrationPlanStoreCleanupHostedService> logger) : IHostedService
 {
+    /// <summary>
+    /// Runs the one-time orphan cleanup at startup, logging rather than propagating failures.
+    /// </summary>
+    /// <param name="cancellationToken">Startup cancellation token.</param>
+    /// <returns>A completed task.</returns>
     public Task StartAsync(CancellationToken cancellationToken)
     {
         try
@@ -311,5 +417,10 @@ internal sealed class OspfMigrationPlanStoreCleanupHostedService(
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Does nothing; there is no state to release on shutdown.
+    /// </summary>
+    /// <param name="cancellationToken">Shutdown cancellation token.</param>
+    /// <returns>A completed task.</returns>
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

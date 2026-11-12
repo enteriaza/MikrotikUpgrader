@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfOnlyLabRecoveryRunner.cs
+//
+// Description:
+// Controlled OSPF-only lab recovery for a single already-upgraded RouterOS 7
+// device. Does not register or invoke , CSV scheduling, package fetch, or
+// firmware enablement.
+//
+// -----------------------------------------------------------------------------
+
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Text.Json;
@@ -21,13 +31,31 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal static class OspfOnlyLabRecoveryRunner
 {
+    /// <summary>Command-line switch that selects this recovery mode; matched case-insensitively against the process arguments.</summary>
     public const string Argument = "--ospf-only-lab-recovery";
 
+    /// <summary>Indented JSON options used when writing evidence files.</summary>
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
+    /// <summary>Returns true when <see cref="Argument"/> appears in the supplied command-line arguments.</summary>
     public static bool IsRequested(string[] args) =>
         args.Any(static a => string.Equals(a, Argument, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Runs the OSPF-only lab recovery against the single pinned lab router and writes evidence files to the evidence directory.
+    /// </summary>
+    /// <remarks>
+    /// Stages: configuration gate, identity/architecture/board checks, preflight neighbour check, mandatory pre-mutation backup,
+    /// plan capture and live identity resolution, plan target validation, OSPF apply and verify, operational health check,
+    /// optional static-summary redistribution, post-migration backup. RouterBOARD firmware is never changed.
+    /// </remarks>
+    /// <param name="args">Process arguments; also forwarded to the host builder.</param>
+    /// <param name="cancellationToken">Cancels the run.</param>
+    /// <returns>
+    /// Process exit code: 0 success; 2 recovery not requested; 3 configuration gate refused; 4 identity, version, hardware or preflight check failed;
+    /// 5 plan capture, identity resolution or target validation failed; 6 OSPF apply/verify failed; 7 operational health check failed;
+    /// 8 pre- or post-migration backup failed; 9 static-summary redistribution failed.
+    /// </returns>
     public static async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
     {
         if (!IsRequested(args))
@@ -674,6 +702,7 @@ internal static class OspfOnlyLabRecoveryRunner
         return 0;
     }
 
+    /// <summary>Projects a backup result (paths, cleanup state and manifest hashes/sizes; never file contents) into an anonymous object for the evidence JSON.</summary>
     private static object DescribeBackup(DeviceBackupResult backup) =>
         new
         {
@@ -702,6 +731,12 @@ internal static class OspfOnlyLabRecoveryRunner
                 },
         };
 
+    /// <summary>
+    /// Checks that the plan matches the pinned lab router's expected OSPF target state.
+    /// </summary>
+    /// <param name="plan">Plan to validate.</param>
+    /// <param name="expectedIdentity">Router identity used to derive the expected site area name.</param>
+    /// <returns>A description of the first mismatch (Router ID, instance, backbone/site area, loopback, site matcher or area-range), or null when the plan is acceptable.</returns>
     private static string? DescribePlanTargetFailure(OspfMigrationPlan plan, string expectedIdentity)
     {
         if (!string.Equals(plan.RouterId, "10.16.0.11", StringComparison.Ordinal))
@@ -762,9 +797,19 @@ internal static class OspfOnlyLabRecoveryRunner
         return null;
     }
 
+    /// <summary>Normalises a CIDR to canonical form, falling back to the trimmed text (or empty) when it cannot be parsed.</summary>
     private static string NormalizeCidr(string? cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p) ? p.ToCidrString() : cidr?.Trim() ?? string.Empty;
 
+    /// <summary>
+    /// Checks the configuration gates required to run the lab recovery.
+    /// </summary>
+    /// <remarks>
+    /// Requires firmware upgrade to be disabled, a valid pinned lab target IP and identity, MikroTik access enabled, and credentials present.
+    /// </remarks>
+    /// <param name="upgrade">Firmware upgrade options, including the lab target pin.</param>
+    /// <param name="mikrotik">MikroTik connection options.</param>
+    /// <returns>The reason the run must be refused, or null when all gates pass.</returns>
     internal static string? DescribeGateFailure(FirmwareUpgradeOptions upgrade, MikroTikOptions mikrotik)
     {
         if (upgrade.Enabled)
@@ -796,6 +841,7 @@ internal static class OspfOnlyLabRecoveryRunner
         return null;
     }
 
+    /// <summary>Compares the router's reported identity with the pinned identity. The expected IP is accepted only for diagnostics; the connection was already made to the pinned host. Returns a mismatch description, or null when identities match.</summary>
     private static string? DescribeIdentityFailure(
         MikrotikDeviceInfo info,
         IPAddress expectedIp,
@@ -811,6 +857,7 @@ internal static class OspfOnlyLabRecoveryRunner
         return null;
     }
 
+    /// <summary>Registers the minimal service graph for recovery: options, logging, MikroTik API and transfer clients, backup and OSPF services. Upgrade executors, the scheduler and CSV watchers are deliberately not registered.</summary>
     private static void ConfigureServices(IServiceCollection services, IConfiguration configuration)
     {
         services
@@ -857,6 +904,7 @@ internal static class OspfOnlyLabRecoveryRunner
         // Explicitly do NOT register RouterBOARD upgrade, IRouterOsV6UpgradeExecutor, scheduler, or CSV watchers.
     }
 
+    /// <summary>Captures a read-only operational snapshot (OSPF inventory, filter count, addresses, neighbours and the first 80 routes) as an anonymous object for evidence JSON.</summary>
     private static async Task<object> CaptureOperationalAsync(
         IOspfMikrotikOperations ops,
         ITikConnection connection,
@@ -889,6 +937,17 @@ internal static class OspfOnlyLabRecoveryRunner
         };
     }
 
+    /// <summary>
+    /// Checks post-apply operational health of the pinned lab router.
+    /// </summary>
+    /// <remarks>
+    /// Hard requirements are the expected neighbour in the <c>Full</c> state, an active non-passive cost-10 backhaul template and a passive loopback template.
+    /// Planned area ranges that are not clearly visible in <c>/ip/route</c> are reported as route warnings and do not fail the check.
+    /// </remarks>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="plan">Plan whose area ranges are looked up in the routing table.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The health result, including neighbour details and any route warnings.</returns>
     private static async Task<OperationalHealthResult> AssessOperationalHealthAsync(
         ITikConnection connection,
         OspfMigrationPlan plan,
@@ -979,6 +1038,7 @@ internal static class OspfOnlyLabRecoveryRunner
         };
     }
 
+    /// <summary>Runs a RouterOS <c>print</c> command and returns each row as a field-name to value dictionary.</summary>
     private static async Task<List<Dictionary<string, string>>> PrintAsync(
         ITikConnection connection,
         string path,
@@ -991,9 +1051,11 @@ internal static class OspfOnlyLabRecoveryRunner
         return rows.Select(static r => r.Words.ToDictionary(static kv => kv.Key, static kv => kv.Value)).ToList();
     }
 
+    /// <summary>Returns the value of a field in a RouterOS row, or null when the field is absent.</summary>
     private static string? Get(Dictionary<string, string> row, string key) =>
         row.TryGetValue(key, out string? value) ? value : null;
 
+    /// <summary>Interprets a RouterOS boolean field; an empty value (flag present without a value) counts as true, as do <c>true</c>, <c>yes</c> and <c>1</c>.</summary>
     private static bool IsTruthy(string? value) =>
         value is not null
         && (value.Equals("true", StringComparison.OrdinalIgnoreCase)
@@ -1015,17 +1077,28 @@ internal static class OspfOnlyLabRecoveryRunner
     private static Task WriteJsonAsync(string path, object value, CancellationToken cancellationToken) =>
         File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, JsonOptions), cancellationToken);
 
+    /// <summary>Writes a plain-text evidence file (for example the verdict), replacing any existing file.</summary>
     private static Task WriteTextAsync(string path, string value, CancellationToken cancellationToken) =>
         File.WriteAllTextAsync(path, value, cancellationToken);
 
+    /// <summary>
+    /// Operational health check result used by the OSPF-only lab recovery runner.
+    /// </summary>
     private sealed class OperationalHealthResult
     {
+        /// <summary>True when no hard health errors were found; route warnings alone do not fail.</summary>
         public bool Succeeded { get; init; }
+        /// <summary>Summary of the outcome: the hard errors, or a success message optionally followed by route warnings.</summary>
         public string? Detail { get; init; }
+        /// <summary>State of the expected OSPF neighbour (for example <c>Full</c>); null when the neighbour was not found.</summary>
         public string? NeighbourState { get; init; }
+        /// <summary>Address of the expected OSPF neighbour; null when not found.</summary>
         public string? NeighbourAddress { get; init; }
+        /// <summary>Router ID of the expected OSPF neighbour; null when not found.</summary>
         public string? NeighbourRouterId { get; init; }
+        /// <summary>Total number of OSPF neighbours observed.</summary>
         public int NeighbourCount { get; init; }
+        /// <summary>Soft observations about planned area ranges not clearly present in the routing table.</summary>
         public IReadOnlyList<string> RouteWarnings { get; init; } = [];
     }
 }

@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: SchedulerExecutionTestHost.cs
+//
+// Description:
+// Test host wiring for scheduler execution scenarios with controllable fakes and
+// in-memory job scheduling.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
@@ -13,6 +22,29 @@ namespace MikrotikWorker.Tests.Infrastructure.Hosts;
 /// </summary>
 internal static class SchedulerExecutionTestHost
 {
+    /// <summary>
+    /// Builds an <see cref="InMemoryJobScheduler"/>, its execution queue and a pool of worker loops that run
+    /// <see cref="RouterJobExecutor"/> against the supplied fakes.
+    /// </summary>
+    /// <param name="options">Scheduled-jobs options; <c>MaxConcurrentRouterJobs</c> is raised to at least 12.</param>
+    /// <param name="paths">Job folder layout.</param>
+    /// <param name="fileMover">File mover used for Accepted/Completed moves.</param>
+    /// <param name="time">Time provider shared by scheduler and executor.</param>
+    /// <param name="schedulerLogger">Scheduler logger; defaults to a null logger.</param>
+    /// <param name="connectionFactory">Connection factory; defaults to one that throws on any connect.</param>
+    /// <param name="deviceInfoReader">Device-info reader; defaults to a real client over <paramref name="connectionFactory"/>.</param>
+    /// <param name="credentialResolver">Credential resolver; defaults to app-settings credentials.</param>
+    /// <param name="compatibilityAssessor">Assessor; defaults to one over a temp firmware catalogue and RouterOS 7.23.8.</param>
+    /// <param name="upgradeExecutor">Upgrade executor; defaults to <see cref="StubUpgradeExecutor"/>.</param>
+    /// <param name="mikroTikEnabled">Value forced onto <c>MikroTikOptions.Enabled</c>.</param>
+    /// <param name="executionWorkers">Requested number of worker loops (minimum 12 are used).</param>
+    /// <param name="mikroTikOptions">MikroTik options override; defaults to shared test credentials.</param>
+    /// <param name="executorLogger">Executor logger; defaults to a null logger.</param>
+    /// <param name="firmwareRoot">Firmware directory for the default assessor; defaults to a temp tree.</param>
+    /// <param name="jobRetryOptions">Retry options; defaults to <see cref="JobRetryOptions"/> defaults.</param>
+    /// <returns>
+    /// The scheduler, its queue, the task running the workers, and the source that cancels those workers.
+    /// </returns>
     public static (
         InMemoryJobScheduler Scheduler,
         RouterJobExecutionQueue Queue,
@@ -93,6 +125,8 @@ internal static class SchedulerExecutionTestHost
         return (scheduler, queue, executionTask, cts);
     }
 
+    /// <summary>Creates a temp firmware tree containing placeholder RouterOS 6 and 7 packages for mipsbe and arm.</summary>
+    /// <returns>Full path of the temp firmware root.</returns>
     private static string CreateTempFirmwareRootWithMipsbe()
     {
         string root = Directory.CreateTempSubdirectory("mikrotik-fw-").FullName;
@@ -104,6 +138,13 @@ internal static class SchedulerExecutionTestHost
         return root;
     }
 
+    /// <summary>Runs <paramref name="workerCount"/> worker loops until they finish or are cancelled.</summary>
+    /// <param name="queue">Queue the workers read from.</param>
+    /// <param name="executor">Executor that processes each work item.</param>
+    /// <param name="completer">Completer notified when items finish.</param>
+    /// <param name="workerCount">Number of concurrent worker loops.</param>
+    /// <param name="cancellationToken">Token that stops the workers; cancellation is swallowed.</param>
+    /// <returns>A task that completes when all workers have stopped.</returns>
     private static async Task RunWorkersAsync(
         RouterJobExecutionQueue queue,
         RouterJobExecutor executor,
@@ -124,6 +165,12 @@ internal static class SchedulerExecutionTestHost
         }
     }
 
+    /// <summary>Reads work items from <paramref name="queue"/> and executes them until cancelled.</summary>
+    /// <param name="queue">Queue to read from.</param>
+    /// <param name="executor">Executor that processes each work item.</param>
+    /// <param name="completer">Completer notified when items finish.</param>
+    /// <param name="cancellationToken">Token that stops the loop; cancellation is swallowed.</param>
+    /// <returns>A task that completes when the loop ends.</returns>
     private static async Task RunOneAsync(
         RouterJobExecutionQueue queue,
         RouterJobExecutor executor,
@@ -147,8 +194,19 @@ internal static class SchedulerExecutionTestHost
 /// Fake upgrade executor for scheduler/preflight tests. Defaults to a verified-target success so those tests
 /// exercise the connect/assess/disconnect path; pass another outcome to test job-outcome mapping.
 /// </summary>
+/// <param name="outcome">Outcome returned by every <see cref="ExecuteAsync"/> call.</param>
 internal sealed class StubUpgradeExecutor(UpgradeOutcome outcome = UpgradeOutcome.UpgradeSucceeded) : IRouterOsV6UpgradeExecutor
 {
+    /// <summary>Returns the configured outcome without touching the router.</summary>
+    /// <param name="connection">Router connection (unused).</param>
+    /// <param name="job">Scheduled job (unused).</param>
+    /// <param name="deviceInfo">Device info (unused).</param>
+    /// <param name="assessment">Compatibility assessment (unused).</param>
+    /// <param name="username">Router user name (unused).</param>
+    /// <param name="password">Router password (unused).</param>
+    /// <param name="isWithinScheduleWindow">Schedule-window check (unused).</param>
+    /// <param name="cancellationToken">Token (unused).</param>
+    /// <returns>A completed task containing a result with the configured outcome.</returns>
     public Task<UpgradeExecutionResult> ExecuteAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -161,11 +219,19 @@ internal sealed class StubUpgradeExecutor(UpgradeOutcome outcome = UpgradeOutcom
         Task.FromResult(new UpgradeExecutionResult { Outcome = outcome, Detail = $"Stub outcome {outcome}" });
 }
 
+/// <summary>
+/// Fixed in-memory firmware catalogue for scheduler execution tests.
+/// </summary>
+/// <param name="root">Directory scanned recursively for <c>*.npk</c> packages.</param>
 internal sealed class StaticFirmwarePackageCatalog(string root) : IFirmwarePackageCatalog
 {
+    /// <summary>Gets only the main <c>routeros</c> packages under the root.</summary>
+    /// <returns>The RouterOS packages found, or an empty list when the root is missing.</returns>
     public IReadOnlyList<FirmwarePackageInfo> GetRouterOsPackages() =>
         GetPackages().Where(static p => p.PackageName.Equals("routeros", StringComparison.Ordinal)).ToList();
 
+    /// <summary>Scans the root for <c>*.npk</c> files whose names parse as firmware packages.</summary>
+    /// <returns>The parsed packages; files with unparseable names are skipped, and a missing root yields an empty list.</returns>
     public IReadOnlyList<FirmwarePackageInfo> GetPackages()
     {
         if (!Directory.Exists(root))

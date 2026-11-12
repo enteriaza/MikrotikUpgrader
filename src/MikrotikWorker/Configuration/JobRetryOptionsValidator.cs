@@ -1,9 +1,22 @@
+// -----------------------------------------------------------------------------
+// File: JobRetryOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for JobRetryOptions: positive retry delays and non-negative
+// MaximumUnsuccessfulAttempts (zero disables retry).
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="JobRetryOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class JobRetryOptionsValidator : IValidateOptions<JobRetryOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, JobRetryOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

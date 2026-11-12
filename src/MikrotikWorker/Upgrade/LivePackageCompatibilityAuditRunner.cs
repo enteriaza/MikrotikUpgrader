@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityAuditRunner.cs
+//
+// Description:
+// Explicit dual-gated CLI entry for live, read-only fleet package-compatibility
+// audits. Requires both --audit-package-compatibility-live and
+// LivePackageCompatibilityAudit:Enabled=true. Uses LivePackageCompatibilityAuditHost
+// (not the full worker host) and does not enable firmware upgrades.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -14,8 +25,14 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 internal static class LivePackageCompatibilityAuditRunner
 {
+    /// <summary>
+    /// CLI flag that must be present to activate the live package-compatibility audit.
+    /// </summary>
     public const string LiveAuditArgument = "--audit-package-compatibility-live";
 
+    /// <summary>
+    /// True when <see cref="LiveAuditArgument"/> appears in <paramref name="args"/>.
+    /// </summary>
     public static bool IsLiveAuditRequested(string[] args) =>
         args.Any(static a => string.Equals(a, LiveAuditArgument, StringComparison.OrdinalIgnoreCase));
 
@@ -42,16 +59,25 @@ internal static class LivePackageCompatibilityAuditRunner
         return null;
     }
 
+    /// <summary>
+    /// Runs the dual-gated live read-only fleet audit and returns a process exit code.
+    /// </summary>
     public static Task<int> RunLiveAuditAsync(
         string[] args,
         CancellationToken cancellationToken = default) =>
         RunLiveAuditAsync(args, configureHost: null, cancellationToken);
 
+    /// <summary>
+    /// Runs the dual-gated live read-only fleet audit and returns a process exit code.
+    /// </summary>
+    /// <param name="args">Process arguments including <c>--audit-package-compatibility-live</c> and <c>--input</c>.</param>
     /// <param name="configureHost">
     /// Optional test/host customization applied after default appsettings (including optional
     /// <c>*.local.json</c>). Later configuration sources win — use this to force
     /// <c>LivePackageCompatibilityAudit:Enabled=false</c> without depending on ambient local files.
     /// </param>
+    /// <param name="cancellationToken">Token that cancels the audit run.</param>
+    /// <returns>Process exit code (0 success; non-zero for gate/input/runtime failures).</returns>
     public static async Task<int> RunLiveAuditAsync(
         string[] args,
         Action<HostApplicationBuilder>? configureHost,
@@ -203,6 +229,9 @@ internal static class LivePackageCompatibilityAuditRunner
         }
     }
 
+    /// <summary>
+    /// True when candidate is the same as or under root after full path normalization.
+    /// </summary>
     internal static bool IsPathEqualOrUnder(string candidate, string root)
     {
         string normalizedCandidate = Path.GetFullPath(candidate)
@@ -219,6 +248,9 @@ internal static class LivePackageCompatibilityAuditRunner
         return normalizedCandidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Reads the value following a named CLI argument, or null when absent.
+    /// </summary>
     private static string? ResolveArg(string[] args, string name)
     {
         for (int i = 0; i < args.Length - 1; i++)

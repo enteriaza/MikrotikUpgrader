@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: LegacyFleetUpgradeAutomationCleanup.cs
+//
+// Description:
+// Removes legacy router-side FleetUpgrade automation objects so this
+// application remains the sole firmware-management authority.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Logging;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
@@ -11,14 +20,26 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 internal static class LegacyFleetUpgradeObjectNames
 {
+    /// <summary>
+    /// Legacy FleetUpgrade script name removed by cleanup.
+    /// </summary>
     public const string ScriptName = "FleetUpgrade";
+    /// <summary>
+    /// Legacy FleetUpgrade scheduler name removed by cleanup.
+    /// </summary>
     public const string SchedulerName = "FleetUpgrade-startup";
 }
 
+/// <summary>
+/// Removes and verifies absence of legacy router-side FleetUpgrade script/scheduler objects before firmware mutation.
+/// </summary>
 internal sealed class LegacyFleetUpgradeAutomationCleanup(
     IMikrotikRouterOperations routerOperations,
     ILogger<LegacyFleetUpgradeAutomationCleanup> logger)
 {
+    /// <summary>
+    /// Removes FleetUpgrade script/scheduler objects and verifies they are absent.
+    /// </summary>
     public async Task<LegacyFleetUpgradeCleanupResult> CleanupAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -236,6 +257,13 @@ internal sealed class LegacyFleetUpgradeAutomationCleanup(
         };
     }
 
+    /// <summary>
+    /// Logs a service-level error and returns a failed cleanup result.
+    /// </summary>
+    /// <param name="detail">Why the cleanup failed.</param>
+    /// <param name="schedulerFound">Count of legacy schedulers found, when known.</param>
+    /// <param name="scriptFound">Count of legacy scripts found, when known.</param>
+    /// <returns>A failed result carrying the detail and counts.</returns>
     private LegacyFleetUpgradeCleanupResult Fail(string detail, int? schedulerFound, int? scriptFound)
     {
         using (DeviceLogging.BeginServiceSummary())
@@ -253,17 +281,38 @@ internal sealed class LegacyFleetUpgradeAutomationCleanup(
     }
 }
 
+/// <summary>
+/// Outcome of legacy FleetUpgrade automation cleanup, including found/removed counts.
+/// </summary>
 internal sealed class LegacyFleetUpgradeCleanupResult
 {
+    /// <summary>
+    /// True when cleanup succeeded or objects were already absent.
+    /// </summary>
     public required bool Succeeded { get; init; }
 
+    /// <summary>
+    /// Failure detail when <see cref="Succeeded"/> is false.
+    /// </summary>
     public string? FailureReason { get; init; }
 
+    /// <summary>
+    /// Number of matching scheduler objects found before removal.
+    /// </summary>
     public int? SchedulerFound { get; init; }
 
+    /// <summary>
+    /// Number of matching script objects found before removal.
+    /// </summary>
     public int? ScriptFound { get; init; }
 
+    /// <summary>
+    /// Number of scheduler objects removed.
+    /// </summary>
     public int SchedulerRemoved { get; init; }
 
+    /// <summary>
+    /// Number of script objects removed.
+    /// </summary>
     public int ScriptRemoved { get; init; }
 }

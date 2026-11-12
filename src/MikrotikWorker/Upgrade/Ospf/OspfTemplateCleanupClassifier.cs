@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfTemplateCleanupClassifier.cs
+//
+// Description:
+// Classifies live OSPF interface-templates for cleanup ownership (planned,
+// known-legacy, obsolete, protected) before deletion.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
@@ -5,10 +14,19 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal enum OspfTemplateClassification
 {
+    /// <summary>Live backhaul template that must not be removed.</summary>
     ProtectedBackhaul = 0,
+
+    /// <summary>Live loopback template that must not be removed.</summary>
     ProtectedLoopback = 1,
+
+    /// <summary>Live template that matches the planned consolidated site matcher.</summary>
     PlannedSiteMatcher = 2,
+
+    /// <summary>Live template identified as known-legacy and eligible for cleanup.</summary>
     KnownLegacy = 3,
+
+    /// <summary>Live template with no established replacement relationship (fail closed).</summary>
     Unknown = 4,
 }
 
@@ -17,35 +35,64 @@ internal enum OspfTemplateClassification
 /// </summary>
 internal sealed record OspfTemplateInventoryRow
 {
+    /// <summary>RouterOS <c>.id</c> of the interface-template row; null when the inventory row had none (such rows abort cleanup).</summary>
     public string? Id { get; init; }
+    /// <summary>Name of the OSPF area the template belongs to (<c>area</c>).</summary>
     public string? Area { get; init; }
+    /// <summary>Interface matcher (<c>interfaces</c>): a comma-separated interface list, <c>all</c>, or null when the template is network-only.</summary>
     public string? Interfaces { get; init; }
+    /// <summary>Network matcher (<c>networks</c>): a single CIDR or a comma-separated set of prefixes.</summary>
     public string? Networks { get; init; }
+    /// <summary>Raw OSPF network <c>type</c> (for example <c>ptp</c>, <c>broadcast</c>); null when unset on the router.</summary>
     public string? Type { get; init; }
+    /// <summary>Raw OSPF <c>cost</c> text; null when unset (RouterOS default applies).</summary>
     public string? Cost { get; init; }
+    /// <summary>Whether the template is passive (advertises the network without forming adjacencies).</summary>
     public bool Passive { get; init; }
+    /// <summary>Whether the template is administratively disabled.</summary>
     public bool Disabled { get; init; }
+    /// <summary>Raw OSPF authentication method (<c>auth</c>); null when unset.</summary>
     public string? Auth { get; init; }
+    /// <summary>Raw authentication key id (<c>auth-id</c>); null when unset.</summary>
     public string? AuthId { get; init; }
+    /// <summary>SHA-256 fingerprint of the auth key; the plaintext key is never stored. Meaningful only when <see cref="AuthKeyPresent"/> is true.</summary>
     public string? AuthKeyFingerprint { get; init; }
+    /// <summary>True when the live template carries an authentication key.</summary>
     public bool AuthKeyPresent { get; init; }
+    /// <summary>True when <c>auth-key</c> and <c>authentication-key</c> held conflicting values, so no single fingerprint could be derived.</summary>
     public bool AuthKeyAmbiguous { get; init; }
+    /// <summary>Raw OSPF router <c>priority</c> text; null when unset.</summary>
     public string? Priority { get; init; }
     /// <summary>Raw <c>use-bfd</c> value from inventory; null means absent.</summary>
     public string? UseBfd { get; init; }
+    /// <summary>Raw <c>hello-interval</c> text (RouterOS time format); null when unset.</summary>
     public string? HelloInterval { get; init; }
+    /// <summary>Raw <c>dead-interval</c> text (RouterOS time format); null when unset.</summary>
     public string? DeadInterval { get; init; }
+    /// <summary>Raw <c>retransmit-interval</c> text (RouterOS time format); null when unset.</summary>
     public string? RetransmitInterval { get; init; }
+    /// <summary>Raw <c>transmit-delay</c> text (RouterOS time format); null when unset.</summary>
     public string? TransmitDelay { get; init; }
+    /// <summary>Raw protocol <c>instance-id</c> text; null when unset.</summary>
     public string? InstanceId { get; init; }
     /// <summary>Resolved area.instance at inventory time; required for complete provenance match when recorded.</summary>
     public string? AreaInstanceName { get; init; }
+    /// <summary>Name of the associated <c>prefix-list</c>; null when unset.</summary>
     public string? PrefixList { get; init; }
+    /// <summary>Remote router id of a virtual link (<c>vlink-neighbor-id</c>); null for non-virtual-link templates.</summary>
     public string? VlinkNeighborId { get; init; }
+    /// <summary>Transit area of a virtual link (<c>vlink-transit-area</c>); null for non-virtual-link templates.</summary>
     public string? VlinkTransitArea { get; init; }
     /// <summary>Exact comment; null means absent/empty.</summary>
     public string? Comment { get; init; }
 
+    /// <summary>
+    /// Formats a single-line diagnostic description of the row for refusal messages and logs.
+    /// </summary>
+    /// <remarks>
+    /// Secrets are never printed: the auth key is reduced to <c>&lt;set&gt;</c>, <c>&lt;absent&gt;</c> or <c>&lt;ambiguous&gt;</c>, and the comment to <c>&lt;set&gt;</c> or <c>&lt;absent&gt;</c>.
+    /// </remarks>
+    /// <returns>A comma-separated <c>name=value</c> string covering every semantic field of the row.</returns>
     public string Describe() =>
         $".id={Id ?? "<missing>"}, area={Area ?? "<none>"}, area-instance={AreaInstanceName ?? "<none>"}, "
         + $"interfaces={Interfaces ?? "<none>"}, networks={Networks ?? "<none>"}, "
@@ -60,26 +107,42 @@ internal sealed record OspfTemplateInventoryRow
         + $"comment={(Comment is null ? "<absent>" : "<set>")}";
 }
 
+/// <summary>
+/// A live template paired with its cleanup ownership classification.
+/// </summary>
 internal sealed class OspfClassifiedTemplate
 {
+    /// <summary>The live inventory row that was classified.</summary>
     public required OspfTemplateInventoryRow Row { get; init; }
+    /// <summary>Ownership class assigned to <see cref="Row"/>; drives whether cleanup may delete it.</summary>
     public required OspfTemplateClassification Classification { get; init; }
+    /// <summary>Human-readable explanation of why the row received its classification (used in refusal messages and audit output).</summary>
     public required string Reason { get; init; }
 }
 
+/// <summary>
+/// Full classification report for live templates vs the plan.
+/// </summary>
 internal sealed class OspfTemplateClassificationReport
 {
+    /// <summary>Every live template with its classification, in inventory order.</summary>
     public required IReadOnlyList<OspfClassifiedTemplate> Items { get; init; }
+    /// <summary>Subset of <see cref="Items"/> classified as protected active backhauls (one per planned backhaul).</summary>
     public required IReadOnlyList<OspfClassifiedTemplate> Backhauls { get; init; }
+    /// <summary>Subset of <see cref="Items"/> classified as protected passive loopbacks (one per planned loopback).</summary>
     public required IReadOnlyList<OspfClassifiedTemplate> Loopbacks { get; init; }
+    /// <summary>Subset of <see cref="Items"/> classified as planned consolidated site matchers (one per planned site network).</summary>
     public required IReadOnlyList<OspfClassifiedTemplate> SiteMatchers { get; init; }
 
+    /// <summary>Templates positively identified as legacy/superseded and therefore eligible for removal. Computed on each access.</summary>
     public IReadOnlyList<OspfClassifiedTemplate> KnownLegacy =>
         Items.Where(static i => i.Classification == OspfTemplateClassification.KnownLegacy).ToList();
 
+    /// <summary>Templates with no established ownership. Any entry here makes cleanup fail closed. Computed on each access.</summary>
     public IReadOnlyList<OspfClassifiedTemplate> Unknown =>
         Items.Where(static i => i.Classification == OspfTemplateClassification.Unknown).ToList();
 
+    /// <summary>Total number of live templates that must be preserved because the plan owns them (backhauls + loopbacks + site matchers).</summary>
     public int PlannedProtectedCount => Backhauls.Count + Loopbacks.Count + SiteMatchers.Count;
 }
 
@@ -90,6 +153,17 @@ internal sealed class OspfTemplateClassificationReport
 /// </summary>
 internal static class OspfTemplateCleanupClassifier
 {
+    /// <summary>
+    /// Classifies every live template against the migration plan and throws unless the result is safe to act on.
+    /// </summary>
+    /// <param name="plan">Migration plan that defines the protected backhaul, loopback and site-matcher roles.</param>
+    /// <param name="rows">Sanitised live interface-template inventory.</param>
+    /// <returns>A report in which every row is a protected planned role or known-legacy; it contains no unknown rows.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// A row has no <c>.id</c>, the plan has no active backhaul, a planned role matches zero or several live templates,
+    /// planned role counts disagree after classification, or any row is unknown. No deletion has been attempted in any of these cases.
+    /// </exception>
+    /// <exception cref="OspfBackboneMutationGuardException">A protected backhaul matches several templates or collides with another planned role.</exception>
     public static OspfTemplateClassificationReport ClassifyOrThrow(
         OspfMigrationPlan plan,
         IReadOnlyList<OspfTemplateInventoryRow> rows)
@@ -257,11 +331,13 @@ internal static class OspfTemplateCleanupClassifier
         return report;
     }
 
+    /// <summary>Returns true when the row is the live template for the planned backhaul: same area (case-insensitive), exact interface name, and same normalised network CIDR.</summary>
     public static bool MatchesBackhaul(OspfTemplateInventoryRow row, OspfPlanBackhaulTemplate bh) =>
         string.Equals(row.Area, bh.AreaName, StringComparison.OrdinalIgnoreCase)
         && string.Equals(row.Interfaces, bh.Interface, StringComparison.Ordinal)
         && string.Equals(NormalizeCidr(row.Networks), NormalizeCidr(bh.NetworkCidr), StringComparison.Ordinal);
 
+    /// <summary>Returns true when the row is an enabled, passive template for the planned loopback: same area, same normalised CIDR, and a compatible interface (either side blank, or equal).</summary>
     public static bool MatchesLoopback(OspfTemplateInventoryRow row, OspfPlanLoopbackTemplate loop) =>
         !row.Disabled
         && row.Passive
@@ -271,6 +347,7 @@ internal static class OspfTemplateCleanupClassifier
             || string.IsNullOrWhiteSpace(row.Interfaces)
             || string.Equals(row.Interfaces, loop.Interface, StringComparison.Ordinal));
 
+    /// <summary>Returns true when the row matches the planned consolidated site matcher (area, interfaces, networks, passive and enabled state) as judged by <see cref="OspfSiteMatcherConsolidation"/>.</summary>
     public static bool MatchesPlannedSite(OspfTemplateInventoryRow row, OspfPlanSiteNetworkTemplate site) =>
         OspfSiteMatcherConsolidation.MatchesPlannedSite(
             row.Area,
@@ -280,9 +357,19 @@ internal static class OspfTemplateCleanupClassifier
             row.Disabled,
             site);
 
+    /// <summary>
+    /// Computes the stable semantic fingerprint of a live row (see <see cref="OspfTemplateSemanticIdentity.Fingerprint"/>).
+    /// </summary>
+    /// <param name="row">Inventory row to fingerprint.</param>
+    /// <returns>A pipe-delimited canonical identity string; auth keys contribute only their hash.</returns>
     public static string LegacyFingerprint(OspfTemplateInventoryRow row) =>
         OspfTemplateSemanticIdentity.Fingerprint(OspfTemplateSemanticIdentity.FromInventoryRow(row));
 
+    /// <summary>
+    /// Collects the <c>.id</c> values of every row the plan owns and cleanup must never delete.
+    /// </summary>
+    /// <param name="report">Classification report to read.</param>
+    /// <returns>Ids of protected backhaul, protected loopback and planned site-matcher rows (ordinal comparison).</returns>
     public static HashSet<string> ProtectedIds(OspfTemplateClassificationReport report) =>
         report.Items
             .Where(static i =>
@@ -292,6 +379,17 @@ internal static class OspfTemplateCleanupClassifier
             .Select(static i => i.Row.Id!)
             .ToHashSet(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Decides whether a row not owned by the plan is positively identified as legacy, and explains why.
+    /// </summary>
+    /// <remarks>
+    /// Evaluation order: planned roles are never legacy; then same-area containment under a consolidated
+    /// <c>interfaces=all</c> prefix; then desired-state supersession; then recorded superseded provenance (exact semantic match).
+    /// </remarks>
+    /// <param name="row">Live row to evaluate.</param>
+    /// <param name="plan">Migration plan providing planned roles and recorded superseded identities.</param>
+    /// <param name="reason">Receives the justification when the method returns true; otherwise empty.</param>
+    /// <returns>True when one of the positive legacy rules matched.</returns>
     private static bool TryExplainKnownLegacy(
         OspfTemplateInventoryRow row,
         OspfMigrationPlan plan,
@@ -351,6 +449,7 @@ internal static class OspfTemplateCleanupClassifier
         return true;
     }
 
+    /// <summary>Verifies the live backhaul row is enabled, non-passive, point-to-point and uses the fleet backhaul cost; throws <see cref="InvalidOperationException"/> otherwise.</summary>
     private static void ValidatePlannedBackhaulProperties(
         OspfTemplateInventoryRow row,
         OspfPlanBackhaulTemplate bh)
@@ -381,6 +480,7 @@ internal static class OspfTemplateCleanupClassifier
         }
     }
 
+    /// <summary>Verifies the live loopback row is enabled, passive and not point-to-point; throws <see cref="InvalidOperationException"/> otherwise.</summary>
     private static void ValidatePlannedLoopbackProperties(
         OspfTemplateInventoryRow row,
         OspfPlanLoopbackTemplate loop)
@@ -400,6 +500,7 @@ internal static class OspfTemplateCleanupClassifier
         }
     }
 
+    /// <summary>Verifies the live site-matcher row is enabled and passive and that its interfaces and networks equal the planned values; throws <see cref="InvalidOperationException"/> otherwise.</summary>
     private static void ValidatePlannedSiteProperties(
         OspfTemplateInventoryRow row,
         OspfPlanSiteNetworkTemplate site)
@@ -423,6 +524,7 @@ internal static class OspfTemplateCleanupClassifier
         }
     }
 
+    /// <summary>Normalises a CIDR string to canonical form; unparseable input is returned trimmed (or empty when null) so callers still get a comparable value.</summary>
     private static string NormalizeCidr(string? value) =>
         OspfIpPrefix.TryParse(value, out OspfIpPrefix prefix) ? prefix.ToCidrString() : value?.Trim() ?? string.Empty;
 }

@@ -1,3 +1,11 @@
+// -----------------------------------------------------------------------------
+// File: OspfMigrationPlanStoreTests.cs
+//
+// Description:
+// Unit tests for OSPF migration plan persistence, load, and delete behaviour.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -8,8 +16,18 @@ using MikrotikWorker.Scheduling;
 using MikrotikWorker.Upgrade.Ospf;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
+
+/// <summary>
+/// Unit tests for OSPF migration plan persistence: save/load round-trips, fail-closed loads,
+/// and startup orphan cleanup without auto-resume.
+/// </summary>
 public sealed class OspfMigrationPlanStoreTests
 {
+    /// <summary>
+    /// Scenario: a hashed plan is saved, loaded back with the matching correlation id, then the job's plan is deleted.
+    /// Expected: the loaded plan has the same <c>ContentHash</c>, <c>ContentHashMatches</c> is true, and a load after <c>Delete</c> returns null.
+    /// Invariant: an untouched plan survives persistence with its integrity hash intact.
+    /// </summary>
     [Fact]
     public async Task ValidPlan_RoundTrip_RecomputesMatchingHash()
     {
@@ -27,6 +45,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.Null(await store.TryLoadAsync(job, "AP01", CancellationToken.None));
     }
 
+    /// <summary>
+    /// Scenario: after saving, the persisted JSON has the plan's router-id replaced with 9.9.9.9 while the stored hash is left unchanged.
+    /// Expected: <c>TryLoadAsync</c> returns null.
+    /// Invariant: tampered plan content fails hash verification and is never returned for execution.
+    /// </summary>
     [Fact]
     public async Task ModifiedPlanContent_IsRejected()
     {
@@ -47,6 +70,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.Null(await store.TryLoadAsync(job, "AP01", CancellationToken.None));
     }
 
+    /// <summary>
+    /// Scenario: after saving, the stored content hash in the persisted JSON is replaced with "DEADBEEF".
+    /// Expected: <c>TryLoadAsync</c> returns null.
+    /// Invariant: a stored hash that does not match the recomputed hash invalidates the plan.
+    /// </summary>
     [Fact]
     public async Task ModifiedHash_IsRejected()
     {
@@ -67,6 +95,12 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.Null(await store.TryLoadAsync(job, "AP01", CancellationToken.None));
     }
 
+    /// <summary>
+    /// Scenario: The plan file at the expected OspfPlans path for the job contains truncated JSON (an unterminated
+    /// object that begins with the routerId property).
+    /// Expected: TryLoadAsync returns null.
+    /// Invariant: A corrupt plan file is rejected and never loaded as a valid migration plan.
+    /// </summary>
     [Fact]
     public async Task TruncatedJson_IsRejected()
     {
@@ -83,6 +117,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.Null(await store.TryLoadAsync(job, "AP01", CancellationToken.None));
     }
 
+    /// <summary>
+    /// Scenario: a plan saved for correlation id "AP01" is loaded with the id "OTHER".
+    /// Expected: <c>TryLoadAsync</c> returns null.
+    /// Invariant: a plan can only be loaded by the correlation it was created for.
+    /// </summary>
     [Fact]
     public async Task IncorrectCorrelation_IsRejected()
     {
@@ -93,6 +132,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.Null(await store.TryLoadAsync(job, "OTHER", CancellationToken.None));
     }
 
+    /// <summary>
+    /// Scenario: a plan file is written directly to disk with a blank (whitespace) <c>ContentHash</c>.
+    /// Expected: <c>TryLoadAsync</c> returns null.
+    /// Invariant: a plan without a usable hash is untrusted and not loaded.
+    /// </summary>
     [Fact]
     public async Task MissingOrMalformedHash_IsRejected()
     {
@@ -113,6 +157,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.Null(await store.TryLoadAsync(job, "AP01", CancellationToken.None));
     }
 
+    /// <summary>
+    /// Scenario: a directory occupies the <c>.tmp</c> path the store wants to write, so the save fails.
+    /// Expected: <c>SaveAsync</c> throws, and no final plan file is published.
+    /// Invariant: a failed save never leaves a partially written plan at the final path.
+    /// </summary>
     [Fact]
     public async Task FailedSave_CleansTemporaryFile()
     {
@@ -136,6 +185,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.False(File.Exists(finalPath));
     }
 
+    /// <summary>
+    /// Scenario: <c>SaveAsync</c> is called with an already-cancelled token.
+    /// Expected: it throws <c>OperationCanceledException</c>, and neither the final plan file nor its <c>.tmp</c> file exists.
+    /// Invariant: cancelling persistence leaves no published or temporary plan files behind.
+    /// </summary>
     [Fact]
     public async Task CancellationDuringPersistence_DoesNotLeavePublishedPlan()
     {
@@ -156,6 +210,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.False(File.Exists(finalPath + ".tmp"));
     }
 
+    /// <summary>
+    /// Scenario: new store instance (empty active set) with inactive owned JSON and an orphan temp.
+    /// Expected: inactive JSON retained, orphan temp removed, no plan resumed into memory.
+    /// Invariant: startup cleanup must not auto-resume persisted plans after restart.
+    /// </summary>
     [Fact]
     public async Task StartupCleanup_RetainsInactiveJson_RemovesOrphanTemp_DoesNotResume()
     {
@@ -187,6 +246,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.NotNull(loaded);
     }
 
+    /// <summary>
+    /// Scenario: two plans for different jobs are saved and the store is recreated as after a restart, then startup cleanup runs.
+    /// Expected: both plan files still exist.
+    /// Invariant: startup cleanup removes only orphaned temp files, not valid plans of inactive jobs.
+    /// </summary>
     [Fact]
     public async Task StartupCleanup_RetainsMultipleInactivePlans()
     {
@@ -204,6 +268,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.True(File.Exists(PlanPath(root.Path, jobB)));
     }
 
+    /// <summary>
+    /// Scenario: same-process store with an active plan registered after SaveAsync.
+    /// Expected: startup cleanup leaves the active plan JSON and its temp file untouched.
+    /// Invariant: cleanup must not delete artefacts of an in-memory-active plan.
+    /// </summary>
     [Fact]
     public async Task StartupCleanup_DoesNotDeleteActivePlanOrTemp()
     {
@@ -223,6 +292,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.True(File.Exists(tempPath));
     }
 
+    /// <summary>
+    /// Scenario: truncated/malformed owned plan JSON on disk, then cleanup and TryLoadAsync.
+    /// Expected: malformed file retained; load returns null.
+    /// Invariant: malformed owned plans are not deleted and are not treated as loadable state.
+    /// </summary>
     [Fact]
     public async Task StartupCleanup_RetainsMalformedOwnedJson()
     {
@@ -240,6 +314,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.Null(await store.TryLoadAsync(job, "AP01", CancellationToken.None));
     }
 
+    /// <summary>
+    /// Scenario: the <c>OspfPlans</c> folder holds a README.txt, an <c>other.tmp</c> and an <c>orphan.json</c> that the store did not create.
+    /// Expected: after startup cleanup all three files still exist.
+    /// Invariant: cleanup only deletes files matching the store's own naming scheme.
+    /// </summary>
     [Fact]
     public void StartupCleanup_LeavesUnrelatedFilesUntouched()
     {
@@ -269,6 +348,11 @@ public sealed class OspfMigrationPlanStoreTests
         }
     }
 
+    /// <summary>
+    /// Scenario: the store's <c>.tmp</c> file is held open with an exclusive lock while startup cleanup runs.
+    /// Expected: cleanup does not throw and the locked file still exists.
+    /// Invariant: an undeletable orphan must not crash application startup.
+    /// </summary>
     [Fact]
     public async Task StartupCleanup_InaccessibleTemp_DoesNotCrash()
     {
@@ -288,6 +372,11 @@ public sealed class OspfMigrationPlanStoreTests
         }
     }
 
+    /// <summary>
+    /// Scenario: a saved plan has an orphaned <c>.tmp</c> file beside it, and startup cleanup runs twice on a restarted store.
+    /// Expected: the plan file remains and the temp file is gone.
+    /// Invariant: repeated cleanup is safe and converges on the same state.
+    /// </summary>
     [Fact]
     public async Task StartupCleanup_IsIdempotent()
     {
@@ -307,6 +396,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.False(File.Exists(tempPath));
     }
 
+    /// <summary>
+    /// Scenario: a plan is retained across a restart, then a new job with a different import id and job id is created for the same router and correlation.
+    /// Expected: loading for the new job returns null, while the original plan file still exists on disk.
+    /// Invariant: a retained plan is never reused by a later CSV import.
+    /// </summary>
     [Fact]
     public async Task RetainedPlan_IsNotAssociatedWithNewCsvImport()
     {
@@ -325,6 +419,11 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.True(File.Exists(PlanPath(root.Path, original)));
     }
 
+    /// <summary>
+    /// Scenario: ownership checks are run against a name produced by <c>BuildFileName</c> and against "orphan.json" files.
+    /// Expected: the built name is recognised as an owned plan JSON, its <c>.tmp</c> variant as an owned temp file, and "orphan.json" and "orphan.json.tmp" are not.
+    /// Invariant: the cleanup ownership test agrees with the file naming scheme.
+    /// </summary>
     [Fact]
     public void OwnedPlanFileName_MatchesBuildFileName()
     {
@@ -336,12 +435,18 @@ public sealed class OspfMigrationPlanStoreTests
         Assert.False(OspfMigrationPlanStore.IsOwnedPlanTempFileName("orphan.json.tmp"));
     }
 
+    /// <summary>
+    /// Returns the expected plan file path under the backup root's <c>OspfPlans</c> folder for the job.
+    /// </summary>
     private static string PlanPath(string backupRoot, MikrotikScheduledJob job) =>
         Path.Combine(
             backupRoot,
             "OspfPlans",
             OspfMigrationPlanStore.BuildFileName(job.JobId, job.ImportId, job.RouterIp.ToString()));
 
+    /// <summary>
+    /// Builds a minimal valid plan for the job and identity and stamps it with its computed content hash.
+    /// </summary>
     private static OspfMigrationPlan CreateHashedPlan(MikrotikScheduledJob job, string identity)
     {
         OspfMigrationPlan plan = PassingOspfMigrationService.CreateMinimalValidPlan(
@@ -353,6 +458,8 @@ public sealed class OspfMigrationPlanStoreTests
         return plan;
     }
 
+    /// <summary>Creates a plan store whose backups live under <paramref name="backupRoot"/> (firmware upgrade disabled).</summary>
+    /// <param name="backupRoot">Backup directory used by the store.</param>
     private static OspfMigrationPlanStore CreateStore(string backupRoot) =>
         new(
             Options.Create(new FirmwareUpgradeOptions
@@ -368,6 +475,9 @@ public sealed class OspfMigrationPlanStoreTests
             }),
             NullLogger<OspfMigrationPlanStore>.Instance);
 
+    /// <summary>
+    /// Creates a scheduled job for a fixed router with a window around the current time.
+    /// </summary>
     private static MikrotikScheduledJob CreateJob() => new()
     {
         ImportId = Guid.NewGuid(),
@@ -379,14 +489,21 @@ public sealed class OspfMigrationPlanStoreTests
         DateStopUtc = DateTime.UtcNow.AddHours(1),
     };
 
+    /// <summary>
+    /// Temp directory fixture that creates a unique backup root and deletes it on async dispose.
+    /// </summary>
     private sealed class TempBackupRoot : IAsyncDisposable
     {
+        /// <summary>Full path of the temp backup directory.</summary>
         public string Path { get; } = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(),
             "ospf-plans-" + Guid.NewGuid().ToString("N"));
 
+        /// <summary>Creates the temp backup directory.</summary>
         public TempBackupRoot() => Directory.CreateDirectory(Path);
 
+        /// <summary>Deletes the temp backup directory and its contents.</summary>
+        /// <returns>A completed task.</returns>
         public ValueTask DisposeAsync()
         {
             if (Directory.Exists(Path))

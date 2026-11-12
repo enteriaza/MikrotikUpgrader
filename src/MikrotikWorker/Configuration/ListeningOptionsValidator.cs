@@ -1,10 +1,23 @@
+// -----------------------------------------------------------------------------
+// File: ListeningOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for ListeningOptions: parseable IP address and TCP port in
+// the range 1–65535.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="ListeningOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class ListeningOptionsValidator : IValidateOptions<ListeningOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, ListeningOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

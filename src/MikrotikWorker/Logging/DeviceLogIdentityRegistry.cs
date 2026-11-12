@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: DeviceLogIdentityRegistry.cs
+//
+// Description:
+// Process-wide map from sanitised RouterOS identity to the first router IP that
+// claimed it, so two physical routers sharing an identity string do not mix
+// device log files.
+//
+// -----------------------------------------------------------------------------
+
 using System.Collections.Concurrent;
 
 namespace MikrotikWorker.Logging;
@@ -8,6 +18,9 @@ namespace MikrotikWorker.Logging;
 /// </summary>
 internal sealed class DeviceLogIdentityRegistry
 {
+    /// <summary>
+    /// Router IP bound to each sanitised identity, used to detect two routers sharing one identity.
+    /// </summary>
     private readonly ConcurrentDictionary<string, string> _identityToIp =
         new(StringComparer.OrdinalIgnoreCase);
 

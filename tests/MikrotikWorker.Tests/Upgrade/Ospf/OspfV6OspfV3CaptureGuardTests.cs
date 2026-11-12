@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfV6OspfV3CaptureGuardTests.cs
+//
+// Description:
+// Guardrail: only positively identified absent/unsupported OSPFv3 menus are
+// empty; permission, timeout, and generic API failures must fail closed.
+//
+// -----------------------------------------------------------------------------
+
 using System.Reflection;
 using MikrotikWorker.Upgrade.Ospf;
 
@@ -8,6 +17,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfV6OspfV3CaptureGuardTests
 {
+    /// <summary>
+    /// Scenario: router error messages that mean the ospf-v3 menu does not exist (no such command prefix, unknown command, bad command name, failure: no such command).
+    /// Expected: IsAbsentMenuException returns true for each.
+    /// Invariant: RouterOS 6 devices without the v3 menu are treated as having nothing to capture.
+    /// </summary>
     [Theory]
     [InlineData("no such command prefix")]
     [InlineData("unknown command")]
@@ -18,6 +32,11 @@ public sealed class OspfV6OspfV3CaptureGuardTests
         Assert.True(InvokeIsAbsent(new InvalidOperationException(message)));
     }
 
+    /// <summary>
+    /// Scenario: genuine capture failures such as permission errors, timeouts, connection resets, 'no such item' and interrupted commands.
+    /// Expected: IsAbsentMenuException returns false for each.
+    /// Invariant: a real capture failure must surface and never be mistaken for an absent OSPFv3 menu.
+    /// </summary>
     [Theory]
     [InlineData("not enough permissions (9)")]
     [InlineData("cannot open file")]
@@ -30,6 +49,10 @@ public sealed class OspfV6OspfV3CaptureGuardTests
         Assert.False(InvokeIsAbsent(new InvalidOperationException(message)));
     }
 
+    /// <summary>
+    /// Uses reflection to call the private static <c>IsAbsentMenuException</c> on <c>OspfMikrotikOperations</c> and
+    /// returns its result.
+    /// </summary>
     private static bool InvokeIsAbsent(Exception ex)
     {
         MethodInfo method = typeof(OspfMikrotikOperations).GetMethod(

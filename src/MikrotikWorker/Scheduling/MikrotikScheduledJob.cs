@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikScheduledJob.cs
+//
+// Description:
+// Core in-memory model for one CSV-derived router job, its terminal lifecycle
+// enum, and the work-item DTO handed to the execution pool. Also carries
+// per-job transient retry counters and effective eligibility time for the
+// priority queue.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using MikrotikWorker.Upgrade;
 
@@ -8,18 +19,25 @@ namespace MikrotikWorker.Scheduling;
 /// </summary>
 public sealed class MikrotikScheduledJob
 {
+    /// <summary>Import batch identifier shared by all rows from the same Accepted CSV.</summary>
     public required Guid ImportId { get; init; }
 
+    /// <summary>Original CSV file name at import time.</summary>
     public required string SourceFileName { get; init; }
 
+    /// <summary>1-based CSV parser row number used for identity and result writes.</summary>
     public required int RowNumber { get; init; }
 
+    /// <summary>Operator-facing router name from the CSV.</summary>
     public required string RouterName { get; init; }
 
+    /// <summary>Target device address (IPv4 or IPv6 literal from the CSV).</summary>
     public required IPAddress RouterIp { get; init; }
 
+    /// <summary>Inclusive UTC start of the maintenance window.</summary>
     public required DateTime DateStartUtc { get; init; }
 
+    /// <summary>Exclusive UTC end of the maintenance window.</summary>
     public required DateTime DateStopUtc { get; init; }
 
     /// <summary>
@@ -120,8 +138,11 @@ public enum ScheduledJobTerminalState
 /// <summary>
 /// Work item handed from the scheduler to the router execution pool.
 /// </summary>
+/// <param name="job">Scheduled job payload.</param>
+/// <param name="entryToken">Opaque scheduler <c>JobEntry</c> used for completion/requeue callbacks.</param>
 internal sealed class RouterJobWorkItem(MikrotikScheduledJob job, object entryToken)
 {
+    /// <summary>Job to execute against the router.</summary>
     public MikrotikScheduledJob Job { get; } = job;
 
     /// <summary>

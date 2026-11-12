@@ -1,19 +1,20 @@
 # MikrotikUpgrader
 
-.NET 10 Worker Service that hosts:
+.NET 10 worker that upgrades MikroTik RouterOS devices from CSV-driven schedules. It combines:
 
-- a background worker for future MikroTik fleet upgrade jobs
-- a Kestrel HTTP server that streams RouterOS firmware packages from disk
-- a tik4net-based native RouterOS API communication foundation
-- CSV-based scheduled job ingestion with a bounded, time-aware in-memory scheduler
-
-CSV ingestion, in-memory scheduling, RouterOS assessment, **mandatory pre-upgrade backup**, package fetch/install via reboot, and post-upgrade verification are implemented for a **two-stage** path: fixed **RouterOS 6.49.23** stepping (when required), then a dynamic **RouterOS 7** target from `FirmwareFiles/mikrotik/version`.
+- CSV ingestion with validation, Accepted-path registration, and in-memory scheduling
+- Bounded concurrent RouterOS API workers (tik4net) with connection/authentication retries
+- A two-stage upgrade path: fixed **RouterOS 6.49.23** stepping when required, then a dynamic **RouterOS 7** target from `FirmwareFiles/mikrotik/version`
+- Mandatory pre-upgrade backup, package fetch via Kestrel-served firmware, reboot/verify, OSPF handling, and in-place CSV result columns
+- Windows and Linux **Native AOT** publishing via `tools/Publish-Release.ps1`
 
 **Hardware verification status:** one controlled live upgrade of test router `198.18.0.83` (`mipsbe` / hEX PoE / `960PGS`) from **6.49.19 → 6.49.23** completed successfully on an earlier v6 milestone (historical lab evidence; stepping target is now also 6.49.23). That proves the v6 fetch/reboot path on that architecture; it does **not** prove fleet-wide production readiness for every board, architecture, optional-package combination, or RouterOS 7 transition.
 
-**Out of scope for this milestone:** `/system/routerboard/upgrade`, multi-router fleet orchestration, and durable job persistence.
+**Out of scope:** multi-instance orchestration, and durable job persistence / automatic crash recovery. RouterBOARD (RouterBOOT) upgrade via `/system/routerboard/upgrade` **is** in scope when post–RouterOS-7 assessment requires it (see upgrade lifecycle below).
 
-**Deployment model:** a single application instance. All job and scheduling state is in memory only. There is no durable job store. A restart discards in-memory state; retained CSV files are the operator-controlled source for re-import (which may repeat work).
+**Deployment model:** a single application instance. All job and scheduling state is in memory only. A restart discards in-memory state; retained CSV files under `Accepted/` / `Completed/` are the operator-controlled source for manual re-import (which may repeat work).
+
+Detailed topics live under [`docs/`](docs/). Start with [architecture](docs/architecture.md), [CSV import](docs/csv-import.md), and [build and release](docs/build-and-release.md).
 
 ## Repository layout
 
@@ -23,8 +24,10 @@ MikrotikUpgrader/
 │   └── mikrotik/
 │       ├── version                  # Plain-text RouterOS 7 target (e.g. 7.23.8)
 │       └── *.npk
-├── src/MikrotikWorker/
-└── tests/MikrotikWorker.Tests/
+├── docs/                            # Detailed operational and design documentation
+├── tools/Publish-Release.ps1        # Native AOT win-x64 / linux-x64 release script
+├── src/MikrotikWorker/              # Production worker (Web SDK host + AOT RIDs)
+└── tests/MikrotikWorker.Tests/      # Non-live unit/integration tests (live categories filtered by default)
 ```
 
 ## Runtime layout (beside binaries)
@@ -64,15 +67,27 @@ Required columns (case-insensitive, any order):
 | `routername` | Router identity/name |
 | `routerip` | IPv4 or IPv6 address (not a hostname) |
 
-These four columns are the **only** supported columns. Every eligible device is upgraded automatically — there is no per-job mode or stage cap. A CSV that still contains the removed `executionmode` column (any letter case) is **rejected** with a validation error; delete the column and re-submit.
+These four columns are the **only** supported **input** columns. Every eligible device is upgraded automatically — there is no per-job mode or stage cap. A CSV that still contains the removed `executionmode` column (any letter case) is **rejected** with a validation error; delete the column and re-submit.
 
-Example (also available as [`samples/scheduled-jobs-sample.csv`](samples/scheduled-jobs-sample.csv)):
+After acceptance the worker may append application-owned **result** columns on the same Accepted file (ignored on re-import):
+
+| Column | Written when |
+|---|---|
+| `UpgradeStarted` | Connect/preflight/policy gates passed; immediately before mutation work |
+| `UpgradeCompleted` | Job reaches a terminal scheduler outcome |
+| `Result` | Same terminal write (`Success`, `Failed - Connection`, `Cancelled`, …) |
+
+Rows that were **never scheduled** (incomplete activation after cancel) keep blank result fields — no fabricated execution result.
+
+Example input (also available as [`samples/scheduled-jobs-sample.csv`](samples/scheduled-jobs-sample.csv)):
 
 ```csv
 datestart,datestop,routername,routerip
 01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-01,192.168.1.1
 01/12/2026 08:00:00,02/12/2026 18:00:00,CORE-02,192.168.1.2
 ```
+
+See [docs/csv-import.md](docs/csv-import.md) for activation finalization, path registration, and cancel semantics.
 
 #### Automatic upgrade path
 
@@ -138,10 +153,15 @@ Incoming CSV
   → Processing/
   → validate entire file
       → Rejected/ (+ error report)
-      → schedule all jobs into the in-memory scheduler (with backpressure)
-      → Accepted/
-          → when every job for that import reaches a terminal state → Completed/
+      → RegisterImport → move to Accepted → register actual Accepted path
+      → ScheduleAsync each row (path must already be registered)
+      → FinalizeImportActivation
+          → when every *scheduled* job is terminal:
+                full activation → Completed/
+                incomplete activation (cancel mid-schedule) → leave Accepted/ for manual re-import
 ```
+
+Jobs cannot dispatch until the Accepted CSV path is registered for that `ImportId`. Cancellation after Accepted but before all rows are scheduled reconciles outstanding work so imports are not tracked forever; see [docs/csv-import.md](docs/csv-import.md) and [docs/scheduler.md](docs/scheduler.md).
 
 Terminal outcomes:
 
@@ -206,7 +226,7 @@ Root setting (independent of `FirmwareUpgrade:Enabled` / `MikroTik:Enabled`):
 
 | Setting | Default | Role |
 |---|---|---|
-| `RedistributeSummaryviaStatics` | `false` | When `true`, after successful OSPF migration verification and **before** RouterBOARD firmware upgrade, install distance-250 blackhole statics for each plan area-range prefix, reconcile filter chain `ospf-v2-out`, then enable `redistribute=static` on the live OSPFv2 instance with that outbound chain. When `false`, the stage is skipped and performs no route/filter/redistribute mutations. |
+| `RedistributeSummaryviaStatics` | shipped `appsettings.json`: **`true`**; options property default if the key is omitted: **`false`** | When `true`, after successful OSPF migration verification and **before** RouterBOARD firmware upgrade, install distance-250 blackhole statics for each plan area-range prefix, reconcile filter chain `ospf-v2-out`, then enable `redistribute=static` on the live OSPFv2 instance with that outbound chain. When `false`, the stage is skipped and performs no route/filter/redistribute mutations. |
 
 This stage does **not** change the earlier OSPF migration’s deliberate routing-filter removal. Filters for this workaround are created only in this optional stage. Configuration verification is performed; Type-5 external LSA content is not independently inspected, and the workaround must not be described as producing Type-3 area-range summaries.
 
@@ -254,7 +274,7 @@ Standard identity: `[ACE|AP|BR|DCL]dd.POPddd.ddd.sss`. Classification is logged 
 - Exact package identity + architecture + version required; ambiguous duplicates fail safe
 - A stage never mixes RouterOS 6 and RouterOS 7 packages
 
-RouterBOARD current vs upgrade firmware is collected and logged before and after RouterOS upgrade. This application never runs `/system/routerboard/upgrade`.
+RouterBOARD (RouterBOOT) current vs upgrade firmware is collected and logged around the upgrade path. After RouterOS 7 package verification (and optional static redistribution), `RouterboardFirmwareUpgradeService` assesses whether RouterBOOT must advance. When assessment returns **UpgradeRequired**, `MikrotikApiClient.UpgradeRouterboardAsync` issues exactly one `/system/routerboard/upgrade`, then reboots and reconnects (using `FirmwareUpgrade:ReconnectInterval` / `RebootTimeout`) until `current-firmware` matches the expected upgrade-firmware value (or the stage fails). Compatibility **assessment** alone does not issue that command; only the dedicated RouterBOARD stage does.
 
 #### Installed-package catalogue compatibility audit (non-live)
 
@@ -339,25 +359,31 @@ Production device logs are expected to cover job start, connection, inventory/re
 
 ### In-memory scheduler
 
-- Priority queue ordered by `DateStartUtc` with a single `TimeProvider`-based wake
+- Priority queue ordered by eligibility UTC with a single `TimeProvider`-based wake
 - Future jobs never block immediately eligible jobs
 - Inclusive start (`>= DateStartUtc`), exclusive stop (`>= DateStopUtc` ⇒ expired)
 - Bounded by `MaximumPendingJobs`; ingestion waits for capacity and never silently drops rows
 - Execution concurrency is separate (`MaxConcurrentRouterJobs`)
+- `HeldForDispatch` until Accepted path registration; import closure via `FinalizeImportActivation`
+
+### Connection / authentication retries
+
+Section `JobRetry` (defaults: 10 minute delays, 10 attempts per category). Applies only to **initial connect/login** failures before upgrade mutation. Connection and authentication counters are independent. Retries requeue the **same** job; they do not decrement import `Remaining` or write terminal CSV columns. Upgrade-stage failures are not retried by this policy. Delayed retries are in-memory only — **no automatic resume after process restart**. Details: [docs/retries.md](docs/retries.md).
 
 ### Restart and re-import
 
-- Restart discards all in-memory jobs and import tracking.
+- Restart discards all in-memory jobs, delayed retries, import tracking, and path registrations.
 - `Accepted/` and `Completed/` CSVs are **not** auto-imported at startup.
 - Leftover `Processing/*.csv` files are logged as warnings and left in place (not auto-imported).
+- Incomplete activation may leave a CSV in `Accepted/` with partial results; that is intentional (not Completed).
 
-**Manual re-import:** copy or move a CSV from `Accepted/` or `Completed/` (or a verified `Processing/` file) into the Incoming `ScheduledJobs` folder. A new `ImportId` and new jobs are created. Work already performed before a crash may run again.
+**Manual re-import:** copy or move a CSV from `Accepted/` or `Completed/` (or a verified `Processing/` file) into the Incoming `ScheduledJobs` folder. A new `ImportId` and new jobs are created. Work already performed before a crash or incomplete run may run again.
 
 **Interrupted Processing recovery:** inspect the leftover file, verify it is complete, then move it to Incoming. Do not expect the application to reconstruct partial job state.
 
 ## Firmware HTTP server
 
-URL prefix remains `/firmware_files` and maps to the deployed `FirmwareFiles` directory.
+URL prefix remains `/firmware_files` and maps to the deployed `FirmwareFiles` directory, but the static-file middleware serves **`.npk` files only** (other artefacts under that root, including `mikrotik/version`, are not HTTP-exposed).
 
 ```powershell
 curl -O http://127.0.0.1:8080/firmware_files/mikrotik/routeros-tile-6.49.23.npk
@@ -486,14 +512,42 @@ winget install --id Microsoft.DotNet.SDK.10 --exact
 dotnet --list-sdks
 dotnet restore
 dotnet clean
-dotnet build --no-restore
-dotnet test --no-build
+dotnet build MikrotikUpgrader.sln -c Release
+dotnet test tests/MikrotikWorker.Tests/MikrotikWorker.Tests.csproj -c Release
 dotnet publish src/MikrotikWorker/MikrotikWorker.csproj -c Release
 ```
 
+### Native AOT release (Windows + Linux)
+
+```powershell
+pwsh -NoProfile -File tools/Publish-Release.ps1                 # win-x64 + linux-x64
+pwsh -NoProfile -File tools/Publish-Release.ps1 -Platform win-x64
+pwsh -NoProfile -File tools/Publish-Release.ps1 -Platform linux-x64
+```
+
+Outputs under gitignored `release/{win-x64,linux-x64}/` (executable, `appsettings.json`, full `FirmwareFiles/`). Linux publish from Windows prefers WSL+clang; otherwise falls back to Zig via `StuDev.AotAnywhere`. CsvHelper/Serilog may emit IL2104 trim warnings (non-fatal under AOT). See [docs/build-and-release.md](docs/build-and-release.md).
+
+## Documentation index
+
+| Document | Contents |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Host composition, components, concurrency |
+| [docs/configuration.md](docs/configuration.md) | Configuration keys and defaults |
+| [docs/csv-import.md](docs/csv-import.md) | CSV format, results, activation/cancel |
+| [docs/scheduler.md](docs/scheduler.md) | Scheduler queues, accounting, closure |
+| [docs/retries.md](docs/retries.md) | Connection/auth retry policy |
+| [docs/routeros-upgrade.md](docs/routeros-upgrade.md) | Upgrade lifecycle and gates |
+| [docs/firmware.md](docs/firmware.md) | Packages and HTTP distribution |
+| [docs/backup-and-ospf.md](docs/backup-and-ospf.md) | Backup and OSPF stages |
+| [docs/build-and-release.md](docs/build-and-release.md) | Build, test, Native AOT |
+| [docs/deployment.md](docs/deployment.md) | Windows/Linux deployment |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Failure diagnosis |
+
 ## Dependencies
 
-- **tik4net** 4.0.4 — native RouterOS API
-- **CsvHelper** 33.1.0 — CSV parsing
-- **Serilog.AspNetCore** 10.0.0 — host/ASP.NET Core logging integration (console + file sinks)
-- **Serilog.Sinks.Async** 2.1.0 — bounded asynchronous file writes
+- **tik4net** — native RouterOS API
+- **CsvHelper** — CSV parsing / in-place result updates
+- **SSH.NET** — SFTP (`SftpClient`) for backup file download (config keys remain `ScpPort` / `ScpTimeout` for historical naming)
+- **Serilog.AspNetCore** — host/ASP.NET Core logging integration (console + file sinks)
+- **Serilog.Sinks.Async** — bounded asynchronous file writes
+- **StuDev.AotAnywhere** (SDK) — optional Zig-assisted linux-x64 AOT from Windows

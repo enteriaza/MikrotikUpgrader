@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: ScheduledJobCsvParserTests.cs
+//
+// Description:
+// CSV parser validation and enumeration: headers, quoting, IP/date rules,
+// shared windows, size/record limits, obsolete executionmode rejection, and
+// result-column ignore behaviour.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Net;
 using Microsoft.Extensions.Options;
@@ -6,10 +16,19 @@ using MikrotikWorker.Scheduling;
 
 namespace MikrotikWorker.Tests.Scheduling;
 
+/// <summary>
+/// Unit tests for ScheduledJobCsvParser validation and job enumeration rules.
+/// </summary>
 public sealed class ScheduledJobCsvParserTests
 {
+    /// <summary>Fixed UTC reference time passed to the parser so results are deterministic.</summary>
     private static readonly DateTime UtcNow = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>
+    /// CSV with UPPERCASE headers in non-canonical order and two valid rows.
+    /// Expects acceptance, record count 2, and datestart/datestop converted from
+    /// Africa/Johannesburg local times to the expected UTC instants.
+    /// </summary>
     [Fact]
     public async Task ValidCsv_IsAccepted_WithDifferentColumnOrderAndCase()
     {
@@ -34,6 +53,11 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Quoted router name containing a comma.
+    /// Expects validation success and enumeration yields the comma-bearing name
+    /// with the supplied import id attached.
+    /// </summary>
     [Fact]
     public async Task QuotedFields_AreParsed()
     {
@@ -65,6 +89,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// CSV missing routerip header.
+    /// Expects rejection with an error targeting the routerip column.
+    /// </summary>
     [Fact]
     public async Task MissingRequiredHeader_IsRejected()
     {
@@ -86,6 +114,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Row with empty routername.
+    /// Expects rejection attributing the empty required value to routername.
+    /// </summary>
     [Fact]
     public async Task EmptyRequiredValue_IsRejected()
     {
@@ -107,6 +139,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Extra notes/owner columns beyond the required set.
+    /// Expects acceptance — unknown columns must not fail import.
+    /// </summary>
     [Fact]
     public async Task AdditionalColumns_AreIgnored()
     {
@@ -127,6 +163,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Minimal four-column CSV without executionmode.
+    /// Expects acceptance and enumeration of IP/name; execution mode is no longer a CSV concern.
+    /// </summary>
     [Fact]
     public async Task CsvWithoutExecutionMode_IsAccepted()
     {
@@ -157,6 +197,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// CSV that still carries an executionmode column (any casing).
+    /// Expects rejection explaining that executionmode is no longer supported.
+    /// </summary>
     [Theory]
     [InlineData("executionmode")]
     [InlineData("EXECUTIONMODE")]
@@ -184,6 +228,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// IPv4 and IPv6 literals in routerip.
+    /// Expects acceptance for both address families.
+    /// </summary>
     [Theory]
     [InlineData("192.168.1.1")]
     [InlineData("2001:db8::1")]
@@ -206,6 +254,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Hostnames and non-IP tokens in routerip.
+    /// Expects rejection on routerip — DNS names are not allowed.
+    /// </summary>
     [Theory]
     [InlineData("not-an-ip")]
     [InlineData("router.example.com")]
@@ -230,6 +282,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// 01/12/2026 under en-ZA formats.
+    /// Expects December 1 (day-month), not January 12 — protects DMY culture parsing.
+    /// </summary>
     [Fact]
     public async Task EnZaCulture_ParsesDayMonthYear()
     {
@@ -253,6 +309,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Impossible calendar date 31/02/2026.
+    /// Expects rejection on datestart.
+    /// </summary>
     [Fact]
     public async Task InvalidDate_IsRejected()
     {
@@ -274,6 +334,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Both bounds after fixed UtcNow.
+    /// Expects acceptance with correct UTC window endpoints.
+    /// </summary>
     [Fact]
     public async Task FutureStart_FutureStop_IsAccepted()
     {
@@ -297,6 +361,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Start already past, stop still future relative to UtcNow.
+    /// Expects acceptance as an already-active maintenance window.
+    /// </summary>
     [Fact]
     public async Task PastStart_FutureStop_IsAccepted_AsActiveWindow()
     {
@@ -320,6 +388,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Local start that converts exactly to UtcNow with future stop.
+    /// Expects acceptance with DateStartUtc equal to UtcNow (inclusive start).
+    /// </summary>
     [Fact]
     public async Task StartEqualToNow_FutureStop_IsAccepted()
     {
@@ -343,6 +415,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Stop equals UtcNow (exclusive end).
+    /// Expects rejection as expired on datestop.
+    /// </summary>
     [Fact]
     public async Task PastStart_StopEqualToNow_IsRejectedAsExpired()
     {
@@ -368,6 +444,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Entire window in the past.
+    /// Expects rejection as expired on datestop.
+    /// </summary>
     [Fact]
     public async Task PastStart_PastStop_IsRejectedAsExpired()
     {
@@ -392,6 +472,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Stop before start.
+    /// Expects rejection that stop must be later than start.
+    /// </summary>
     [Fact]
     public async Task DateStopEarlierThanDateStart_IsRejected()
     {
@@ -412,6 +496,10 @@ public sealed class ScheduledJobCsvParserTests
             File.Delete(path);
         }
     }
+    /// <summary>
+    /// Two rows with differing datestart values.
+    /// Expects rejection requiring a single shared window across the file.
+    /// </summary>
     [Fact]
     public async Task InconsistentWindowsAcrossRows_AreRejected()
     {
@@ -434,6 +522,10 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// CsvDateTimeParser with Africa/Johannesburg.
+    /// Expects UTC kind and 06:00Z for 08:00 local — not server-local TZ.
+    /// </summary>
     [Fact]
     public void TimeZoneConversion_UsesConfiguredZoneNotServerLocal()
     {
@@ -444,6 +536,10 @@ public sealed class ScheduledJobCsvParserTests
         Assert.Equal(new DateTime(2026, 12, 1, 6, 0, 0, DateTimeKind.Utc), utc);
     }
 
+    /// <summary>
+    /// 250-row CSV; consumer breaks after 10.
+    /// Expects only 10 jobs observed — enumeration must stream, not materialize all rows first.
+    /// </summary>
     [Fact]
     public async Task EnumerateJobs_DoesNotBufferEntireFile()
     {
@@ -475,11 +571,17 @@ public sealed class ScheduledJobCsvParserTests
         }
     }
 
+    /// <summary>
+    /// Builds a parser with default ScheduledJobsOptions and en-ZA/Johannesburg date formats.
+    /// </summary>
     private static ScheduledJobCsvParser CreateParser() =>
         new(
             Options.Create(new ScheduledJobsOptions()),
             CreateDateTimeParser());
 
+    /// <summary>
+    /// CsvDateTimeParser fixed to en-ZA culture, Africa/Johannesburg, and supported format list.
+    /// </summary>
     private static CsvDateTimeParser CreateDateTimeParser() =>
         new(Options.Create(new CsvOptions
         {
@@ -496,6 +598,9 @@ public sealed class ScheduledJobCsvParserTests
             ],
         }));
 
+    /// <summary>
+    /// Writes contents to a unique temp CSV path for isolation.
+    /// </summary>
     private static async Task<string> WriteTempCsvAsync(string contents)
     {
         string path = Path.Combine(Path.GetTempPath(), $"jobs-{Guid.NewGuid():N}.csv");

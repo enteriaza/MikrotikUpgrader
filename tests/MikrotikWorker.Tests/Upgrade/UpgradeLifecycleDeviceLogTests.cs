@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: UpgradeLifecycleDeviceLogTests.cs
+//
+// Description:
+// Exercises the production DeviceLogWriter + Serilog device sink across a
+// synthetic backup → fetch → reboot → reconnect upgrade lifecycle (no live
+// router).
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
@@ -24,6 +34,17 @@ namespace MikrotikWorker.Tests.Upgrade;
 [Collection("Serilog")]
 public sealed class UpgradeLifecycleDeviceLogTests
 {
+    /// <summary>
+    /// Scenario: A synthetic (not live) upgrade lifecycle runs with real Serilog and device-log writing, a temporary
+    /// backup root, a short backup-file-ready timeout, no RouterOS 7 target, and a router whose password is
+    /// super-secret-password.
+    /// Expected: The outcome is TargetUnavailable at the v6 stepping stage, with the reboot and fetch both performed.
+    /// The device log exists and carries the lifecycle fragments, installed package count and bundled components. The
+    /// application log carries the job start and the no-validated-target message. The export, binary backup and
+    /// manifest files exist, and no device-log write failure is counted.
+    /// Invariant: The device log is complete and free of correlation identifiers, the application log stays
+    /// service-level without device detail, and the router password appears in neither log.
+    /// </summary>
     [Fact]
     public async Task SyntheticUpgradeLifecycle_WritesCompleteDeviceAndApplicationLogs()
     {
@@ -285,22 +306,36 @@ public sealed class UpgradeLifecycleDeviceLogTests
         Assert.True(File.Exists(Path.Combine(backupRoot, "Manifests", expectedStem + ".json")));
     }
 
+    /// <summary>Marker type used as the logger category for router-job log output.</summary>
     private sealed class RouterJobMarker;
 
+    /// <summary>
+    /// Minimal <see cref="Microsoft.Extensions.Hosting.IHostEnvironment"/> for building logging infrastructure in
+    /// tests, with no content files.
+    /// </summary>
     private sealed class FakeHostEnvironment : Microsoft.Extensions.Hosting.IHostEnvironment
     {
+        /// <summary>Hosting environment name (default <c>Development</c>).</summary>
         public string EnvironmentName { get; set; } = "Development";
 
+        /// <summary>Application name (default <c>MikrotikWorker.Tests</c>).</summary>
         public string ApplicationName { get; set; } = "MikrotikWorker.Tests";
 
+        /// <summary>Content root (default the test base directory).</summary>
         public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
 
+        /// <summary>File provider for the content root; an empty provider since no content files are used.</summary>
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } =
             new Microsoft.Extensions.FileProviders.NullFileProvider();
     }
 
+    /// <summary>
+    /// Connection factory that flips the fake router to its post-upgrade state when a reconnect happens and returns a
+    /// fake connection.
+    /// </summary>
     private sealed class RecordingConnectionFactory(TrackingOps ops) : IMikrotikConnectionFactory
     {
+        /// <summary>Advances the router fake to the post-upgrade version and returns a fake connection.</summary>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions options,
             CancellationToken cancellationToken = default)
@@ -310,17 +345,35 @@ public sealed class UpgradeLifecycleDeviceLogTests
         }
     }
 
+    /// <summary>
+    /// Router operations fake with an in-memory file store and a version that moves from 6.49.10 to 6.49.23 on
+    /// reconnect; it reports a full bundled-package inventory so lifecycle log output can be inspected.
+    /// </summary>
     private sealed class TrackingOps : IMikrotikRouterOperations
     {
+        /// <summary>Version the fake router currently reports, 6.49.10 until advanced to post-upgrade.</summary>
         private string _version = "6.49.10";
+        /// <summary>In-memory router file store (name to size), case-insensitive.</summary>
         private readonly Dictionary<string, long> _files = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// True once <see cref="FetchUrlToFileAsync"/> has been invoked, i.e. the firmware package fetch was
+        /// attempted.
+        /// </summary>
         public bool FetchCalled { get; private set; }
 
+        /// <summary>
+        /// True once <see cref="RebootAsync"/> has been invoked, i.e. the executor requested a router reboot.
+        /// </summary>
         public bool RebootCalled { get; private set; }
 
+        /// <summary>Switches the reported version to the post-upgrade 6.49.23.</summary>
         public void AdvanceToPostUpgrade() => _version = "6.49.23";
 
+        /// <summary>
+        /// Returns device info for <c>ACE01.POP001.001.core</c> with a long-term version suffix and full RouterBOARD
+        /// details that follow the current version.
+        /// </summary>
         public Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
             string host,
@@ -338,6 +391,9 @@ public sealed class UpgradeLifecycleDeviceLogTests
                 RouterboardFactoryFirmware = "3.41",
             });
 
+        /// <summary>
+        /// Returns <c>routeros-mipsbe</c> plus ten bundled component packages at the current version.
+        /// </summary>
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
@@ -356,6 +412,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
                 new("advanced-tools", _version, false, "routeros-mipsbe"),
             ]);
 
+        /// <summary>Registers a 12-byte <c>.rsc</c> file in the in-memory store.</summary>
         public Task ExportConfigurationToFileAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -365,6 +422,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
             return Task.CompletedTask;
         }
 
+        /// <summary>Registers a 12-byte <c>.backup</c> file in the in-memory store.</summary>
         public Task SaveSystemBackupAsync(
             ITikConnection connection,
             string fileNameWithoutExtension,
@@ -375,6 +433,9 @@ public sealed class UpgradeLifecycleDeviceLogTests
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Returns the stored file, a 4-byte entry for any <c>.npk</c>, or null for everything else.
+        /// </summary>
         public Task<RouterFileInfo?> FindFileAsync(
             ITikConnection connection,
             string fileName,
@@ -393,6 +454,9 @@ public sealed class UpgradeLifecycleDeviceLogTests
             return Task.FromResult<RouterFileInfo?>(null);
         }
 
+        /// <summary>
+        /// No-op: files are reported ready immediately, so the executor never waits on backup-file polling.
+        /// </summary>
         public Task WaitForFileAsync(
             ITikConnection connection,
             string fileName,
@@ -401,6 +465,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>Removes the file from the in-memory store.</summary>
         public Task RemoveFileAsync(
             ITikConnection connection,
             string fileName,
@@ -410,6 +475,7 @@ public sealed class UpgradeLifecycleDeviceLogTests
             return Task.CompletedTask;
         }
 
+        /// <summary>Marks the fetch as called and registers the destination file as 4 bytes.</summary>
         public Task FetchUrlToFileAsync(
             ITikConnection connection,
             string url,
@@ -422,30 +488,39 @@ public sealed class UpgradeLifecycleDeviceLogTests
             return Task.CompletedTask;
         }
 
+        /// <summary>Marks the reboot as requested.</summary>
         public Task RebootAsync(ITikConnection connection, CancellationToken cancellationToken = default)
         {
             RebootCalled = true;
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Reports zero matching system scripts, so legacy automation cleanup finds nothing to inspect.
+        /// </summary>
         public Task<int> CountSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>No-op: there are no legacy scripts to remove.</summary>
         public Task RemoveSystemScriptsByNameAsync(
             ITikConnection connection,
             string scriptName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Reports zero matching schedulers, so legacy automation cleanup finds nothing to inspect.
+        /// </summary>
         public Task<int> CountSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>No-op: there are no legacy schedulers to remove.</summary>
         public Task RemoveSchedulersByNameAsync(
             ITikConnection connection,
             string schedulerName,
@@ -453,8 +528,12 @@ public sealed class UpgradeLifecycleDeviceLogTests
             Task.CompletedTask;
     }
 
+    /// <summary>
+    /// File transfer client that writes a fixed 12-byte payload locally instead of downloading from a router.
+    /// </summary>
     private sealed class InMemoryFileTransfer : IMikrotikFileTransferClient
     {
+        /// <summary>Creates the destination directory and writes 12 bytes of <c>0x07</c> to the local path.</summary>
         public Task DownloadFileAsync(
             string host,
             int port,

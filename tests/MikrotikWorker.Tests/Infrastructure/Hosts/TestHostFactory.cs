@@ -1,8 +1,22 @@
+// -----------------------------------------------------------------------------
+// File: TestHostFactory.cs
+//
+// Description:
+// Factory helpers that build WebApplication / host test servers with production
+// MikrotikWorkerHost composition and overridable options/fakes.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Configuration;
 
 namespace MikrotikWorker.Tests.Infrastructure.Hosts;
+/// <summary>
+/// Builds test hosts with production composition and overrides.
+/// </summary>
 internal static class TestHostFactory
 {
+    /// <summary>Finds a currently unused loopback TCP port by briefly binding and releasing a listener.</summary>
+    /// <returns>A port number that was free at the time of the call.</returns>
     public static int GetFreeTcpPort()
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
@@ -17,6 +31,9 @@ internal static class TestHostFactory
         }
     }
 
+    /// <summary>Creates a temp firmware directory populated with the supplied files.</summary>
+    /// <param name="files">Relative paths and byte content to write beneath the new root.</param>
+    /// <returns>Full path of the temp firmware root.</returns>
     public static string CreateFirmwareRoot(params (string RelativePath, byte[] Content)[] files)
     {
         string root = Directory.CreateTempSubdirectory("mikrotik-firmware-").FullName;
@@ -31,6 +48,8 @@ internal static class TestHostFactory
         return root;
     }
 
+    /// <summary>Creates a temp scheduled-jobs root containing Processing, Accepted, Completed and Rejected folders.</summary>
+    /// <returns>Full path of the temp jobs root.</returns>
     public static string CreateScheduledJobsRoot()
     {
         string root = Directory.CreateTempSubdirectory("mikrotik-jobs-").FullName;
@@ -41,6 +60,20 @@ internal static class TestHostFactory
         return root;
     }
 
+    /// <summary>
+    /// Creates a production-composed <see cref="WebApplicationBuilder"/> with in-memory test configuration
+    /// (MikroTik disabled, fast polling intervals, isolated log directory).
+    /// </summary>
+    /// <param name="firmwareRoot">Firmware directory to serve.</param>
+    /// <param name="port">Listening port.</param>
+    /// <param name="heartbeatInterval">Worker heartbeat interval; defaults to 50 ms.</param>
+    /// <param name="ipAddress">Listening IP address.</param>
+    /// <param name="configureLogging">
+    /// Custom logging setup; when null, production Serilog configuration is applied instead.
+    /// </param>
+    /// <param name="additionalConfiguration">Configuration entries that override the defaults.</param>
+    /// <param name="scheduledJobsRoot">Scheduled-jobs root; defaults to a new temp root.</param>
+    /// <returns>The configured builder, not yet built.</returns>
     public static WebApplicationBuilder CreateBuilder(
         string firmwareRoot,
         int port,
@@ -108,6 +141,15 @@ internal static class TestHostFactory
         return builder;
     }
 
+    /// <summary>Builds the application from <see cref="CreateBuilder"/> using production host composition.</summary>
+    /// <param name="firmwareRoot">Firmware directory to serve.</param>
+    /// <param name="port">Listening port.</param>
+    /// <param name="heartbeatInterval">Worker heartbeat interval; defaults to 50 ms.</param>
+    /// <param name="ipAddress">Listening IP address.</param>
+    /// <param name="configureLogging">Custom logging setup; when null, production Serilog is used.</param>
+    /// <param name="additionalConfiguration">Configuration entries that override the defaults.</param>
+    /// <param name="scheduledJobsRoot">Scheduled-jobs root; defaults to a new temp root.</param>
+    /// <returns>The built, not yet started, application.</returns>
     public static WebApplication CreateApplication(
         string firmwareRoot,
         int port,
@@ -129,6 +171,10 @@ internal static class TestHostFactory
         return MikrotikWorkerHost.BuildApplication(builder);
     }
 
+    /// <summary>Reads the first address the started server is listening on.</summary>
+    /// <param name="app">A started application.</param>
+    /// <returns>The first registered listening address.</returns>
+    /// <exception cref="InvalidOperationException">When the server addresses feature is missing or has no addresses.</exception>
     public static Uri GetListeningAddress(WebApplication app)
     {
         IServer server = app.Services.GetRequiredService<IServer>();

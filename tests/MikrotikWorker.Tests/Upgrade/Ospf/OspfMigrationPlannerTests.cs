@@ -1,9 +1,26 @@
+// -----------------------------------------------------------------------------
+// File: OspfMigrationPlannerTests.cs
+//
+// Description:
+// Unit tests for OspfMigrationPlanner plan construction and fleet-policy
+// validation.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using MikrotikWorker.Upgrade.Ospf;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
+/// <summary>
+/// Unit tests for OspfMigrationPlanner construction and validation.
+/// </summary>
 public sealed class OspfMigrationPlannerTests
 {
+    /// <summary>
+    /// Scenario: a baseline RouterOS 6 snapshot with an ether1 /30 backbone link, a 10.255.0.1/32 loopback and a 10.10.0.0/16 site network.
+    /// Expected: the plan succeeds with one active ptp backhaul (ether1, 10.0.0.0/30, cost 10), one passive loopback, no /32 among the backhauls, one passive 'all' site template for 10.10.0.0/16, stub site areas without no-summaries, and the 10.10.0.0/16 area range kept.
+    /// Invariant: the loopback stays passive and is never forced to PTP or counted as a backhaul.
+    /// </summary>
     [Fact]
     public void V6Snapshot_ClassifiesBackhaulLoopbackAndPreservesSiteMatchers()
     {
@@ -38,6 +55,11 @@ public sealed class OspfMigrationPlannerTests
         Assert.Contains(result.Plan.AreaRanges, r => r.RangeCidr == "10.10.0.0/16");
     }
 
+    /// <summary>
+    /// Scenario: a v6 snapshot with several site networks (10.10.0.0/16, 100.99.0.0/16, 100.67.16.0/24, 172.26.0.0/16).
+    /// Expected: a single passive 'all' site template '10.10.0.0/16,100.64.0.0/10,172.16.0.0/12' and a backhaul that remains non-passive.
+    /// Invariant: fleet networks fold into aggregates and all site networks share one template.
+    /// </summary>
     [Fact]
     public void V6Snapshot_ConsolidatesMultipleSiteNetworksIntoOneInterfacesAllTemplate()
     {
@@ -61,6 +83,11 @@ public sealed class OspfMigrationPlannerTests
         Assert.False(result.Plan.ActiveBackhauls[0].Passive);
     }
 
+    /// <summary>
+    /// Scenario: a v7 snapshot with legacy interface-bound passive /27 templates (Bridge-VLAN-99 and Bridge-VLAN-197) plus a 100.99.0.0/16 template and a broader 10.10.0.0/16 area range.
+    /// Expected: one backhaul, one loopback and one 'all' site template '10.10.0.0/24,100.64.0.0/10'; the derived management CIDR is 10.10.0.0/24 and a MGMT-commented area range for it is added.
+    /// Invariant: subdivided management matchers fold into the most specific MGMT /24 rather than the broader /16.
+    /// </summary>
     [Fact]
     public void V7Snapshot_ConsolidatesLegacyIfaceBoundMgmtTemplates_ViaAreaRange()
     {
@@ -140,6 +167,11 @@ public sealed class OspfMigrationPlannerTests
             r => r.RangeCidr == "10.10.0.0/24" && r.Comment == "MGMT");
     }
 
+    /// <summary>
+    /// Scenario: site area default-cost 20 with inject-summary-lsas=yes, then default-cost absent, then default-cost 'not-a-number'.
+    /// Expected: 20 is normalised to the fleet cost with SourceDefaultCost '20' and a 'normalised to' note; an absent cost gets the fleet cost; an invalid cost fails with a default-cost error.
+    /// Invariant: default-route origination is never inferred from inject-summary-lsas, and unparseable costs are rejected.
+    /// </summary>
     [Fact]
     public void DefaultCost_PreservedWhenParsable_UnsetWhenAbsent_FailsWhenUnsafe()
     {
@@ -184,6 +216,11 @@ public sealed class OspfMigrationPlannerTests
         Assert.Contains(badResult.Plan.ValidationErrors, e => e.Contains("default-cost", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: a v6 snapshot with ether1 and ether2 backhaul /30s using different interface types and costs (100 and 50).
+    /// Expected: the plan succeeds with two active backhauls, both normalised to cost 10.
+    /// Invariant: several backhauls on exact, non-overlapping subnets are supported with the fleet cost applied to each.
+    /// </summary>
     [Fact]
     public void MultipleBackhauls_ExactSubnets_Succeed()
     {
@@ -214,6 +251,11 @@ public sealed class OspfMigrationPlannerTests
         Assert.All(result.Plan.ActiveBackhauls, b => Assert.Equal(10, b.Cost));
     }
 
+    /// <summary>
+    /// Scenario: ether1's /24 backhaul subnet also contains an address on bridge-local, so activation is unsafe under OR-style template matching.
+    /// Expected: planning fails with an error naming an 'unrelated interface'.
+    /// Invariant: a backhaul subnet that covers any other local interface address is refused.
+    /// </summary>
     [Fact]
     public void BroadBackhaulNetwork_CoveringUnrelatedInterface_FailsClosed()
     {
@@ -241,6 +283,11 @@ public sealed class OspfMigrationPlannerTests
             e => e.Contains("unrelated interface", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: a v7 snapshot with areas but no interface templates, so no backbone PTP backhaul can be identified.
+    /// Expected: planning fails with a 'No valid active backbone PTP' (or interface-templates) error and no backhaul is planned.
+    /// Invariant: the planner never invents an active backhaul that the router did not have.
+    /// </summary>
     [Fact]
     public void V7Snapshot_RequiresClassifiableActiveBackhaul_NeverInvents()
     {
@@ -266,6 +313,11 @@ public sealed class OspfMigrationPlannerTests
         Assert.Empty(result.Plan.ActiveBackhauls);
     }
 
+    /// <summary>
+    /// Scenario: a v7 snapshot whose loopback and site templates are active ptp (cost 1) instead of passive.
+    /// Expected: the plan succeeds with a passive 10.255.0.1/32 loopback and a passive 'all' 10.10.0.0/16 site template, and a note records the active-to-passive change.
+    /// Invariant: non-backhaul templates are always planned passive.
+    /// </summary>
     [Fact]
     public void V7Snapshot_NormalisesActiveLoopbackAndSiteMatchersToPassive()
     {
@@ -331,6 +383,11 @@ public sealed class OspfMigrationPlannerTests
             n => n.Contains("active to passive", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: a v7 snapshot with a cost-100 backhaul, a passive loopback, a passive site template, site default-cost 5 and an OSPFv3 instance (*3).
+    /// Expected: the plan succeeds with the backhaul cost normalised to 10, the site default cost set to the fleet value, one OSPFv3 object queued for removal and an OSPFv3 note.
+    /// Invariant: OSPFv3 objects found on the router are scheduled for removal as part of the migration.
+    /// </summary>
     [Fact]
     public void V7Snapshot_ClassifiesTemplates_AndQueuesOspfV3Removal()
     {
@@ -392,6 +449,11 @@ public sealed class OspfMigrationPlannerTests
         Assert.Contains(result.Plan.NormalisationNotes, n => n.Contains("OSPFv3", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: a v6 snapshot containing no OSPF configuration at all.
+    /// Expected: planning fails with an 'instance is missing' validation error.
+    /// Invariant: a router with no OSPF instance is a configuration error, not an empty plan.
+    /// </summary>
     [Fact]
     public void EmptyOspf_IsSeriousConfigurationError()
     {
@@ -411,6 +473,10 @@ public sealed class OspfMigrationPlannerTests
         Assert.Contains(result.Plan.ValidationErrors, e => e.Contains("instance is missing", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Builds a RouterOS 6.49.23 mipsbe capture snapshot with backbone and site areas, optionally overriding the
+    /// addresses, interfaces and networks.
+    /// </summary>
     private static OspfCaptureSnapshot CreateV6Baseline(
         IReadOnlyList<OspfIpAddressRow>? addresses = null,
         IReadOnlyList<OspfInterfaceRow>? interfaces = null,
@@ -444,6 +510,9 @@ public sealed class OspfMigrationPlannerTests
             OspfV3Objects = [],
         };
 
+    /// <summary>Copies <paramref name="source"/> with its areas replaced.</summary>
+    /// <param name="source">Snapshot to copy.</param>
+    /// <param name="areas">Replacement area rows.</param>
     private static OspfCaptureSnapshot WithAreas(OspfCaptureSnapshot source, IReadOnlyList<OspfAreaRow> areas) =>
         new()
         {
@@ -465,6 +534,7 @@ public sealed class OspfMigrationPlannerTests
             OspfV3Objects = source.OspfV3Objects,
         };
 
+    /// <summary>Creates the default-type backbone area (<c>0.0.0.0</c>).</summary>
     private static OspfAreaRow Backbone() => new()
     {
         Name = "backbone",
@@ -472,6 +542,8 @@ public sealed class OspfMigrationPlannerTests
         Type = "default",
     };
 
+    /// <summary>Creates a stub site area.</summary>
+    /// <param name="defaultCost">Optional default cost for the area.</param>
     private static OspfAreaRow SiteArea(string? defaultCost = null) => new()
     {
         Name = "site",
@@ -480,8 +552,15 @@ public sealed class OspfMigrationPlannerTests
         DefaultCost = defaultCost,
     };
 
+    /// <summary>Creates a network row assigned to an area.</summary>
+    /// <param name="area">Area name.</param>
+    /// <param name="network">Network in CIDR notation.</param>
     private static OspfNetworkRow Net(string area, string network) => new() { Area = area, Network = network };
 
+    /// <summary>Creates an OSPF interface row.</summary>
+    /// <param name="name">Interface name.</param>
+    /// <param name="type">Network type.</param>
+    /// <param name="cost">Interface cost.</param>
     private static OspfInterfaceRow Iface(string name, string type, string cost) => new()
     {
         Interface = name,
@@ -490,6 +569,10 @@ public sealed class OspfMigrationPlannerTests
         Passive = false,
     };
 
+    /// <summary>Creates an IP address row.</summary>
+    /// <param name="address">Address with prefix length.</param>
+    /// <param name="network">Network address.</param>
+    /// <param name="iface">Interface the address is assigned to.</param>
     private static OspfIpAddressRow Addr(string address, string network, string iface) => new()
     {
         Address = address,

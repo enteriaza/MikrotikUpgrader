@@ -1,9 +1,27 @@
+// -----------------------------------------------------------------------------
+// File: FirmwareServerTests.cs
+//
+// Description:
+// HTTP tests that /firmware_files serves .npk only and rejects non-.npk content via
+// the static-file middleware configured in MikrotikWorkerHost.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Tests.Hosting;
+/// <summary>
+/// Covers .npk-only firmware static file serving.
+/// </summary>
 public sealed class FirmwareServerTests
 {
+    /// <summary>Upper bound for each host start/stop and HTTP wait in these tests.</summary>
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>Sample firmware payload served and compared byte-for-byte.</summary>
     private static readonly byte[] SampleFirmware = "mikrotik-firmware-package"u8.ToArray();
 
+    /// <summary>
+    /// Listening IP 127.0.0.1 and free port.
+    /// Expects options surface that IP and a port in 1–65535.
+    /// </summary>
     [Fact]
     public void ValidListeningConfiguration_IsAccepted()
     {
@@ -26,6 +44,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// IpAddress=not-a-valid-ip at CreateApplication.
+    /// Expects OptionsValidationException citing IpAddress.
+    /// </summary>
     [Fact]
     public void InvalidIpAddress_IsRejectedAtStartup()
     {
@@ -46,6 +68,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Port=70000 via configuration.
+    /// Expects OptionsValidationException citing Port at BuildApplication.
+    /// </summary>
     [Fact]
     public void InvalidPort_IsRejectedAtStartup()
     {
@@ -71,6 +97,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Start on a free port.
+    /// Expects listening URI matches port/http scheme; GET / returns 404 (no site root).
+    /// </summary>
     [Fact]
     public async Task HttpServer_StartsOnConfiguredEndpoint()
     {
@@ -103,6 +133,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Seeded routeros-tile npk under firmware root.
+    /// Expects GET /firmware_files/... returns exact sample bytes.
+    /// </summary>
     [Fact]
     public async Task ExistingNpkFile_CanBeRetrieved()
     {
@@ -134,6 +168,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Empty firmware root.
+    /// Expects 404 for a missing .npk path.
+    /// </summary>
     [Fact]
     public async Task MissingFirmwareFile_ReturnsNotFound()
     {
@@ -164,6 +202,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// GET /firmware_files/ and /firmware_files/mikrotik/.
+    /// Expects 404 — directory listing must not be enabled.
+    /// </summary>
     [Fact]
     public async Task DirectoryBrowsing_IsNotEnabled()
     {
@@ -197,6 +239,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Successful .npk GET.
+    /// Expects Content-Type application/octet-stream.
+    /// </summary>
     [Fact]
     public async Task NpkFiles_AreServedAsOctetStream()
     {
@@ -230,6 +276,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Host with Worker heartbeat and an .npk file.
+    /// Expects heartbeat log and concurrent successful firmware HTTP GET.
+    /// </summary>
     [Fact]
     public async Task WorkerAndKestrel_CoexistInSameHost()
     {
@@ -277,6 +327,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Firmware root also contains txt/backup/json/log beside an .npk.
+    /// Expects only the .npk returns 200; others 404.
+    /// </summary>
     [Fact]
     public async Task NonNpkFiles_AreNotServed()
     {
@@ -315,6 +369,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// Traversal URLs attempting to reach appsettings outside the firmware mount.
+    /// Expects 404 or 400.
+    /// </summary>
     [Theory]
     [InlineData("/firmware_files/../appsettings.json")]
     [InlineData("/firmware_files/%2e%2e/appsettings.json")]
@@ -349,6 +407,10 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// StopAsync after start.
+    /// Expects stopped log and TCP connect to the former port fails.
+    /// </summary>
     [Fact]
     public async Task HostShutdown_StopsWorkerAndKestrel()
     {
@@ -389,6 +451,9 @@ public sealed class FirmwareServerTests
         }
     }
 
+    /// <summary>
+    /// HttpClient aimed at the app's listening address with TestTimeout.
+    /// </summary>
     private static HttpClient CreateClient(WebApplication app) =>
         new()
         {

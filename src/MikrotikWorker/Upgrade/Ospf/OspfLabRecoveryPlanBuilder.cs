@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: OspfLabRecoveryPlanBuilder.cs
+//
+// Description:
+// Builds a fleet-standard OSPF migration plan for RouterOS 7 recovery when
+// auto-converted live templates are incomplete relative to the pre-upgrade
+// intended topology (site/PPPoE matchers and area ranges). Uses live v7
+// identity/areas/addresses plus a local pre-upgrade .rsc reference.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Text.RegularExpressions;
 
@@ -10,14 +21,27 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal static class OspfLabRecoveryPlanBuilder
 {
+    /// <summary>
+    /// Matches an export <c>add</c> line and captures its attribute body.
+    /// </summary>
     private static readonly Regex AddLineRegex = new(
         @"^\s*add\s+(?<body>.+)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// Matches <c>key=value</c> attributes, where the value may be double-quoted.
+    /// </summary>
     private static readonly Regex AttrRegex = new(
         @"(?<key>[A-Za-z0-9_-]+)=(?<value>""[^""]*""|[^\s\\]+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// Finds a pre-upgrade <c>.rsc</c> export for a router, checking candidates from oldest to newest, that contains the OSPF network and area-range sections and the PPPoE range marker.
+    /// </summary>
+    /// <param name="exportsDirectory">Directory searched for <c>.rsc</c> files.</param>
+    /// <param name="identity">Router identity expected in the file name.</param>
+    /// <param name="routerIp">Router IP expected in the file name, as an alternative to the identity.</param>
+    /// <returns>The path of the first qualifying file, or null when none qualifies.</returns>
     public static string? FindPreUpgradeExportPath(string exportsDirectory, string identity, string routerIp)
     {
         if (!Directory.Exists(exportsDirectory))
@@ -49,6 +73,20 @@ internal static class OspfLabRecoveryPlanBuilder
         return null;
     }
 
+    /// <summary>
+    /// Builds a recovery plan by mapping the pre-upgrade reference topology onto live RouterOS 7 areas and addresses.
+    /// Live passive site templates not covered by the reference are imported so consolidation records their legacy provenance.
+    /// </summary>
+    /// <param name="importId">Import identifier of the scheduled job.</param>
+    /// <param name="jobId">Scheduled job identifier.</param>
+    /// <param name="routerIp">Router management address.</param>
+    /// <param name="identity">RouterOS identity.</param>
+    /// <param name="routerOsVersion">Installed RouterOS version.</param>
+    /// <param name="architecture">Device architecture, when known.</param>
+    /// <param name="live">Live RouterOS 7 OSPF inventory.</param>
+    /// <param name="addresses">Live IP address inventory.</param>
+    /// <param name="referenceExportPath">Path of the pre-upgrade <c>.rsc</c> reference export.</param>
+    /// <returns>A validation result holding the plan, or a failure when the reference cannot be mapped.</returns>
     public static OspfPlanValidationResult BuildFromLiveAndReference(
         Guid importId,
         string jobId,
@@ -297,6 +335,12 @@ internal static class OspfLabRecoveryPlanBuilder
         return result;
     }
 
+    /// <summary>
+    /// Copies a plan with replacement normalisation notes. The content hash is preserved because notes are excluded from it.
+    /// </summary>
+    /// <param name="plan">Plan to copy.</param>
+    /// <param name="notes">Notes for the copy.</param>
+    /// <returns>The copied plan.</returns>
     private static OspfMigrationPlan CloneWithNotes(OspfMigrationPlan plan, IReadOnlyList<string> notes) =>
         new()
         {
@@ -332,6 +376,11 @@ internal static class OspfLabRecoveryPlanBuilder
             ValidationErrors = plan.ValidationErrors,
         };
 
+    /// <summary>
+    /// Creates a failed validation result with an otherwise empty plan.
+    /// </summary>
+    /// <param name="detail">Reason for the failure.</param>
+    /// <returns>A result whose plan carries the single validation error.</returns>
     private static OspfPlanValidationResult Failed(string detail) =>
         new()
         {
@@ -350,6 +399,12 @@ internal static class OspfLabRecoveryPlanBuilder
             },
         };
 
+    /// <summary>
+    /// Maps reference area names to live area names by exact name, then by prefix, with <c>backbone</c> mapped to the live backbone area.
+    /// </summary>
+    /// <param name="reference">Parsed reference topology.</param>
+    /// <param name="liveAreas">Live OSPF areas.</param>
+    /// <returns>Live area names keyed by reference area name; unmappable areas are omitted.</returns>
     private static Dictionary<string, string> BuildAreaNameMap(
         ReferenceTopology reference,
         IReadOnlyList<OspfAreaRow> liveAreas)
@@ -392,6 +447,11 @@ internal static class OspfLabRecoveryPlanBuilder
         return map;
     }
 
+    /// <summary>
+    /// Parses the <c>/routing ospf network</c> and <c>/routing ospf area range</c> sections of a RouterOS export.
+    /// </summary>
+    /// <param name="exportText">Text of the <c>.rsc</c> export.</param>
+    /// <returns>The networks and ranges found.</returns>
     internal static ReferenceTopology ParseReferenceExport(string exportText)
     {
         List<ReferenceNetwork> networks = [];
@@ -446,6 +506,11 @@ internal static class OspfLabRecoveryPlanBuilder
         return new ReferenceTopology(networks, ranges);
     }
 
+    /// <summary>
+    /// Joins export lines continued with a trailing backslash and drops blank lines.
+    /// </summary>
+    /// <param name="text">Raw export text.</param>
+    /// <returns>The logical lines.</returns>
     private static List<string> FlattenContinuationLines(string text)
     {
         // MikroTik exports use a trailing '\' to continue a logical line onto the next physical line.
@@ -471,6 +536,11 @@ internal static class OspfLabRecoveryPlanBuilder
             .ToList();
     }
 
+    /// <summary>
+    /// Parses <c>key=value</c> attributes from an export line body, unquoting quoted values.
+    /// </summary>
+    /// <param name="body">Text following <c>add</c>.</param>
+    /// <returns>Attributes keyed case-insensitively by name.</returns>
     private static Dictionary<string, string> ParseAttributes(string body)
     {
         Dictionary<string, string> attrs = new(StringComparer.OrdinalIgnoreCase);
@@ -489,6 +559,12 @@ internal static class OspfLabRecoveryPlanBuilder
         return attrs;
     }
 
+    /// <summary>
+    /// Derives the connected subnet of an interface address.
+    /// </summary>
+    /// <param name="addr">Address row to evaluate.</param>
+    /// <param name="subnet">Receives the subnet on success.</param>
+    /// <returns><see langword="true"/> when a subnet could be determined.</returns>
     private static bool TryInterfaceSubnet(OspfIpAddressRow addr, out OspfIpPrefix subnet)
     {
         subnet = default;
@@ -506,8 +582,17 @@ internal static class OspfLabRecoveryPlanBuilder
         return OspfIpPrefix.TryParse(addr.Address, out subnet);
     }
 
+    /// <summary>
+    /// Reference topology network used when building a lab recovery plan.
+    /// </summary>
     internal sealed record ReferenceNetwork(string Area, string Network, string? Comment);
+    /// <summary>
+    /// Reference area-range used when building a lab recovery plan.
+    /// </summary>
     internal sealed record ReferenceRange(string Area, string Range, string? Comment);
+    /// <summary>
+    /// Reference topology bundle for lab OSPF recovery plan construction.
+    /// </summary>
     internal sealed record ReferenceTopology(
         IReadOnlyList<ReferenceNetwork> Networks,
         IReadOnlyList<ReferenceRange> Ranges);

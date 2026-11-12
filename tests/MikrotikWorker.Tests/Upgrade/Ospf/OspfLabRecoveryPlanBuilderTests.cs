@@ -1,9 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: OspfLabRecoveryPlanBuilderTests.cs
+//
+// Description:
+// Unit tests for OspfLabRecoveryPlanBuilder fleet-standard recovery plans.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using MikrotikWorker.Upgrade.Ospf;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
+/// <summary>
+/// Unit tests for OspfLabRecoveryPlanBuilder recovery plans.
+/// </summary>
 public sealed class OspfLabRecoveryPlanBuilderTests
 {
+    /// <summary>
+    /// Scenario: a pre-upgrade /export containing area ranges and networks, some split across lines with a trailing backslash, plus an unrelated /snmp section.
+    /// Expected: 2 ranges and 4 networks are parsed, including the continued 100.99.0.0/16 network (comment 'Active PPPoE Range') and the 100.99.76.16/28 range.
+    /// Invariant: line continuations are joined and only OSPF menus contribute to the reference topology.
+    /// </summary>
     [Fact]
     public void ParseReferenceExport_ReadsNetworksAndRangesWithContinuations()
     {
@@ -31,6 +47,11 @@ public sealed class OspfLabRecoveryPlanBuilderTests
         Assert.Contains(topo.Ranges, r => r.Range == "100.99.76.16/28");
     }
 
+    /// <summary>
+    /// Scenario: a live v7 inventory with backbone-v2 and site-v2 areas, a reference .rsc using the old names, and router IP addresses.
+    /// Expected: the plan succeeds, maps the backbone and site area names to their -v2 equivalents, restores a single 'all' passive site network '10.10.0.0/16,100.64.0.0/10', and leaves NoSummaries false on site-v2.
+    /// Invariant: the recovery plan rebuilds site matchers on the v2 instance from the reference export rather than from live state.
+    /// </summary>
     [Fact]
     public void BuildFromLiveAndReference_MapsV2AreaNamesAndRestoresMatchers()
     {

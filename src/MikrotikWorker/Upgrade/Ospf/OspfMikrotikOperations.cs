@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfMikrotikOperations.cs
+//
+// Description:
+// Production tik4net adapter for OSPF capture, inventory reads, and
+// reconciliation mutations used by the OSPF migration/reconcile path.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using MikrotikWorker.Assessment;
 using tik4net;
@@ -8,8 +17,10 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// <summary>
 /// Production tik4net OSPF capture/reconcile adapter.
 /// </summary>
+/// <param name="logger">Logger for capture, reconcile and cleanup diagnostics.</param>
 internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> logger) : IOspfMikrotikOperations
 {
+    /// <inheritdoc />
     public async Task<OspfCaptureSnapshot> CaptureAsync(
         ITikConnection connection,
         OspfCaptureRequest request,
@@ -37,6 +48,15 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Builds a RouterOS 6 capture snapshot from the legacy OSPF menus (instances, areas, ranges, networks, interfaces) plus any OSPFv3 objects.
+    /// </summary>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="request">Capture request supplying identity and version metadata for the snapshot.</param>
+    /// <param name="addresses">Already-read IP address inventory.</param>
+    /// <param name="filters">Already-read routing-filter inventory.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The captured RouterOS 6 snapshot.</returns>
     private async Task<OspfCaptureSnapshot> CaptureV6Async(
         ITikConnection connection,
         OspfCaptureRequest request,
@@ -115,6 +135,15 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <summary>
+    /// Builds a RouterOS 7 capture snapshot from the v7 inventory, excluding OSPFv3 instances from the instance list.
+    /// </summary>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="request">Capture request supplying identity and version metadata for the snapshot.</param>
+    /// <param name="addresses">Already-read IP address inventory.</param>
+    /// <param name="filters">Already-read routing-filter inventory.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The captured RouterOS 7 snapshot.</returns>
     private async Task<OspfCaptureSnapshot> CaptureV7Async(
         ITikConnection connection,
         OspfCaptureRequest request,
@@ -145,6 +174,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <summary>Lists the OSPFv3 objects (instance, area, range, interface, network) on a RouterOS 6 device. A submenu that is absent or unsupported counts as empty; any other failure propagates.</summary>
     private async Task<List<OspfV3ObjectRef>> CaptureV6OspfV3Async(
         ITikConnection connection,
         CancellationToken cancellationToken)
@@ -200,6 +230,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return result;
     }
 
+    /// <inheritdoc />
     public async Task<OspfV7Inventory> ReadV7InventoryAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -281,6 +312,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <inheritdoc />
     public async Task RemoveAllRoutingFiltersAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -319,6 +351,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<int> CountRoutingFiltersAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -339,6 +372,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .Count;
     }
 
+    /// <inheritdoc />
     public async Task ClearOspfRedistributionAsync(
         ITikConnection connection,
         string instanceName,
@@ -375,6 +409,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <inheritdoc />
     public async Task ClearOspfInstanceFilterReferencesAsync(
         ITikConnection connection,
         string instanceName,
@@ -442,6 +477,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <inheritdoc />
     public async Task SetInstanceRouterIdAsync(
         ITikConnection connection,
         string instanceName,
@@ -461,6 +497,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -482,6 +519,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task EnsureOspfAreaAsync(
         ITikConnection connection,
         string instanceName,
@@ -569,6 +607,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             area.SourceDefaultCost ?? "<unset>");
     }
 
+    /// <inheritdoc />
     public async Task EnsureOspfAreaRangeAsync(
         ITikConnection connection,
         OspfPlanAreaRange range,
@@ -598,6 +637,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task EnsureBackhaulTemplateAsync(
         ITikConnection connection,
         OspfPlanBackhaulTemplate template,
@@ -698,6 +738,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task EnsureLoopbackTemplateAsync(
         ITikConnection connection,
         OspfPlanLoopbackTemplate template,
@@ -851,6 +892,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             template.NetworkCidr);
     }
 
+    /// <summary>Adds a passive interface-template for the planned loopback. The <c>interfaces</c> matcher is set only when the plan names an interface, and no <c>type</c> is set so loopbacks are never forced to point-to-point.</summary>
     private static async Task AddPassiveLoopbackTemplateAsync(
         ITikConnection connection,
         OspfPlanLoopbackTemplate template,
@@ -869,6 +911,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task EnsureSiteNetworkTemplateAsync(
         ITikConnection connection,
         OspfPlanSiteNetworkTemplate template,
@@ -898,6 +941,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task AssertSiteNetworkTemplateStateAsync(
         ITikConnection connection,
         OspfPlanSiteNetworkTemplate template,
@@ -1012,6 +1056,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             template.NetworkCidr);
     }
 
+    /// <inheritdoc />
     public async Task RemoveObsoleteTemplatesAsync(
         ITikConnection connection,
         OspfMigrationPlan plan,
@@ -1123,6 +1168,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <summary>Reads every OSPF interface-template and maps it to a sanitised inventory row, resolving each row's area to its owning instance.</summary>
     private async Task<List<OspfTemplateInventoryRow>> PrintTemplateInventoryAsync(
         ITikConnection connection,
         CancellationToken cancellationToken)
@@ -1137,6 +1183,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return rows.Select(r => MapTemplateInventoryRow(r, areaInstances)).ToList();
     }
 
+    /// <summary>Reads <c>/routing/ospf/area</c> and maps area name to owning instance name (case-insensitive); areas missing either value are skipped.</summary>
     private async Task<Dictionary<string, string>> PrintAreaInstanceMapAsync(
         ITikConnection connection,
         CancellationToken cancellationToken)
@@ -1162,6 +1209,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return map;
     }
 
+    /// <summary>Maps a live interface-template row to a sanitised inventory row. Auth-key aliases are reduced to presence, fingerprint and ambiguity, so plaintext keys are never retained.</summary>
     private static OspfTemplateInventoryRow MapTemplateInventoryRow(
         ITikReSentence row,
         IReadOnlyDictionary<string, string> areaInstances)
@@ -1208,6 +1256,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <summary>
+    /// Parses an optional RouterOS boolean.
+    /// </summary>
+    /// <param name="value">Raw field value; null or empty means not set.</param>
+    /// <returns>True for <c>true</c>/<c>yes</c>/<c>1</c>, false for <c>false</c>/<c>no</c>/<c>0</c>, otherwise null (unset or unrecognised).</returns>
     private static bool? ParseOptionalBool(string? value)
     {
         if (value is null)
@@ -1237,6 +1290,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return null;
     }
 
+    /// <inheritdoc />
     public async Task RemoveOspfV3Async(
         ITikConnection connection,
         OspfMigrationPlan plan,
@@ -1304,6 +1358,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         await unset.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Ensures the planned passive site matcher exists. A single exact match is corrected in place when disabled, non-passive or mismatched; otherwise a single area-wide <c>interfaces=all</c> row is adopted for correction (when the plan uses <c>all</c>), or the template is added. Ambiguous matches fail closed, and protected backhauls are never modified.</summary>
     private async Task EnsurePlannedSiteTemplateAsync(
         ITikConnection connection,
         OspfPlanSiteNetworkTemplate template,
@@ -1393,6 +1448,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(
         ITikConnection connection,
         OspfMigrationPlan plan,
@@ -1453,6 +1509,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <inheritdoc />
     public async Task AssertBackboneStillActiveAsync(
         ITikConnection connection,
         OspfMigrationPlan plan,
@@ -1528,6 +1585,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <inheritdoc />
     public async Task<IReadOnlyList<Dictionary<string, string>>> ReadOspfNeighboursAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -1541,6 +1599,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ToList();
     }
 
+    /// <summary>Re-reads the interface-templates and asserts the planned backhaul is present, not passive, not disabled and still at the planned cost; throws <see cref="OspfBackboneMutationGuardException"/> otherwise.</summary>
     private async Task AssertBackhaulTemplateActiveAsync(
         ITikConnection connection,
         OspfPlanBackhaulTemplate template,
@@ -1591,6 +1650,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <summary>Throws <see cref="OspfBackboneMutationGuardException"/> when the row matches a protected active backhaul (same interface and normalised network), preventing a site or cleanup operation from touching the backbone.</summary>
     private static void ForbidProtectedBackhaulMutation(
         string id,
         ITikReSentence row,
@@ -1609,6 +1669,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <summary>Re-reads the interface-templates and asserts exactly one matches the planned loopback and that it has the planned area, interface and network, is passive, enabled and not point-to-point. The preceding add/set response is deliberately not trusted.</summary>
     private async Task AssertLoopbackTemplateStateAsync(
         ITikConnection connection,
         OspfPlanLoopbackTemplate template,
@@ -1694,6 +1755,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <summary>Returns true when the row matches the planned loopback on area (case-insensitive), normalised network and interface (null and empty are equivalent).</summary>
     private static bool MatchesLoopbackTemplateRow(ITikReSentence row, OspfPlanLoopbackTemplate template) =>
         string.Equals(Field(row, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase)
         && string.Equals(
@@ -1705,6 +1767,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             template.Interface ?? string.Empty,
             StringComparison.Ordinal);
 
+    /// <summary>Finds the most specific route covering the management host from <c>/ip/route</c>, preferring active routes and then the longest prefix. Returns <see cref="ManagementRouteObservation.None"/> when the host is not a valid IPv4 address or no route covers it.</summary>
     private async Task<ManagementRouteObservation> ObserveManagementRouteAsync(
         ITikConnection connection,
         string managementHost,
@@ -1773,6 +1836,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return best ?? ManagementRouteObservation.None;
     }
 
+    /// <summary>Returns true when the observed management route's gateway, immediate gateway or outgoing interface refers to the backbone interface or the backbone neighbour address, meaning the management path would be lost if the backbone were disturbed.</summary>
     private static bool RouteDependsOnBackbone(
         ManagementRouteObservation route,
         string? backboneInterface,
@@ -1799,6 +1863,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return false;
     }
 
+    /// <summary>Extracts the outgoing interface from a RouterOS gateway value: the part after <c>%</c> (for example <c>10.0.0.1%ether1</c>), the value itself when it is a bare interface name, or null for a plain IP address or blank input.</summary>
     private static string? ExtractOutgoingInterface(string? gateway)
     {
         if (string.IsNullOrWhiteSpace(gateway))
@@ -1821,6 +1886,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return gateway;
     }
 
+    /// <summary>Parses an IPv4 CIDR into a network address and prefix length. Returns false for non-IPv4 input, a missing or invalid prefix, or a prefix outside 0-32.</summary>
     private static bool TryParseCidr(string cidr, out uint network, out int prefix)
     {
         network = 0;
@@ -1840,6 +1906,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return true;
     }
 
+    /// <summary>Returns true when the IPv4 host lies inside the given network and prefix length; non-IPv4 hosts never match.</summary>
     private static bool Ipv4HostInPrefix(System.Net.IPAddress host, uint network, int prefix)
     {
         byte[] b = host.GetAddressBytes();
@@ -1853,6 +1920,15 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return (h & mask) == (network & mask);
     }
 
+    /// <summary>
+    /// Observed <c>/ip/route</c> fields for the management destination used in backbone safety checks.
+    /// </summary>
+    /// <param name="Observed">True when a covering route row was found.</param>
+    /// <param name="Active">True when the observed route is active.</param>
+    /// <param name="DstAddress">Destination address/prefix from the route row.</param>
+    /// <param name="Gateway">Gateway from the route row.</param>
+    /// <param name="ImmediateGw">Immediate gateway when present.</param>
+    /// <param name="OutgoingInterface">Outgoing interface when present.</param>
     private readonly record struct ManagementRouteObservation(
         bool Observed,
         bool Active,
@@ -1861,6 +1937,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         string? ImmediateGw,
         string? OutgoingInterface)
     {
+        /// <summary>Empty observation when no covering management route was found.</summary>
         public static ManagementRouteObservation None { get; } = new(false, false, null, null, null, null);
     }
 
@@ -1871,9 +1948,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
     private static void SetFlagEnabled(ITikCommand command, string flagName) =>
         command.AddParameter(flagName, string.Empty);
 
+    /// <summary>Returns true when the RouterOS field is present (even if empty), which on ROS print output means the flag is set.</summary>
     private static bool IsFlagPresent(string? value) =>
         value is not null; // presence including empty string means the flag is set/true on ROS print
 
+    /// <summary>Removes a RouterOS row by <c>.id</c> using the given remove command; does nothing when the id is null or blank.</summary>
     private static async Task RemoveByIdAsync(
         ITikConnection connection,
         string removeCommand,
@@ -1890,6 +1969,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         await remove.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Returns the <c>.id</c> of the OSPF instance with the given name (case-insensitive), or null when not found.</summary>
     private async Task<string?> FindInstanceIdAsync(
         ITikConnection connection,
         string instanceName,
@@ -1905,6 +1985,13 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             ".id");
     }
 
+    /// <summary>
+    /// Reads and parses the RouterOS version from <c>/system/resource/print</c>.
+    /// </summary>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The parsed version.</returns>
+    /// <exception cref="InvalidOperationException">The command failed or the version text could not be parsed; routing-filter operations are refused.</exception>
     private async Task<RouterOsVersion> ReadRouterOsVersionOrThrowAsync(
         ITikConnection connection,
         CancellationToken cancellationToken)
@@ -1934,6 +2021,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return version;
     }
 
+    /// <summary>Reads the RouterOS 6 routing-filter inventory.</summary>
     private static async Task<List<OspfRoutingFilterRow>> ReadV6RoutingFilterInventoryAsync(
         ITikConnection connection,
         CancellationToken cancellationToken) =>
@@ -1944,6 +2032,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
                 cancellationToken)
             .ConfigureAwait(false);
 
+    /// <summary>Reads the RouterOS 7 routing-filter inventory: the rule menu is required and any failure propagates, while an absent select-rule menu is treated as empty. Both lists are combined.</summary>
     private async Task<List<OspfRoutingFilterRow>> ReadV7RoutingFilterInventoryAsync(
         ITikConnection connection,
         CancellationToken cancellationToken)
@@ -1980,6 +2069,15 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return combined;
     }
 
+    /// <summary>
+    /// Removes every row returned by a print command, skipping rows without an <c>.id</c>.
+    /// </summary>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="printCommand">Command that lists the rows.</param>
+    /// <param name="removeCommand">Command that removes a row by <c>.id</c>.</param>
+    /// <param name="requiredMenu">When true any inventory failure aborts with an exception; when false an absent or unsupported menu is skipped.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="InvalidOperationException">The inventory of a required menu could not be read.</exception>
     private async Task RemoveAllRowsByIdAsync(
         ITikConnection connection,
         string printCommand,
@@ -2023,6 +2121,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         }
     }
 
+    /// <summary>Maps a routing-filter row to an inventory row; the name falls back through <c>chain</c>, <c>name</c>, <c>rule</c> and <c>.id</c>.</summary>
     private static OspfRoutingFilterRow MapRoutingFilterRow(ITikReSentence row) => new()
     {
         Id = Field(row, ".id"),
@@ -2032,6 +2131,18 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
                ?? Field(row, ".id"),
     };
 
+    /// <summary>
+    /// Runs a RouterOS print command and maps each returned row.
+    /// </summary>
+    /// <typeparam name="T">
+    /// Domain row type produced by <paramref name="map"/> for each RouterOS reply sentence
+    /// (for example an OSPF instance, area or interface-template row).
+    /// </typeparam>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="printCommand">Print command to execute.</param>
+    /// <param name="map">Maps a RouterOS sentence to <typeparamref name="T"/>.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The mapped rows in router order.</returns>
     private static async Task<List<T>> PrintMappedAsync<T>(
         ITikConnection connection,
         string printCommand,
@@ -2045,6 +2156,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return rows.Select(map).ToList();
     }
 
+    /// <summary>Maps an OSPF instance row. Redistribution properties are collected when present, and the in/out filter fall back across the ROS7 chain and select property names.</summary>
     private static OspfInstanceRow MapInstance(ITikReSentence row)
     {
         var redistribute = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -2077,9 +2189,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <summary>Trims the value, mapping null or whitespace to null.</summary>
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    /// <summary>Maps a RouterOS 6 OSPF area row, including <c>inject-summary-lsas</c>.</summary>
     private static OspfAreaRow MapAreaV6(ITikReSentence row) => new()
     {
         Id = Field(row, ".id"),
@@ -2091,6 +2205,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         InjectSummaryLsas = Field(row, "inject-summary-lsas"),
     };
 
+    /// <summary>Maps a RouterOS 7 OSPF area row, including the <c>no-summaries</c> flag.</summary>
     private static OspfAreaRow MapAreaV7(ITikReSentence row) => new()
     {
         Id = Field(row, ".id"),
@@ -2102,6 +2217,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         NoSummaries = IsTruthy(Field(row, "no-summaries")),
     };
 
+    /// <summary>Maps an OSPF area-range row. <c>advertise</c> stays null when RouterOS did not report it.</summary>
     private static OspfAreaRangeRow MapRange(ITikReSentence row) => new()
     {
         Id = Field(row, ".id"),
@@ -2158,6 +2274,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <summary>Reads a field from a RouterOS sentence, returning null when the row or field is absent.</summary>
     private static string? Field(ITikReSentence? row, string name) =>
         row?.GetResponseFieldOrDefault(name, null);
 
@@ -2172,9 +2289,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
             || value == "1");
 
+    /// <summary>Reads a value from a row dictionary, returning null when the dictionary or key is missing.</summary>
     private static string? GetDict(Dictionary<string, string>? row, string key) =>
         row is not null && row.TryGetValue(key, out string? value) ? value : null;
 
+    /// <summary>Normalises a value to canonical CIDR form; unparseable input is returned trimmed (or empty when null).</summary>
     private static string NormalizeCidr(string? value)
     {
         if (OspfIpPrefix.TryParse(value, out OspfIpPrefix prefix))

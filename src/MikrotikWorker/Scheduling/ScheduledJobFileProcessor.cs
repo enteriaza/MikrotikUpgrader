@@ -1,9 +1,31 @@
+// -----------------------------------------------------------------------------
+// File: ScheduledJobFileProcessor.cs
+//
+// Description:
+// Owns CSV ingestion: readiness wait, Processing move, validation, Accepted move,
+// job scheduling, activation finalize, and reject reporting. On cancel/failure
+// after Accept it finalizes incomplete activation (never Rejects Accepted files);
+// before Accept it aborts the import. Also warns about leftover Processing files.
+//
+// -----------------------------------------------------------------------------
+
 using System.Text;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 
 namespace MikrotikWorker.Scheduling;
 
+/// <summary>
+/// Processes one Incoming CSV through the ScheduledJobs lifecycle into the in-memory scheduler.
+/// </summary>
+/// <param name="paths">Lifecycle folder paths.</param>
+/// <param name="parser">Validation and job enumeration.</param>
+/// <param name="readinessChecker">Stable-file gate before moving from Incoming.</param>
+/// <param name="scheduler">Import registration, scheduling, abort/finalize.</param>
+/// <param name="fileMover">Safe inter-folder moves.</param>
+/// <param name="options">Limits such as <see cref="ScheduledJobsOptions.MaximumPendingJobs"/> (logged).</param>
+/// <param name="timeProvider">Timestamps for reject reports and validation "now".</param>
+/// <param name="logger">Ingestion diagnostics.</param>
 internal sealed class ScheduledJobFileProcessor(
     ScheduledJobsPaths paths,
     ScheduledJobCsvParser parser,
@@ -14,6 +36,9 @@ internal sealed class ScheduledJobFileProcessor(
     TimeProvider timeProvider,
     ILogger<ScheduledJobFileProcessor> logger)
 {
+    /// <summary>
+    /// Tracks file names being processed so duplicate concurrent requests are skipped.
+    /// </summary>
     private readonly ConcurrentProcessingGate _gate = new();
 
     /// <summary>
@@ -27,6 +52,13 @@ internal sealed class ScheduledJobFileProcessor(
     /// </summary>
     internal Func<Guid, int, CancellationToken, Task>? AfterJobScheduledForTestsAsync { get; set; }
 
+    /// <summary>
+    /// Ingests a single Incoming <c>.csv</c>: readiness, Processing move, then
+    /// <see cref="ProcessProcessingFileAsync"/>. Duplicate concurrent requests for the same file name are skipped.
+    /// Non-cancel failures reject the file; cancel leaves it for manual re-import.
+    /// </summary>
+    /// <param name="filePath">Incoming CSV path.</param>
+    /// <param name="cancellationToken">Cancels readiness/validation/scheduling.</param>
     public async Task ProcessIncomingAsync(string filePath, CancellationToken cancellationToken)
     {
         string fileName = Path.GetFileName(filePath);
@@ -85,6 +117,12 @@ internal sealed class ScheduledJobFileProcessor(
         }
     }
 
+    /// <summary>
+    /// Validates a Processing CSV, moves it to Accepted, schedules every row, then finalizes activation.
+    /// Cancel/failure after Accept keeps the Accepted file and calls incomplete finalize; before Accept aborts.
+    /// </summary>
+    /// <param name="processingPath">CSV already under Processing.</param>
+    /// <param name="cancellationToken">Cancels validation and per-row scheduling.</param>
     public async Task ProcessProcessingFileAsync(string processingPath, CancellationToken cancellationToken)
     {
         string fileName = Path.GetFileName(processingPath);
@@ -211,6 +249,11 @@ internal sealed class ScheduledJobFileProcessor(
         }
     }
 
+    /// <summary>
+    /// Shared cancel/exception path after RegisterImport: Abort when Accepted is missing;
+    /// otherwise re-bind Accepted path and <see cref="IInMemoryJobScheduler.FinalizeImportActivation"/> with incomplete=true.
+    /// Never moves Accepted to Rejected.
+    /// </summary>
     private async Task HandleIngestFailureAsync(
         Guid importId,
         string? acceptedPath,
@@ -262,6 +305,9 @@ internal sealed class ScheduledJobFileProcessor(
         }
     }
 
+    /// <summary>
+    /// Best-effort folder label (Processing/Accepted/Incoming/unknown) for cancel-warning messages.
+    /// </summary>
     private string DescribeCsvLocation(string fileName, string? processingPath)
     {
         if (processingPath is not null && File.Exists(processingPath))
@@ -285,6 +331,9 @@ internal sealed class ScheduledJobFileProcessor(
         return "unknown";
     }
 
+    /// <summary>
+    /// Logs a warning for each CSV left in Processing after an interrupted prior run (not auto-imported).
+    /// </summary>
     public void WarnAboutInterruptedProcessingFiles()
     {
         foreach (string processingFile in Directory.EnumerateFiles(paths.Processing, "*.csv"))
@@ -296,6 +345,9 @@ internal sealed class ScheduledJobFileProcessor(
         }
     }
 
+    /// <summary>
+    /// Writes a <c>.error.txt</c> report under Rejected and moves the CSV there when still present.
+    /// </summary>
     private async Task RejectAsync(
         string sourcePath,
         string fileName,
@@ -350,11 +402,24 @@ internal sealed class ScheduledJobFileProcessor(
     }
 }
 
+/// <summary>
+/// Case-insensitive per-file-name gate so the same Incoming CSV is not processed concurrently.
+/// </summary>
 internal sealed class ConcurrentProcessingGate
 {
+    /// <summary>
+    /// File names currently in flight, compared case-insensitively. Guarded by <c>_gate</c>.
+    /// </summary>
     private readonly HashSet<string> _inFlight = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Lock guarding <c>_inFlight</c>.
+    /// </summary>
     private readonly object _gate = new();
 
+    /// <summary>
+    /// Attempts to mark <paramref name="fileName"/> as in-flight.
+    /// </summary>
+    /// <returns><c>false</c> when that name is already being processed.</returns>
     public bool TryBegin(string fileName)
     {
         lock (_gate)
@@ -363,6 +428,7 @@ internal sealed class ConcurrentProcessingGate
         }
     }
 
+    /// <summary>Clears the in-flight mark for <paramref name="fileName"/>.</summary>
     public void End(string fileName)
     {
         lock (_gate)

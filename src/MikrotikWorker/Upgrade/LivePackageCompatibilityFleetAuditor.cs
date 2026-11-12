@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityFleetAuditor.cs
+//
+// Description:
+// Orchestrates concurrent read-only inventory collection and catalogue
+// compatibility evaluation. Independent of the upgrade scheduler and
+// mutation-capable services.
+//
+// -----------------------------------------------------------------------------
+
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -12,6 +22,9 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 internal interface ILivePackageCompatibilityFleetAuditor
 {
+    /// <summary>
+    /// Audits the parsed CSV input concurrently and returns the fleet report.
+    /// </summary>
     Task<LiveFleetAuditReport> AuditAsync(
         LiveAuditRouterCsvParser.ParseResult input,
         CancellationToken cancellationToken = default);
@@ -23,8 +36,13 @@ internal interface ILivePackageCompatibilityFleetAuditor
 /// </summary>
 internal enum LiveFleetIncompleteReason
 {
+    /// <summary>Run completed; not incomplete.</summary>
     None = 0,
+
+    /// <summary>Caller cancellation stopped the run before natural completion.</summary>
     UserCancellation = 1,
+
+    /// <summary>Configured total audit deadline elapsed before natural completion.</summary>
     DeadlineExceeded = 2,
 }
 
@@ -33,15 +51,22 @@ internal enum LiveFleetIncompleteReason
 /// </summary>
 internal sealed class LiveFleetAuditCompletionBoundary
 {
+    /// <summary>Deadline CTS used for the fleet run (distinct from the caller token).</summary>
     public required CancellationTokenSource DeadlineCts { get; init; }
 
+    /// <summary>Original caller cancellation token.</summary>
     public required CancellationToken CallerToken { get; init; }
 
+    /// <summary>Router audit records collected so far.</summary>
     public required IReadOnlyList<LiveFleetRouterAuditRecord> Records { get; init; }
 
+    /// <summary>True when every valid unique target reached a natural terminal collection status.</summary>
     public required bool AllTargetsReachedNaturalTerminal { get; init; }
 }
 
+/// <summary>
+/// Default fleet auditor: concurrent read-only collection plus catalogue compatibility evaluation.
+/// </summary>
 internal sealed class LivePackageCompatibilityFleetAuditor(
     IReadOnlyMikrotikInventoryCollector collector,
     IPackageCompatibilityAuditor compatibilityAuditor,
@@ -56,6 +81,9 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
     /// </summary>
     internal Action<LiveFleetAuditCompletionBoundary>? OnBeforeFinalizeSummary { get; set; }
 
+    /// <summary>
+    /// Audits all valid unique CSV routers concurrently and returns the fleet report.
+    /// </summary>
     public async Task<LiveFleetAuditReport> AuditAsync(
         LiveAuditRouterCsvParser.ParseResult input,
         CancellationToken cancellationToken = default)
@@ -181,6 +209,18 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
             cancellationToken);
     }
 
+    /// <summary>
+    /// Builds the final report from the collected records, ordered by CSV row.
+    /// Completion flags come from the work boundary, never from token state observed afterwards.
+    /// </summary>
+    /// <param name="input">Parsed CSV input.</param>
+    /// <param name="records">Collected per-router records.</param>
+    /// <param name="started">UTC time the audit started.</param>
+    /// <param name="allNaturalTerminal">Whether every valid unique target reached a natural terminal status.</param>
+    /// <param name="incompleteReason">Why the run ended incomplete, if it did.</param>
+    /// <param name="deadlineCts">Deadline source (not consulted for the flags).</param>
+    /// <param name="callerToken">Caller token (not consulted for the flags).</param>
+    /// <returns>The fleet report with its summary.</returns>
     private LiveFleetAuditReport Finalize(
         LiveAuditRouterCsvParser.ParseResult input,
         ConcurrentBag<LiveFleetRouterAuditRecord> records,
@@ -227,6 +267,20 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
         };
     }
 
+    /// <summary>
+    /// Collects and assesses one router while holding a concurrency slot, and adds exactly one record for it.
+    /// Cancellation, deadline expiry, and unexpected failures are recorded rather than thrown.
+    /// </summary>
+    /// <param name="target">Valid, unique router to audit.</param>
+    /// <param name="username">Shared RouterOS user name.</param>
+    /// <param name="password">Shared RouterOS password.</param>
+    /// <param name="port">RouterOS API port.</param>
+    /// <param name="connectionTimeout">Per-router connection timeout.</param>
+    /// <param name="gate">Semaphore bounding concurrent connections.</param>
+    /// <param name="records">Collection that receives the router record.</param>
+    /// <param name="fleetToken">Token cancelled by caller cancellation or the fleet deadline.</param>
+    /// <param name="deadlineCts">Fleet deadline source, used to classify cancellation.</param>
+    /// <param name="callerToken">Caller cancellation token, used to classify cancellation.</param>
     private async Task AuditOneAsync(
         LiveAuditRouterInput target,
         string username,
@@ -337,6 +391,14 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
         }
     }
 
+    /// <summary>
+    /// Adds an incomplete record for every valid target that never produced one, such as targets skipped after cancellation.
+    /// </summary>
+    /// <param name="targets">Valid unique targets.</param>
+    /// <param name="records">Records collected so far; receives the new ones.</param>
+    /// <param name="incompleteReason">Updated from the tokens when still unset and a target was missed.</param>
+    /// <param name="callerToken">Caller cancellation token.</param>
+    /// <param name="deadlineCts">Fleet deadline source.</param>
     private static void FillUnscheduledTargets(
         IReadOnlyList<LiveAuditRouterInput> targets,
         ConcurrentBag<LiveFleetRouterAuditRecord> records,
@@ -372,6 +434,12 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
         }
     }
 
+    /// <summary>
+    /// Determines whether every valid unique target has a record whose status is a natural terminal one.
+    /// </summary>
+    /// <param name="targets">Valid unique targets.</param>
+    /// <param name="records">Collected records.</param>
+    /// <returns><see langword="true"/> when all targets reached a natural terminal status.</returns>
     private static bool AllValidUniqueReachedNaturalTerminal(
         IReadOnlyList<LiveAuditRouterInput> targets,
         ConcurrentBag<LiveFleetRouterAuditRecord> records)
@@ -397,6 +465,11 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
         return true;
     }
 
+    /// <summary>
+    /// Determines whether a collection status ends a router audit naturally. Cancelled and not-attempted are not natural terminals, while a per-router timeout is.
+    /// </summary>
+    /// <param name="status">Collection status.</param>
+    /// <returns><see langword="true"/> for a natural terminal status.</returns>
     private static bool IsNaturalTerminal(LiveInventoryCollectionStatus status) =>
         status is LiveInventoryCollectionStatus.Succeeded
             or LiveInventoryCollectionStatus.Partial
@@ -405,6 +478,12 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
             or LiveInventoryCollectionStatus.TimedOut
             or LiveInventoryCollectionStatus.Failed;
 
+    /// <summary>
+    /// Classifies why work stopped, preferring caller cancellation when both sources are set.
+    /// </summary>
+    /// <param name="callerToken">Caller cancellation token.</param>
+    /// <param name="deadlineCts">Fleet deadline source.</param>
+    /// <returns>The incomplete reason; defaults to user cancellation when neither source is set.</returns>
     private static LiveFleetIncompleteReason ResolveIncompleteReason(
         CancellationToken callerToken,
         CancellationTokenSource deadlineCts)
@@ -423,6 +502,11 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
         return LiveFleetIncompleteReason.UserCancellation;
     }
 
+    /// <summary>
+    /// Creates a not-attempted record for an invalid or duplicate CSV row, which is reported without connecting.
+    /// </summary>
+    /// <param name="row">Invalid or duplicate input row.</param>
+    /// <returns>The skipped record.</returns>
     private static LiveFleetRouterAuditRecord CreateSkippedInputRecord(LiveAuditRouterInput row) =>
         new()
         {
@@ -439,6 +523,16 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
             AuditedAtUtc = DateTimeOffset.UtcNow,
         };
 
+    /// <summary>
+    /// Creates a cancelled record for work stopped by caller cancellation or the fleet deadline, keeping any partial data collected earlier.
+    /// </summary>
+    /// <param name="target">Router input.</param>
+    /// <param name="ip">Router IP text.</param>
+    /// <param name="reason">Why the work stopped.</param>
+    /// <param name="waitingForSlot">Whether it stopped while waiting for a connection slot.</param>
+    /// <param name="prior">Partial collection result to carry over, if any.</param>
+    /// <param name="notScheduled">Whether the router was never scheduled.</param>
+    /// <returns>The incomplete record.</returns>
     private static LiveFleetRouterAuditRecord CreateIncompleteRecord(
         LiveAuditRouterInput target,
         string ip,
@@ -488,6 +582,15 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
         };
     }
 
+    /// <summary>
+    /// Computes fleet-level counts of collection outcomes and package compatibility from the router records.
+    /// </summary>
+    /// <param name="input">Parsed CSV input, for row totals.</param>
+    /// <param name="routers">Ordered router records.</param>
+    /// <param name="completed">Whether the audit completed.</param>
+    /// <param name="cancelled">Whether the audit was incomplete.</param>
+    /// <param name="incompleteReason">Why the audit was incomplete, if it was.</param>
+    /// <returns>The summary.</returns>
     private static LiveFleetAuditSummary BuildSummary(
         LiveAuditRouterCsvParser.ParseResult input,
         IReadOnlyList<LiveFleetRouterAuditRecord> routers,

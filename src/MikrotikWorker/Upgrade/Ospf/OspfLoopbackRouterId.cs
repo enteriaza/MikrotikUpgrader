@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfLoopbackRouterId.cs
+//
+// Description:
+// Accepts explicit /32, or RouterOS host form without a prefix (optionally
+// with /// network= equal to the host), normalised as /32.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Net.Sockets;
 
@@ -17,13 +26,31 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </remarks>
 internal static class OspfLoopbackRouterId
 {
+    /// <summary>
+    /// Loopback interface name <c>lo</c>, matched case-insensitively.
+    /// </summary>
     public const string InterfaceNameLo = "lo";
+    /// <summary>
+    /// Loopback interface name <c>Loopback</c>, matched case-insensitively.
+    /// </summary>
     public const string InterfaceNameLoopback = "Loopback";
+    /// <summary>
+    /// Loopback interface name <c>Loopback-OSPF</c>, matched case-insensitively.
+    /// </summary>
     public const string InterfaceNameLoopbackOspf = "Loopback-OSPF";
+    /// <summary>
+    /// CIDR of the infrastructure address space; only Loopback hosts inside it can supply the Router ID.
+    /// </summary>
     public const string InfrastructureScopeCidr = "10.0.0.0/8";
 
+    /// <summary>
+    /// Parsed form of <see cref="InfrastructureScopeCidr"/> used for host containment checks.
+    /// </summary>
     private static readonly OspfIpPrefix InfrastructureScope = ParseRequired(InfrastructureScopeCidr);
 
+    /// <summary>
+    /// Interface names recognised as the fleet Loopback.
+    /// </summary>
     private static readonly string[] SupportedNames =
     [
         InterfaceNameLo,
@@ -31,6 +58,11 @@ internal static class OspfLoopbackRouterId
         InterfaceNameLoopbackOspf,
     ];
 
+    /// <summary>
+    /// Determines whether an interface name is one of the supported Loopback names.
+    /// </summary>
+    /// <param name="interfaceName">Interface name from <c>/ip/address</c>; may be null or blank.</param>
+    /// <returns><see langword="true"/> when the trimmed name matches a supported Loopback name, ignoring case.</returns>
     public static bool IsSupportedLoopbackInterfaceName(string? interfaceName)
     {
         if (string.IsNullOrWhiteSpace(interfaceName))
@@ -42,6 +74,11 @@ internal static class OspfLoopbackRouterId
         return SupportedNames.Any(s => string.Equals(s, name, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Determines whether a host address lies inside <see cref="InfrastructureScopeCidr"/>.
+    /// </summary>
+    /// <param name="host">IPv4 address, with or without a prefix length.</param>
+    /// <returns><see langword="true"/> when the address parses and is inside the infrastructure scope; otherwise <see langword="false"/>.</returns>
     public static bool IsInfrastructureScopeHost(string host)
     {
         if (!OspfIpPrefix.TryParseHost(host, out uint addr, out _))
@@ -60,6 +97,7 @@ internal static class OspfLoopbackRouterId
     /// Optional authoritative OSPF instance or plan Router ID used only when multiple
     /// distinct in-scope Loopback hosts remain after filtering.
     /// </param>
+    /// <returns>A successful result with the selected Router ID, or a failed result describing why none could be chosen.</returns>
     public static OspfLoopbackRouterIdResult Derive(
         IReadOnlyList<OspfIpAddressRow> ipAddresses,
         string? corroboratingRouterId = null)
@@ -152,6 +190,12 @@ internal static class OspfLoopbackRouterId
         };
     }
 
+    /// <summary>
+    /// Compares two Router ID strings after trimming, ignoring case.
+    /// </summary>
+    /// <param name="left">First Router ID.</param>
+    /// <param name="right">Second Router ID.</param>
+    /// <returns><see langword="true"/> when both are non-blank and equal.</returns>
     public static bool EqualsRouterId(string? left, string? right) =>
         !string.IsNullOrWhiteSpace(left)
         && !string.IsNullOrWhiteSpace(right)
@@ -161,6 +205,11 @@ internal static class OspfLoopbackRouterId
     /// Accepts explicit <c>/32</c>, or RouterOS host form without a prefix (optionally with
     /// <c>network=</c> equal to the host), normalised as <c>/32</c>.
     /// </summary>
+    /// <param name="address">Address text from <c>/ip/address</c>, with or without a prefix length.</param>
+    /// <param name="network">Optional <c>network=</c> value used to cross-check host-form addresses.</param>
+    /// <param name="host">Receives the normalised host address on success.</param>
+    /// <param name="error">Receives the failure reason when parsing fails.</param>
+    /// <returns><see langword="true"/> when the address is a valid host /32; otherwise <see langword="false"/>.</returns>
     internal static bool TryParseLoopbackHostAddress(
         string? address,
         string? network,
@@ -233,11 +282,22 @@ internal static class OspfLoopbackRouterId
         return true;
     }
 
+    /// <summary>
+    /// Parses a compile-time constant CIDR, failing fast if it is invalid.
+    /// </summary>
+    /// <param name="cidr">CIDR text to parse.</param>
+    /// <returns>The parsed prefix.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when <paramref name="cidr"/> cannot be parsed.</exception>
     private static OspfIpPrefix ParseRequired(string cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p)
             ? p
             : throw new InvalidOperationException(cidr);
 
+    /// <summary>
+    /// Creates a failed derivation result carrying a single error.
+    /// </summary>
+    /// <param name="error">Description of why derivation failed.</param>
+    /// <returns>A result with <c>Succeeded</c> set to <see langword="false"/>.</returns>
     private static OspfLoopbackRouterIdResult Failed(string error) =>
         new()
         {
@@ -246,14 +306,33 @@ internal static class OspfLoopbackRouterId
         };
 }
 
+/// <summary>
+/// Result of deriving OSPF Router ID from Loopback addressing.
+/// </summary>
 internal sealed class OspfLoopbackRouterIdResult
 {
+    /// <summary>
+    /// Gets a value indicating whether a Router ID was derived unambiguously.
+    /// </summary>
     public required bool Succeeded { get; init; }
 
+    /// <summary>
+    /// Host address (no prefix length) of the single in-scope Loopback address selected as the OSPF
+    /// Router ID. <see langword="null"/> when <see cref="Succeeded"/> is <see langword="false"/>.
+    /// </summary>
     public string? RouterId { get; init; }
 
+    /// <summary>
+    /// Name of the supported Loopback interface (<c>lo</c>, <c>Loopback</c> or <c>Loopback-OSPF</c>) that
+    /// holds <see cref="RouterId"/>, as written on the router. <see langword="null"/> when derivation failed.
+    /// </summary>
     public string? LoopbackInterfaceName { get; init; }
 
+    /// <summary>
+    /// <see cref="RouterId"/> normalised to host-prefix form (<c>address/32</c>), which is how the Loopback
+    /// address is compared and re-asserted even when RouterOS exported it without a prefix.
+    /// <see langword="null"/> when derivation failed.
+    /// </summary>
     public string? LoopbackCidr { get; init; }
 
     /// <summary>Outside-range Loopback hosts ignored for migration identity (not deleted).</summary>
@@ -262,7 +341,15 @@ internal sealed class OspfLoopbackRouterIdResult
     /// <summary>Distinct in-scope Loopback hosts considered during selection.</summary>
     public IReadOnlyList<string> ObservedInScopeAddresses { get; init; } = [];
 
+    /// <summary>
+    /// Human-readable reasons no Router ID could be chosen (missing Loopback, malformed or non-<c>/32</c>
+    /// address, ambiguous in-scope hosts). Always empty when <see cref="Succeeded"/> is <see langword="true"/>.
+    /// </summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
 
+    /// <summary>
+    /// Single-line failure message built by joining <see cref="Errors"/> with <c>"; "</c>, suitable for
+    /// logs and gate failures. <see langword="null"/> when derivation succeeded.
+    /// </summary>
     public string? Detail => Succeeded ? null : string.Join("; ", Errors);
 }

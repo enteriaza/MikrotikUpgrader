@@ -1,3 +1,17 @@
+// -----------------------------------------------------------------------------
+// File: RouterboardFirmwareMappingTests.cs
+//
+// Description:
+// RouterBOARD /system/routerboard/print fields are RouterBOOT loader versions,
+// not RouterOS. Live observation after ROS 7 install without
+// /system/routerboard/upgrade: current-firmware and upgrade-firmware values
+// changed while no upgrade command was issued. Mapping must preserve raw API
+// field names; do not invent a swap correction. External MikroTik docs:
+// current-firmware = loader in use; upgrade-firmware = newest loader file
+// found on the device (often staged by a RouterOS package).
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
@@ -18,6 +32,13 @@ namespace MikrotikWorker.Tests.Upgrade;
 /// </summary>
 public sealed class RouterboardFirmwareMappingTests
 {
+    /// <summary>
+    /// Feeds fake identity, resource and <c>/system/routerboard/print</c> replies through
+    /// <c>ReadDeviceInfoAsync</c> and asserts each RouterBOARD property carries its own raw API field: model
+    /// <c>RB960PGS</c>, firmware type <c>qca9550L</c>, factory <c>3.41</c>, current-firmware <c>6.49.23</c> and
+    /// upgrade-firmware <c>7.23.8</c>. The deliberately 'wrong-looking' current/upgrade pair must come through
+    /// unswapped.
+    /// </summary>
     [Fact]
     public async Task ApiClient_MapsRawRouterboardFields_WithoutSwap()
     {
@@ -67,6 +88,13 @@ public sealed class RouterboardFirmwareMappingTests
         Assert.Equal("7.23.8", info.RouterboardUpgradeFirmware);
     }
 
+    /// <summary>
+    /// A 7.23.8 router whose loader reports current-firmware 6.49.23 and upgrade-firmware 7.23.8 must be assessed
+    /// as <c>RouterboardFirmwareStatus.UpgradeAvailable</c>, with both raw values echoed on the assessment. The
+    /// <c>routerboard.upgrade_available</c> finding must state that assessment does not issue
+    /// <c>/system/routerboard/upgrade</c>, and some finding must describe the loader as 'bootloader' or
+    /// 'RouterBOOT' so it is not read as a RouterOS version.
+    /// </summary>
     [Fact]
     public void Assessor_PreservesUpgradeAvailable_WithoutClaimingUpgradeExecuted()
     {
@@ -107,6 +135,12 @@ public sealed class RouterboardFirmwareMappingTests
                 || f.Message.Contains("RouterBOOT", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Pre-ROS7 lab observation: current-firmware 7.23.8, upgrade-firmware 6.49.23.
+    /// With current-firmware 7.23.8 ahead of upgrade-firmware 6.49.23, the assessment must report
+    /// <c>RouterboardFirmwareStatus.Current</c> rather than UpgradeAvailable, keep both raw values unswapped, and
+    /// record a <c>routerboard.current_ahead</c> finding.
+    /// </summary>
     [Fact]
     public void Assessor_CurrentAheadOfUpgrade_IsNotUpgradeAvailable()
     {

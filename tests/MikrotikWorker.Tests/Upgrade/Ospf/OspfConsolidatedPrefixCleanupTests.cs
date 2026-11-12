@@ -1,3 +1,11 @@
+// -----------------------------------------------------------------------------
+// File: OspfConsolidatedPrefixCleanupTests.cs
+//
+// Description:
+// Production-path coverage for same-area consolidated-prefix cleanup via
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using MikrotikWorker.Upgrade.Ospf;
@@ -11,6 +19,9 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfConsolidatedPrefixCleanupTests
 {
+    /// <summary>
+    /// Management sub-prefixes (network, interface) that sit strictly inside the consolidated 10.16.11.0/24 site template and are expected to be removed as obsolete.
+    /// </summary>
     private static readonly (string Networks, string Interfaces)[] FiveMgmtSubnets =
     [
         ("10.16.11.0/27", "Bridge-VLAN-99_MGMT"),
@@ -20,6 +31,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         ("10.16.11.192/26", "Bridge-VLAN-99_MGMT"),
     ];
 
+    /// <summary>
+    /// Scenario: the plan has no superseded-template provenance and the router holds the three planned templates plus the five legacy MGMT subnet templates (ptp, cost 1).
+    /// Expected: all five legacy templates are removed, three templates remain including the consolidated 'all' template (*A), and the inventory is re-read at least twice.
+    /// Invariant: obsolete more-specific templates are found from containment in the consolidated prefix alone and deletion is confirmed against a fresh read.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_ExactFiveTemplateRegression_SucceedsWithoutProvenance()
     {
@@ -52,6 +68,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.True(capturing.PrintCount >= 2, "Cleanup must re-read inventory during/after deletion.");
     }
 
+    /// <summary>
+    /// Scenario: two legacy /27 templates bound to named VLAN interfaces sit inside the consolidated 10.16.11.0/24.
+    /// Expected: both are removed while the 'all' template *A remains.
+    /// Invariant: the interface binding of a legacy template does not shield it from cleanup when its network is contained in the consolidated prefix.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_DifferentInterfacesThanAll_StillDeleted()
     {
@@ -68,6 +89,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Contains(store.Templates, t => t[".id"] == "*A" && t["interfaces"] == "all");
     }
 
+    /// <summary>
+    /// Scenario: a matching legacy template exists in site-v2 and an identical-looking one exists in another area (other-site-v2).
+    /// Expected: cleanup throws InvalidOperationException ('No deletion was attempted'), removes nothing and leaves both *3 and *X.
+    /// Invariant: a template in a different area is unexpected and aborts cleanup before any deletion.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_DifferentArea_IsPreserved()
     {
@@ -86,6 +112,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Contains(store.Templates, t => t[".id"] == "*3");
     }
 
+    /// <summary>
+    /// Scenario: besides a legacy /27, the site area holds a Bridge-OTHER template for 10.16.50.0/24 outside the consolidated /24.
+    /// Expected: cleanup throws ('No deletion was attempted'), nothing is removed and *O is retained.
+    /// Invariant: templates outside the consolidated prefix are never deleted and their presence aborts the whole cleanup.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_OutsideConsolidated24_IsPreserved()
     {
@@ -103,6 +134,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Contains(store.Templates, t => t[".id"] == "*O");
     }
 
+    /// <summary>
+    /// Scenario: a broader 10.16.0.0/16 'all' template exists in the site area alongside a legacy /27.
+    /// Expected: cleanup throws ('No deletion was attempted'), removes nothing and keeps *W.
+    /// Invariant: a template broader than the consolidated /24 is not more specific, so it is never removed.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_LargerThanConsolidated24_IsPreserved()
     {
@@ -120,6 +156,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Contains(store.Templates, t => t[".id"] == "*W");
     }
 
+    /// <summary>
+    /// Scenario: a Bridge-OTHER template for 192.0.2.0/24 is present in the site area next to a legacy /27.
+    /// Expected: cleanup throws ('No deletion was attempted'), removes nothing and keeps *U.
+    /// Invariant: unrelated templates are never touched, and cleanup fails closed when it meets one.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_UnrelatedTemplate_IsPreserved()
     {
@@ -137,6 +178,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Contains(store.Templates, t => t[".id"] == "*U");
     }
 
+    /// <summary>
+    /// Scenario: legacy templates inside each consolidated prefix: 10.16.11.0/27, 100.64.10.0/24 and 172.16.5.0/24.
+    /// Expected: three removals, leaving only the planned templates *1, *2 and *A.
+    /// Invariant: containment is evaluated against every consolidated prefix, including the fleet aggregates.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_MultipleConsolidatedPrefixes_Handled()
     {
@@ -154,6 +200,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.All(store.Templates, t => Assert.Contains(t[".id"], (string[])["*1", "*2", "*A"]));
     }
 
+    /// <summary>
+    /// Scenario: the consolidated list includes 2001:db8:11::/64 and a legacy template exists for 2001:db8:11::/80.
+    /// Expected: only that IPv6 template (*3) is removed and *A remains.
+    /// Invariant: strict-containment cleanup works for IPv6 prefixes as well as IPv4.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_Ipv6MoreSpecific_IsDeleted()
     {
@@ -170,6 +221,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Contains(store.Templates, t => t[".id"] == "*A");
     }
 
+    /// <summary>
+    /// Scenario: the router rejects the removal at ordinal 1 while two legacy templates are queued.
+    /// Expected: cleanup throws InvalidOperationException, fewer than two templates were removed and a legacy template is still present.
+    /// Invariant: a failed deletion fails the migration rather than being treated as cleaned up.
+    /// </summary>
     [Fact]
     public async Task ProductionCleanup_FailedDeletion_FailsMigration()
     {
@@ -188,6 +244,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Contains(store.Templates, t => t[".id"] is "*3" or "*4");
     }
 
+    /// <summary>
+    /// Scenario: IsStrictlyContainedBy is called with a /27 in a /24, an identical /24, a /16 against a /24, and an IPv6 /80 in a /64.
+    /// Expected: true for the /27 in the /24 and the IPv6 /80 in /64; false for the equal prefix and for the broader /16.
+    /// Invariant: only strictly narrower prefixes count as contained; equal or broader ones do not.
+    /// </summary>
     [Fact]
     public void Containment_StrictlyMoreSpecific_Ipv4AndIpv6()
     {
@@ -209,6 +270,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
                 IPNetwork.Parse("2001:db8:11::/64")));
     }
 
+    /// <summary>
+    /// Scenario: post-apply inventory first still holds the five legacy MGMT subnet templates, then holds none.
+    /// Expected: the summarisation postconditions report an 'obsolete more-specific management' error for the first and no errors for the second.
+    /// Invariant: verification flags leftover management subnets and passes once they are gone.
+    /// </summary>
     [Fact]
     public void Verification_FailsWhileSubnetsRemain_PassesWhenGone()
     {
@@ -230,9 +296,16 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         Assert.Empty(OspfV7MigrationVerifier.VerifyManagementSummarisationPostconditions(plan, clean));
     }
 
+    /// <summary>
+    /// Creates the real <c>OspfMikrotikOperations</c> with a null logger.
+    /// </summary>
     private static OspfMikrotikOperations CreateOps() =>
         new(NullLogger<OspfMikrotikOperations>.Instance);
 
+    /// <summary>
+    /// Builds a ROS6-sourced plan with one backhaul, one passive loopback and a single consolidated passive site template, with no provenance for superseded templates.
+    /// <param name="siteNetworks">Comma-separated networks carried by the consolidated site template.</param>
+    /// </summary>
     private static OspfMigrationPlan Plan(
         string siteNetworks = "10.16.11.0/24,100.64.0.0/10,172.16.0.0/12") =>
         new()
@@ -318,6 +391,17 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             ContentHash = "test",
         };
 
+    /// <summary>
+    /// Builds a raw RouterOS interface-template row as returned by <c>print</c>, omitting optional properties that are not supplied.
+    /// <param name="id">RouterOS <c>.id</c> of the row.</param>
+    /// <param name="area">Area name the template belongs to.</param>
+    /// <param name="interfaces">Interfaces property; omitted when blank.</param>
+    /// <param name="networks">Networks property.</param>
+    /// <param name="passive">Whether to emit the <c>passive</c> flag.</param>
+    /// <param name="type">Optional network type.</param>
+    /// <param name="cost">Optional cost.</param>
+    /// <param name="priority">Optional priority.</param>
+    /// </summary>
     private static Dictionary<string, string> Row(
         string id,
         string area,
@@ -363,6 +447,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         return d;
     }
 
+    /// <summary>
+    /// Builds a v7 inventory matching the plan (instance, three areas, MGMT range and the three planned templates) plus any extra templates.
+    /// <param name="plan">Plan whose backhaul, loopback and site template are mirrored in the inventory.</param>
+    /// <param name="extras">Additional templates, e.g. leftover more-specific management prefixes.</param>
+    /// </summary>
     private static OspfV7Inventory Inventory(
         OspfMigrationPlan plan,
         IEnumerable<OspfInterfaceTemplateRow> extras) =>
@@ -431,10 +520,21 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             ],
         };
 
+    /// <summary>
+    /// In-memory interface-template table that starts with the plan's backhaul, loopback and consolidated site
+    /// templates and is changed by the fake remove handler.
+    /// </summary>
     private sealed class MutableStore
     {
+        /// <summary>
+        /// Raw interface-template rows currently "on the router"; mutated as the fake processes removals.
+        /// </summary>
         public List<Dictionary<string, string>> Templates { get; } = [];
 
+        /// <summary>
+        /// Creates a store holding the plan's three templates (backhaul <c>*1</c>, loopback <c>*2</c>, consolidated site template <c>*A</c>).
+        /// <param name="plan">Plan to mirror.</param>
+        /// </summary>
         public static MutableStore WithPlanned(OspfMigrationPlan plan)
         {
             MutableStore store = new();
@@ -459,6 +559,9 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             return store;
         }
 
+        /// <summary>
+        /// Creates a <see cref="CapturingConnection"/> over this store with its fake RouterOS responses attached.
+        /// </summary>
         public CapturingConnection Connect()
         {
             CapturingConnection connection = new(this);
@@ -467,18 +570,43 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         }
     }
 
+    /// <summary>
+    /// Connection fake that serves interface-template print and remove from a mutable store, records removed ids
+    /// and print counts, and can fail a chosen remove.
+    /// </summary>
     private sealed class CapturingConnection : DisposeTrackingConnection
     {
+        /// <summary>
+        /// Router state backing the fake print/remove responses.
+        /// </summary>
         private readonly MutableStore _store;
+        /// <summary>
+        /// Underlying fake connection that serves scripted responses.
+        /// </summary>
         private readonly TikFakeConnection _fake;
+        /// <summary>
+        /// Most recent interface-template remove command, used to recover the <c>.id</c> being removed.
+        /// </summary>
         private ITikCommand? _pendingRemove;
+        /// <summary>
+        /// Number of remove calls handled so far, used to trigger <see cref="FailRemoveAtOrdinal"/>.
+        /// </summary>
         private int _removeOrdinal;
 
+        /// <summary>
+        /// Creates a connection over <paramref name="store"/> using a new fake RouterOS connection.
+        /// <param name="store">Router state the connection reads from and mutates.</param>
+        /// </summary>
         public CapturingConnection(MutableStore store)
             : this(store, new TikFakeConnection())
         {
         }
 
+        /// <summary>
+        /// Wraps the supplied fake so the same instance can be kept for registering responses.
+        /// <param name="store">Router state the connection reads from and mutates.</param>
+        /// <param name="fake">Fake connection that serves scripted responses.</param>
+        /// </summary>
         private CapturingConnection(MutableStore store, TikFakeConnection fake)
             : base(fake)
         {
@@ -486,10 +614,22 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             _fake = fake;
         }
 
+        /// <summary>
+        /// <c>.id</c> values successfully removed, in order.
+        /// </summary>
         public List<string> RemovedIds { get; } = [];
+        /// <summary>
+        /// Number of interface-template <c>print</c> calls served, used to prove inventory is re-read during cleanup.
+        /// </summary>
         public int PrintCount { get; private set; }
+        /// <summary>
+        /// 1-based ordinal of the remove call that should fail with an <see cref="InvalidOperationException"/>; <see langword="null"/> to never fail.
+        /// </summary>
         public int? FailRemoveAtOrdinal { get; set; }
 
+        /// <summary>
+        /// Registers scripted responses: template print/remove backed by <see cref="MutableStore"/>, instance and area inventory, empty area ranges and empty routing filters.
+        /// </summary>
         public void AttachFakeResponses()
         {
             _fake.WithResponse(
@@ -576,6 +716,9 @@ public sealed class OspfConsolidatedPrefixCleanupTests
                     static _ => [new TikFakeDoneSentence()]);
         }
 
+        /// <summary>
+        /// Creates the command and records it when it is an interface-template remove.
+        /// </summary>
         public override ITikCommand CreateCommand(string commandText, params ITikCommandParameter[] parameters)
         {
             ITikCommand cmd = base.CreateCommand(commandText, parameters);
@@ -583,6 +726,9 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Creates the command (with an explicit parameter format) and records it when it is an interface-template remove.
+        /// </summary>
         public override ITikCommand CreateCommand(
             string commandText,
             TikCommandParameterFormat defaultParameterFormat,
@@ -593,6 +739,9 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Creates the command from parameter names/values and records it when it is an interface-template remove.
+        /// </summary>
         public override ITikCommand CreateCommandAndParameters(
             string commandTextOrEmpty,
             params string[] parameterNamesAndValues)
@@ -602,6 +751,9 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Creates the command from parameter names/values (with an explicit parameter format) and records it when it is an interface-template remove.
+        /// </summary>
         public override ITikCommand CreateCommandAndParameters(
             string commandTextOrEmpty,
             TikCommandParameterFormat defaultParameterFormat,
@@ -615,6 +767,11 @@ public sealed class OspfConsolidatedPrefixCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Remembers <paramref name="cmd"/> as the pending remove when <paramref name="commandText"/> is <c>/routing/ospf/interface-template/remove</c>.
+        /// <param name="commandText">RouterOS command path being created.</param>
+        /// <param name="cmd">Command instance created for that path.</param>
+        /// </summary>
         private void Track(string commandText, ITikCommand cmd)
         {
             if (commandText == "/routing/ospf/interface-template/remove")

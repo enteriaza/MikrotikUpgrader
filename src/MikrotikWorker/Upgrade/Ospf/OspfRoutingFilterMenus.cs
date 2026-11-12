@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfRoutingFilterMenus.cs
+//
+// Description:
+// Version-specific RouterOS routing-filter menu paths and OSPF migration
+// cleanup scope.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
@@ -39,13 +48,31 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </remarks>
 internal static class OspfRoutingFilterMenus
 {
+    /// <summary>
+    /// RouterOS 6 command that lists routing filters.
+    /// </summary>
     public const string V6FilterPrint = "/routing/filter/print";
+    /// <summary>
+    /// RouterOS 6 command that removes a routing filter.
+    /// </summary>
     public const string V6FilterRemove = "/routing/filter/remove";
 
+    /// <summary>
+    /// RouterOS 7 command that lists routing filter rules.
+    /// </summary>
     public const string V7FilterRulePrint = "/routing/filter/rule/print";
+    /// <summary>
+    /// RouterOS 7 command that removes a routing filter rule.
+    /// </summary>
     public const string V7FilterRuleRemove = "/routing/filter/rule/remove";
 
+    /// <summary>
+    /// RouterOS 7 command that lists select rules, when the menu exists.
+    /// </summary>
     public const string V7FilterSelectRulePrint = "/routing/filter/select-rule/print";
+    /// <summary>
+    /// RouterOS 7 command that removes a select rule.
+    /// </summary>
     public const string V7FilterSelectRuleRemove = "/routing/filter/select-rule/remove";
 
     /// <summary>Supporting catalogues — never mutated by OSPF migration cleanup.</summary>

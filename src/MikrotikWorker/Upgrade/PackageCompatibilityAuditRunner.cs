@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: PackageCompatibilityAuditRunner.cs
+//
+// Description:
+// Opt-in CLI entry for non-live package compatibility auditing against
+// synthetic fixtures and the on-disk firmware catalogue. Does not connect to
+// routers.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -11,11 +21,25 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 internal static class PackageCompatibilityAuditRunner
 {
+    /// <summary>
+    /// Command-line switch that runs the synthetic fixture audit instead of the normal host.
+    /// </summary>
     public const string FixtureAuditArgument = "--audit-package-compatibility";
 
+    /// <summary>
+    /// Determines whether the command line asks for the fixture audit.
+    /// </summary>
+    /// <param name="args">Command-line arguments.</param>
+    /// <returns><see langword="true"/> when <see cref="FixtureAuditArgument"/> is present, ignoring case.</returns>
     public static bool IsFixtureAuditRequested(string[] args) =>
         args.Any(static a => string.Equals(a, FixtureAuditArgument, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Audits the synthetic fixtures against the firmware catalogue and writes the reports, without starting the full host or contacting any router.
+    /// </summary>
+    /// <param name="args">Command-line arguments; <c>--output</c> selects the report directory.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>The process exit code; zero on success.</returns>
     public static async Task<int> RunFixtureAuditAsync(
         string[] args,
         CancellationToken cancellationToken = default)
@@ -95,6 +119,11 @@ internal static class PackageCompatibilityAuditRunner
         }
     }
 
+    /// <summary>
+    /// Resolves the report directory from <c>--output</c>, defaulting to <c>Reports/PackageCompatibility</c> beside the application.
+    /// </summary>
+    /// <param name="args">Command-line arguments.</param>
+    /// <returns>The absolute output directory.</returns>
     private static string ResolveOutputDirectory(string[] args)
     {
         for (int i = 0; i < args.Length - 1; i++)

@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikApiClientLegacyCleanupAdapterTests.cs
+//
+// Description:
+// Tests legacy FleetUpgrade script/scheduler cleanup adapters on MikrotikApiClient
+// using exact-name match semantics (no wildcards).
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
@@ -7,13 +16,22 @@ using tik4net;
 using tik4net.Testing;
 
 namespace MikrotikWorker.Tests.MikroTik;
-/// <summary>
-/// Production-adapter tests for <see cref="MikrotikApiClient"/> legacy object removal.
-/// These inspect the actual tik4net commands/parameters issued by the production client —
-/// not the FakeOps used by cleanup unit tests.
-/// </summary>
+    /// <summary>
+    /// Scenario: Production <c>MikrotikApiClient</c> cleanup against a stateful fake where scheduler/script print
+    /// rows remain until their matching remove is observed.
+    /// Expected: the scheduler object is removed before the script object (by <c>.id</c>), matching fleet cleanup order.
+    /// Invariant: cleanup must not leave the named scheduler after the script has already been removed.
+    /// </summary>
 public sealed class MikrotikApiClientLegacyCleanupAdapterTests
 {
+    /// <summary>
+    /// Scenario: The scheduler print returns the legacy scheduler (<c>*A1</c>) and a similarly named
+    /// <c>FleetUpgrade-startup-old</c> (<c>*KEEP</c>); <c>RemoveSchedulersByNameAsync</c> is called with the legacy
+    /// name.
+    /// Expected: Exactly one <c>/system/scheduler/remove</c> is issued with <c>.id</c> = <c>*A1</c> and no
+    /// <c>numbers</c> parameter, and <c>*KEEP</c> is never removed.
+    /// Invariant: Removal matches the exact name and targets the object by <c>.id</c>, never by wildcard or number.
+    /// </summary>
     [Fact]
     public async Task RemoveSchedulersByName_UsesExactNameMatch_AndRemovesByObjectId()
     {
@@ -53,6 +71,13 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         Assert.DoesNotContain(capturing.RemoveCalls, static c => c.Parameters.Values.Contains("*KEEP"));
     }
 
+    /// <summary>
+    /// Scenario: The script print returns the legacy script (<c>*S1</c>) and <c>FleetUpgrade2</c> (<c>*S2</c>);
+    /// <c>RemoveSystemScriptsByNameAsync</c> is called with the legacy script name.
+    /// Expected: Exactly one <c>/system/script/remove</c> is issued with <c>.id</c> = <c>*S1</c>, and <c>*S2</c>
+    /// is never removed.
+    /// Invariant: A script whose name merely starts with the legacy name is left alone.
+    /// </summary>
     [Fact]
     public async Task RemoveSystemScriptsByName_UsesExactNameMatch_AndRemovesByObjectId()
     {
@@ -90,6 +115,13 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         Assert.DoesNotContain(capturing.RemoveCalls, static c => c.Parameters.Values.Contains("*S2"));
     }
 
+    /// <summary>
+    /// Scenario: The scheduler print returns two entries (<c>*1</c> and <c>*2</c>) that both have the exact legacy
+    /// name.
+    /// Expected: Two <c>/system/scheduler/remove</c> commands are issued, in order, each carrying its own <c>.id</c>
+    /// and no <c>numbers</c> parameter.
+    /// Invariant: Duplicate exact-name matches are all removed individually by ID.
+    /// </summary>
     [Fact]
     public async Task RemoveSchedulersByName_MultipleExactMatches_EachRemovedByOwnId()
     {
@@ -127,6 +159,12 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         Assert.All(capturing.RemoveCalls, static c => Assert.False(c.Parameters.ContainsKey("numbers")));
     }
 
+    /// <summary>
+    /// Scenario: The script print returns a row with the legacy name but no <c>.id</c> field.
+    /// Expected: <c>InvalidOperationException</c> is thrown with a message mentioning <c>.id</c>, and no remove
+    /// command is issued.
+    /// Invariant: An object that cannot be identified by ID is never removed.
+    /// </summary>
     [Fact]
     public async Task RemoveSystemScriptsByName_MissingObjectId_FailsWithoutRemove()
     {
@@ -154,6 +192,12 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         Assert.Empty(capturing.RemoveCalls);
     }
 
+    /// <summary>
+    /// Scenario: The script print returns the legacy name, a lower-case <c>fleetupgrade</c> and <c>FleetUpgrade2</c>;
+    /// <c>CountSystemScriptsByNameAsync</c> counts the legacy name.
+    /// Expected: The count is 1.
+    /// Invariant: Counting uses ordinal exact matching, ignoring case variants and longer names.
+    /// </summary>
     [Fact]
     public async Task CountByName_IsExactAndCaseSensitive()
     {
@@ -188,6 +232,12 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         Assert.Equal(1, count);
     }
 
+    /// <summary>
+    /// Scenario: Production MikrotikApiClient cleanup against a stateful fake where scheduler/script print
+    /// rows remain until their matching remove is observed.
+    /// Expected: the scheduler object is removed before the script object (by .id).
+    /// Invariant: cleanup must not leave the named scheduler after the script has already been removed.
+    /// </summary>
     [Fact]
     public async Task Cleanup_ThroughProductionClient_RemovesSchedulerBeforeScript_UsingIds()
     {
@@ -278,6 +328,13 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         Assert.True(schedulerVerifyPrint < firstScriptPrintAfterScheduler);
     }
 
+    /// <summary>
+    /// Scenario: <c>RemoveSchedulersByNameAsync</c> is called with an already cancelled token while the print would
+    /// return a matching scheduler.
+    /// Expected: <c>OperationCanceledException</c> is thrown, no remove call is recorded, and
+    /// <c>/system/scheduler/remove</c> is never issued.
+    /// Invariant: A cancelled cleanup never mutates the router.
+    /// </summary>
     [Fact]
     public async Task RemoveSchedulersByName_CancelledToken_PropagatesWithoutRemove()
     {
@@ -308,6 +365,10 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         Assert.DoesNotContain("/system/scheduler/remove", capturing.CommandTexts);
     }
 
+    /// <summary>
+    /// Helper used by this suite.
+    /// Key steps: Port = 8728.
+    /// </summary>
     private static MikrotikApiClient CreateClient() =>
         new(
             new ThrowingMikrotikConnectionFactory(new InvalidOperationException("unused")),
@@ -321,10 +382,13 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
     /// </summary>
     private sealed class ParameterCapturingConnection(ITikConnection inner) : DisposeTrackingConnection(inner)
     {
+        /// <summary>Commands whose text ends with <c>/remove</c>, kept so their parameters can be inspected.</summary>
         private readonly List<ITikCommand> _removeCommands = [];
 
+        /// <summary>Every command text passed to <c>CreateCommand</c>, in call order.</summary>
         public List<string> CommandTexts { get; } = [];
 
+        /// <summary>Snapshot of recorded <c>/remove</c> commands with their parameter name/value pairs.</summary>
         public IReadOnlyList<CapturedRemove> RemoveCalls =>
             _removeCommands
                 .Select(static cmd => new CapturedRemove(
@@ -335,6 +399,10 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
                         StringComparer.Ordinal)))
                 .ToArray();
 
+        /// <summary>Records <paramref name="commandText"/> (and the command when it is a <c>/remove</c>) before returning the real command.</summary>
+        /// <param name="commandText">Command path.</param>
+        /// <param name="parameters">Command parameters.</param>
+        /// <returns>The command created by the base fake connection.</returns>
         public override ITikCommand CreateCommand(string commandText, params ITikCommandParameter[] parameters)
         {
             CommandTexts.Add(commandText);
@@ -347,6 +415,11 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
             return real;
         }
 
+        /// <summary>Records <paramref name="commandText"/> (and the command when it is a <c>/remove</c>) before returning the real command.</summary>
+        /// <param name="commandText">Command path.</param>
+        /// <param name="defaultParameterFormat">Default format applied to parameters.</param>
+        /// <param name="parameters">Command parameters.</param>
+        /// <returns>The command created by the base fake connection.</returns>
         public override ITikCommand CreateCommand(
             string commandText,
             TikCommandParameterFormat defaultParameterFormat,
@@ -363,5 +436,8 @@ public sealed class MikrotikApiClientLegacyCleanupAdapterTests
         }
     }
 
+    /// <summary>
+    /// Snapshot of one captured remove command: its command text and the parameters that were added to it.
+    /// </summary>
     private sealed record CapturedRemove(string CommandText, IReadOnlyDictionary<string, string> Parameters);
 }

@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: RouterboardFirmwareAssessor.cs
+//
+// Description:
+// Decides whether /system/routerboard/upgrade is required by comparing RouterBOOT
+// current-firmware vs upgrade-firmware (not RouterOS package versions).
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Assessment;
 using MikrotikWorker.MikroTik;
 
@@ -9,6 +18,10 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 internal static class RouterboardFirmwareAssessor
 {
+    /// <summary>
+    /// Assesses RouterBOARD upgrade need from device info fields already read from the router.
+    /// Unparseable fields yield <see cref="RouterboardUpgradeDecision.Inconclusive"/> (no upgrade issued).
+    /// </summary>
     public static RouterboardUpgradeAssessment Assess(MikrotikDeviceInfo deviceInfo)
     {
         ArgumentNullException.ThrowIfNull(deviceInfo);
@@ -55,13 +68,28 @@ internal static class RouterboardFirmwareAssessor
     }
 }
 
+/// <summary>
+/// Decision from <see cref="RouterboardFirmwareAssessor.Assess"/>.
+/// </summary>
 internal enum RouterboardUpgradeDecision
 {
+    /// <summary>upgrade-firmware is newer than current-firmware; upgrade should be issued.</summary>
     UpgradeRequired = 0,
+
+    /// <summary>Current matches or is newer than upgrade-firmware; no upgrade / no downgrade.</summary>
     NotRequired = 1,
+
+    /// <summary>Fields could not both be parsed; assessor refuses to authorize an upgrade.</summary>
     Inconclusive = 2,
 }
 
+/// <summary>
+/// Assessment result including raw firmware strings and a human-readable reason.
+/// </summary>
+/// <param name="Decision">Upgrade decision.</param>
+/// <param name="CurrentFirmwareRaw">Raw <c>current-firmware</c> from the device.</param>
+/// <param name="UpgradeFirmwareRaw">Raw <c>upgrade-firmware</c> from the device.</param>
+/// <param name="Reason">Explanation suitable for logs and job detail.</param>
 internal sealed record RouterboardUpgradeAssessment(
     RouterboardUpgradeDecision Decision,
     string? CurrentFirmwareRaw,

@@ -1,3 +1,10 @@
+// -----------------------------------------------------------------------------
+// File: DeviceLogRoutingAndPromotionTests.cs
+//
+// Description:
+// Device log routing, promotion, and sink behaviour tests.
+//
+// -----------------------------------------------------------------------------
 using System.Net;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
@@ -9,8 +16,26 @@ using Serilog.Events;
 using Serilog.Parsing;
 
 namespace MikrotikWorker.Tests.Logging;
+/// <summary>
+/// Tests per-device logging: <c>DeviceLogWriter</c> append and key promotion (pending IP-based
+/// file to identity-based file), <c>DeviceLogScope</c> lifecycle, identity-safe file naming, and
+/// the Serilog filters that decide whether an event goes to a device file, the service log, or
+/// both.
+/// The recurring invariants are that no line is lost, duplicated or reordered during promotion,
+/// existing content is never truncated, and one router's events never reach another router's
+/// file.
+/// </summary>
 public sealed class DeviceLogRoutingAndPromotionTests
 {
+    /// <summary>
+    /// Lines written before, during and after promotion of a pending key all reach the identity file.
+    /// Preconditions: A, B go to "pending_10.0.0.1.log"; the key is promoted to "MikroTik.log"; C is
+    /// written to the identity key; "D-via-stale-key" is then written to the old pending key.
+    /// Expected: The pending file is gone and the identity file holds A, B, C and D exactly once
+    /// each, in that order.
+    /// Invariant: Promotion preserves order, does not duplicate or drop events, and redirects late
+    /// writes to a stale key.
+    /// </summary>
     [Fact]
     public async Task Promote_PreservesOrder_WithoutDuplication_OrLoss()
     {
@@ -44,6 +69,14 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.True(indexA < indexB && indexB < indexC && indexC < indexD);
     }
 
+    /// <summary>
+    /// A scope learns the router identity after it already logged lines under its pending key.
+    /// Preconditions: A scope for 198.18.0.83 with a fake clock; "pre-identity-line" is emitted, then
+    /// <c>SetRouterIdentity("MikroTik")</c>, then "post-identity-line".
+    /// Expected: "MikroTik_198.18.0.83.log" contains the "Device: MikroTik" header, then the
+    /// pre-identity line, then the post-identity line.
+    /// Invariant: The session header always precedes the promoted pending lines.
+    /// </summary>
     [Fact]
     public async Task ScopePromotion_WritesHeaderBeforePendingLines()
     {
@@ -68,6 +101,16 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.True(pending < after);
     }
 
+    /// <summary>
+    /// 40 writers log to a pending key while a promotion is issued, and 40 more then alternate
+    /// between the old and new keys.
+    /// Preconditions: A tiny queue capacity of 8 with blocking disabled, so writers can contend with
+    /// the consumer.
+    /// Expected: The identity file contains all 80 "pre-NN" and "post-NN" messages, and any residual
+    /// pending file is empty.
+    /// Invariant: Concurrent promotion never loses events and leaves no content stranded in the
+    /// pending file.
+    /// </summary>
     [Fact]
     public async Task Promote_ConcurrentWritesDuringPromotion_AreRedirectedSafely()
     {
@@ -111,6 +154,14 @@ public sealed class DeviceLogRoutingAndPromotionTests
         }
     }
 
+    /// <summary>
+    /// The identity log already exists from an earlier session and a new pending log is promoted onto
+    /// it.
+    /// Preconditions: "historical-line" is written to the identity key and "session-line" to a
+    /// pending key before promotion.
+    /// Expected: The identity file contains both lines with the historical line first.
+    /// Invariant: Promotion appends and never truncates an existing device log.
+    /// </summary>
     [Fact]
     public async Task Promote_AppendsToExistingIdentityFile_NeverTruncates()
     {
@@ -131,6 +182,14 @@ public sealed class DeviceLogRoutingAndPromotionTests
             < content.IndexOf("session-line", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A scope ends without ever discovering the router identity.
+    /// Preconditions: A scope for 10.9.9.9 (CSV name "CSV-NAME") emits one line and is disposed with
+    /// no <c>SetRouterIdentity</c> call.
+    /// Expected: "pending_10.9.9.9.log" exists with the line, and no "CSV-NAME.log" is created.
+    /// Invariant: Evidence from failed connections stays in the IP-based pending file and is not
+    /// renamed by guesswork.
+    /// </summary>
     [Fact]
     public async Task IdentityDiscoveryFailure_LeavesPendingFileIntact()
     {
@@ -150,6 +209,14 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.False(File.Exists(Path.Combine(harness.Writer.DeviceLogDirectory, "CSV-NAME.log")));
     }
 
+    /// <summary>
+    /// The writer is stopped while appends and a promotion are still queued.
+    /// Preconditions: 25 lines go to a pending key, the key is promoted to "DRAIN.log", and one more
+    /// line is written before <c>StopAsync</c>.
+    /// Expected: The identity file contains the first line, the last of the 25 lines and the
+    /// post-promotion line; <c>WriteFailureCount</c> is 0.
+    /// Invariant: Shutdown drains the queue completely before returning.
+    /// </summary>
     [Fact]
     public async Task ShutdownDrainsQueuedPromoteAndAppends()
     {
@@ -172,6 +239,15 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.Equal(0, harness.Writer.WriteFailureCount);
     }
 
+    /// <summary>
+    /// Promotion cannot append because the destination path is a directory.
+    /// Preconditions: A pending line exists and a directory named "FAILPROMOTE.log" is created in the
+    /// device folder.
+    /// Expected: <c>WriteFailureCount</c> is at least 1, the pending file still exists with its
+    /// content, and the directory is untouched.
+    /// Invariant: A failed promotion keeps the source evidence and reports through the main service
+    /// log, never the device log.
+    /// </summary>
     [Fact]
     public async Task PromoteFailure_IsCounted_LeavesPendingSource_AndUsesServiceLogPath()
     {
@@ -196,6 +272,13 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.True(Directory.Exists(identityPath));
     }
 
+    /// <summary>
+    /// Two routers report the same identity from different addresses.
+    /// Preconditions: Identity "MikroTik" at 198.18.0.83 and 198.18.0.84, resolved through one
+    /// identity registry.
+    /// Expected: The file names are "MikroTik_198.18.0.83.log" and "MikroTik_198.18.0.84.log".
+    /// Invariant: Duplicate identities never share a log file.
+    /// </summary>
     [Fact]
     public void CollisionSafeIdentity_DoesNotShareLogBetweenDifferentIps()
     {
@@ -207,6 +290,15 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.NotEqual(a, b);
     }
 
+    /// <summary>
+    /// Classifies five events against <c>DeviceLogFilters</c>.
+    /// Preconditions: A plain device-detail info event, a service-only event, a service-summary
+    /// event, a device warning, and an event with no device key.
+    /// Expected: Only the device-detail info event is excluded from the service log; the others are
+    /// kept; only the service-only event is reported by <c>IsServiceOnlyEvent</c>.
+    /// Invariant: Warnings, summaries and service-only events always remain visible in the service
+    /// log.
+    /// </summary>
     [Fact]
     public void DeviceDetail_IsExcludedFromServiceFilter_ServiceOnlyAndSummaryAreNot()
     {
@@ -238,6 +330,16 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.False(DeviceLogFilters.IsServiceOnlyEvent(detail));
     }
 
+    /// <summary>
+    /// A real Serilog pipeline with a device file sink and a collecting service sink routes four
+    /// kinds of event.
+    /// Preconditions: Markers are logged inside a <c>DeviceLogScope</c>: service-only, device detail,
+    /// a service summary, and a warning; the identity is set between them.
+    /// Expected: The device file has the detail, summary and warning but not the service-only marker;
+    /// the service sink has the service-only, summary and warning markers but not the detail marker.
+    /// Invariant: Detail lines live only in the device log, service-only lines only in the service
+    /// log.
+    /// </summary>
     [Fact]
     public async Task EndToEndRouting_DeviceDetailDoesNotEnterServiceLog_ServiceOnlyDoesNotEnterDeviceLog()
     {
@@ -308,6 +410,13 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.Contains(serviceMessages, static m => m.Contains("DEVICE_WARNING_MARKER", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Two devices with the same identity but different IPs log to their own files.
+    /// Preconditions: Keys come from <c>ResolveIdentityLogFileName</c> for "SAME" at 10.0.0.1 and
+    /// 10.0.0.2; "ONLY_A" and "ONLY_B" are emitted to the respective keys.
+    /// Expected: Each file contains only its own marker.
+    /// Invariant: Device logs are isolated from each other.
+    /// </summary>
     [Fact]
     public async Task DeviceA_EventsNeverAppearInDeviceB_Log()
     {
@@ -327,6 +436,13 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.DoesNotContain("ONLY_A", b, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The device routing property exists only while a scope is open.
+    /// Preconditions: A logger enriched from <c>LogContext</c> writes one event inside
+    /// <c>DeviceLogScope.Begin</c> and one after it is disposed.
+    /// Expected: The inside event carries the device-log-key property and the outside event does not.
+    /// Invariant: Events outside a scope are never routed to a device file.
+    /// </summary>
     [Fact]
     public void ScopeDispose_ClearsDeviceRoutingContext()
     {
@@ -350,6 +466,12 @@ public sealed class DeviceLogRoutingAndPromotionTests
         Assert.False(outside.Properties.ContainsKey(DeviceLogNaming.DeviceLogKeyPropertyName));
     }
 
+    /// <summary>
+    /// Creates a scheduled job whose schedule window is open now.
+    /// </summary>
+    /// <param name="ip">Router IP address text.</param>
+    /// <param name="name">Router name from the CSV row.</param>
+    /// <returns>A job for "a.csv" row 2.</returns>
     private static MikrotikScheduledJob CreateJob(string ip, string name) =>
         new()
         {
@@ -362,6 +484,12 @@ public sealed class DeviceLogRoutingAndPromotionTests
             DateStopUtc = DateTime.UtcNow.AddHours(1),
         };
 
+    /// <summary>
+    /// Counts non-overlapping ordinal occurrences of a substring.
+    /// </summary>
+    /// <param name="haystack">Text to search.</param>
+    /// <param name="needle">Substring to count.</param>
+    /// <returns>Number of occurrences.</returns>
     private static int CountOccurrences(string haystack, string needle)
     {
         int count = 0;
@@ -375,9 +503,23 @@ public sealed class DeviceLogRoutingAndPromotionTests
         return count;
     }
 
+    /// <summary>
+    /// Builds a scalar Serilog property for test events.
+    /// </summary>
+    /// <param name="name">Property name.</param>
+    /// <param name="value">Scalar value.</param>
+    /// <returns>The property.</returns>
     private static LogEventProperty Prop(string name, object value) =>
         new(name, new ScalarValue(value));
 
+    /// <summary>
+    /// Creates an Information-level event timestamped now, with the text parsed as its message
+    /// template.
+    /// </summary>
+    /// <param name="message">Message template text.</param>
+    /// <param name="properties">Properties to attach, such as the device log key or routing
+    /// markers.</param>
+    /// <returns>The event.</returns>
     private static LogEvent CreateEvent(string message, params LogEventProperty[] properties) =>
         new(
             DateTimeOffset.UtcNow,
@@ -386,31 +528,75 @@ public sealed class DeviceLogRoutingAndPromotionTests
             messageTemplate: new MessageTemplateParser().Parse(message),
             properties: properties);
 
+    /// <summary>
+    /// Serilog sink that keeps every event in memory so tests can inspect what reached it.
+    /// </summary>
     private sealed class CollectingSink : ILogEventSink
     {
+        /// <summary>
+        /// Events received, in arrival order.
+        /// </summary>
         public List<LogEvent> Events { get; } = [];
 
+        /// <summary>
+        /// Stores the event.
+        /// </summary>
+        /// <param name="logEvent">Event delivered by Serilog.</param>
         public void Emit(LogEvent logEvent) => Events.Add(logEvent);
     }
 
+    /// <summary>
+    /// Minimal development <c>IHostEnvironment</c> that satisfies
+    /// <c>SerilogConfigurator.Configure</c> without a real host.
+    /// </summary>
     private sealed class FakeEnv : Microsoft.Extensions.Hosting.IHostEnvironment
     {
+        /// <summary>
+        /// Environment name; "Development".
+        /// </summary>
         public string EnvironmentName { get; set; } = "Development";
 
+        /// <summary>
+        /// Application name; "MikrotikWorker.Tests".
+        /// </summary>
         public string ApplicationName { get; set; } = "MikrotikWorker.Tests";
 
+        /// <summary>
+        /// Content root; the test assembly's base directory.
+        /// </summary>
         public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
 
+        /// <summary>
+        /// Empty file provider, since no configuration files are read from the content root.
+        /// </summary>
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } =
             new Microsoft.Extensions.FileProviders.NullFileProvider();
     }
 
+    /// <summary>
+    /// Owns a started <c>DeviceLogWriter</c> rooted in a temporary folder and cleans it up
+    /// afterwards.
+    /// </summary>
     private sealed class DeviceLogHarness : IAsyncDisposable
     {
+        /// <summary>
+        /// Wraps an already started writer.
+        /// </summary>
+        /// <param name="writer">Started device log writer.</param>
         private DeviceLogHarness(DeviceLogWriter writer) => Writer = writer;
 
+        /// <summary>
+        /// Writer under test; its <c>DeviceLogDirectory</c> is where tests read the resulting files.
+        /// </summary>
         public DeviceLogWriter Writer { get; }
 
+        /// <summary>
+        /// Creates and starts a writer with device logging enabled in a new temp folder.
+        /// </summary>
+        /// <param name="capacity">Async queue capacity.</param>
+        /// <param name="blockWhenFull">Whether writers block (true) or overflow (false) when the queue is
+        /// full.</param>
+        /// <returns>A running harness.</returns>
         public static async Task<DeviceLogHarness> CreateAsync(int capacity = 1000, bool blockWhenFull = true)
         {
             string logRoot = Directory.CreateTempSubdirectory("devlog-audit-").FullName;
@@ -426,6 +612,10 @@ public sealed class DeviceLogRoutingAndPromotionTests
             return new DeviceLogHarness(writer);
         }
 
+        /// <summary>
+        /// Stops and disposes the writer, then deletes the temporary log root, ignoring cleanup failures.
+        /// </summary>
+        /// <returns>A task that completes once cleanup has finished.</returns>
         public async ValueTask DisposeAsync()
         {
             try

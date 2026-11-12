@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfProvenanceSemanticIdentityTests.cs
+//
+// Description:
+// Fake-based coverage for complete semantic provenance matching used by
+// KnownLegacy cleanup. Authentication secrets are never asserted or printed as
+// plaintext.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Upgrade.Ospf;
 using tik4net.Testing;
 
@@ -8,6 +18,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfProvenanceSemanticIdentityTests
 {
+    /// <summary>
+    /// Scenario: a live template (id <c>*L</c>) is built from provenance with every semantic property equal (vlan10, 10.99.99.0/27, broadcast, cost 1, priority 128, BFD off, no auth).
+    /// Expected: the report holds exactly one known-legacy row and no unknown rows.
+    /// Invariant: an exact semantic match is recognised as a known legacy template.
+    /// </summary>
     [Fact]
     public void ExactSemanticProvenance_IsKnownLegacy()
     {
@@ -26,6 +41,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: the live template matches provenance except for one property: cost, auth-id, priority, type, auth, hello/dead/retransmit interval, transmit-delay, instance-id, area-instance, prefix-list or either virtual-link field.
+    /// Expected: the template is classified unknown and classification refuses to proceed.
+    /// Invariant: any single semantic difference makes a template not safe to delete.
+    /// </summary>
     [Theory]
     [InlineData("cost", "10")]
     [InlineData("auth-id", "1")]
@@ -67,6 +87,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: the live template matches provenance except that an auth key (with fingerprint) is now present.
+    /// Expected: the template is classified unknown.
+    /// Invariant: the auth key is part of the identity, so adding one alone is enough to block deletion.
+    /// </summary>
     [Fact]
     public void AuthKeyOnlyDifference_IsUnknown()
     {
@@ -80,6 +105,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: the live template matches provenance except <c>use-bfd</c> is now "true".
+    /// Expected: the template is classified unknown.
+    /// Invariant: a BFD-only change blocks deletion.
+    /// </summary>
     [Fact]
     public void BfdOnlyDifference_IsUnknown()
     {
@@ -88,6 +118,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: the live template matches provenance except <c>Passive</c> is now false.
+    /// Expected: the template is classified unknown.
+    /// Invariant: a passive-state change blocks deletion.
+    /// </summary>
     [Fact]
     public void PassiveStateDifference_IsUnknown()
     {
@@ -96,6 +131,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: a disabled live template for 10.16.11.0/27 sits under the planned consolidated management prefix, so its recorded fingerprint differs from the live row.
+    /// Expected: it is classified as a single known-legacy row.
+    /// Invariant: containment under a consolidated prefix makes a disabled leftover obsolete even without a fingerprint match.
+    /// </summary>
     [Fact]
     public void DisabledLeftoverUnderManagement_IsKnownLegacyViaConsolidatedPrefix()
     {
@@ -108,6 +148,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
             Assert.Single(Classify(provenance, live).KnownLegacy).Classification);
     }
 
+    /// <summary>
+    /// Scenario: provenance lists networks as 10.99.99.0/27,10.99.99.32/27 while the live row lists them in reverse order.
+    /// Expected: the row is classified as a single known-legacy template.
+    /// Invariant: network lists are compared as sets, so order does not matter.
+    /// </summary>
     [Fact]
     public void NetworkListOrderDifference_StillMatches()
     {
@@ -123,6 +168,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
             Assert.Single(Classify(provenance, live).KnownLegacy).Classification);
     }
 
+    /// <summary>
+    /// Scenario: provenance lists interfaces as vlan-b,vlan-a while the live row lists vlan-a,vlan-b.
+    /// Expected: the row is classified as a single known-legacy template.
+    /// Invariant: interface lists are compared as sets, so order does not matter.
+    /// </summary>
     [Fact]
     public void InterfaceListOrderDifference_StillMatches()
     {
@@ -133,6 +183,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
             Assert.Single(Classify(provenance, live).KnownLegacy).Classification);
     }
 
+    /// <summary>
+    /// Scenario: the live row spells the default timers explicitly (hello 10s, dead 40s, retransmit 5s, transmit-delay 1s, instance-id 0) while provenance leaves them unset.
+    /// Expected: the row is classified as a single known-legacy template.
+    /// Invariant: an explicit default value is equivalent to an absent one.
+    /// </summary>
     [Fact]
     public void TimerDefaultRepresentations_AreEquivalent()
     {
@@ -150,6 +205,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
             Assert.Single(Classify(provenance, live).KnownLegacy).Classification);
     }
 
+    /// <summary>
+    /// Scenario: the plan has no superseded identities, and the live inventory has the planned templates plus a 10.16.11.0/27 template on vlan10.
+    /// Expected: exactly one known-legacy row whose reason contains <c>Consolidated-prefix replacement</c>, and nothing unknown.
+    /// Invariant: a management subdivision is classified through desired-state containment even when no provenance was recorded.
+    /// </summary>
     [Fact]
     public void MissingProvenance_CompatibleManagementSubdivision_IsKnownLegacyViaDesiredState()
     {
@@ -170,6 +230,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: the plan has no superseded identities, and the live inventory has an extra 192.0.2.0/24 template outside the consolidated prefix.
+    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "No deletion was attempted" and "consolidated-prefix replacement".
+    /// Invariant: without provenance, only templates contained in the consolidated prefix may be treated as obsolete.
+    /// </summary>
     [Fact]
     public void MissingProvenance_UnrelatedPrefix_IsUnknown()
     {
@@ -187,6 +252,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         Assert.Contains("consolidated-prefix replacement", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Scenario: the live row carries an unparseable value for cost, priority, or a timer or instance-id property (for example "not-a-number" or "bogus").
+    /// Expected: the template is classified unknown.
+    /// Invariant: a malformed value is never normalised into a match.
+    /// </summary>
     [Theory]
     [InlineData("cost", "not-a-number")]
     [InlineData("priority", "bad")]
@@ -213,6 +283,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: the live row has the id <c>*OTHER</c> but identical semantics to the recorded provenance.
+    /// Expected: the row is classified as a single known-legacy template.
+    /// Invariant: matching is by semantic identity, not by RouterOS row id.
+    /// </summary>
     [Fact]
     public void DifferentId_SameSemantics_Matches()
     {
@@ -222,6 +297,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
             Assert.Single(Classify(provenance, LiveFrom(provenance, "*OTHER")).KnownLegacy).Classification);
     }
 
+    /// <summary>
+    /// Scenario: the legacy template's cost is changed to 10 after provenance was recorded, and <c>RemoveObsoleteTemplatesAsync</c> runs.
+    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
+    /// Invariant: a configuration drift after capture aborts cleanup before any deletion.
+    /// </summary>
     [Fact]
     public async Task ConfigurationModifiedAfterProvenance_AbortsCleanupWithZeroDeletes()
     {
@@ -266,6 +346,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         Assert.Equal(0, removes);
     }
 
+    /// <summary>
+    /// Scenario: one timer or instance-id property of the live legacy template is changed after provenance was recorded, and <c>RemoveObsoleteTemplatesAsync</c> runs.
+    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
+    /// Invariant: drift in timer or instance-id values aborts cleanup before any deletion.
+    /// </summary>
     [Theory]
     [InlineData("hello-interval", "1s")]
     [InlineData("dead-interval", "3s")]
@@ -313,6 +398,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         Assert.Equal(0, removes);
     }
 
+    /// <summary>
+    /// Scenario: two provenance identities (vlan10 and vlan20 on separate /27s) are classified against two live rows (<c>*L1</c> and <c>*L2</c>).
+    /// Expected: both rows are known legacy and nothing is unknown.
+    /// Invariant: each superseded identity is matched on its own, with no interference between entries.
+    /// </summary>
     [Fact]
     public void MultipleSupersededIdentities_MatchIndependently()
     {
@@ -326,6 +416,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: the plan content hash is recomputed after changing one provenance property (cost, auth, auth-id, priority, use-bfd, a timer, instance-id, area-instance, prefix-list, a virtual-link field, passive, disabled or type).
+    /// Expected: each change produces a hash different from the base plan hash.
+    /// Invariant: every semantic provenance property is covered by the content hash, so tampering invalidates the plan.
+    /// </summary>
     [Theory]
     [InlineData("cost", "10")]
     [InlineData("auth", "md5")]
@@ -374,22 +469,41 @@ public sealed class OspfProvenanceSemanticIdentityTests
         Assert.NotEqual(hash1, OspfMigrationPlanner.ComputeContentHash(BasePlan([changed])));
     }
 
+    /// <summary>
+    /// Asserts that the exception reports unknown templates and states that no deletion was attempted.
+    /// </summary>
     private static void AssertUnknown(InvalidOperationException ex)
     {
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Contains("unknown", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Classifies the live template against the provenance and returns the <c>InvalidOperationException</c> that
+    /// classification is expected to throw.
+    /// </summary>
     private static InvalidOperationException ClassifyExpectThrow(
         OspfSupersededTemplateIdentity provenance,
         OspfTemplateInventoryRow live) =>
         Assert.Throws<InvalidOperationException>(() => Classify(provenance, live));
 
+    /// <summary>
+    /// Classifies the planned backhaul, loopback and site templates plus <paramref name="extras"/> against a single provenance record.
+    /// <param name="provenance">Superseded-template identity recorded in the plan.</param>
+    /// <param name="extras">Additional live templates to classify alongside the planned ones.</param>
+    /// <returns>The classification report; throws <see cref="InvalidOperationException"/> when unknown templates are found.</returns>
+    /// </summary>
     private static OspfTemplateClassificationReport Classify(
         OspfSupersededTemplateIdentity provenance,
         params OspfTemplateInventoryRow[] extras) =>
         Classify([provenance], extras);
 
+    /// <summary>
+    /// Classifies the planned backhaul, loopback and site templates plus <paramref name="extras"/> against the given provenance records, failing closed on unknown templates.
+    /// <param name="provenance">Superseded-template identities recorded in the plan.</param>
+    /// <param name="extras">Additional live templates to classify alongside the planned ones.</param>
+    /// <returns>The classification report.</returns>
+    /// </summary>
     private static OspfTemplateClassificationReport Classify(
         IReadOnlyList<OspfSupersededTemplateIdentity> provenance,
         params OspfTemplateInventoryRow[] extras)
@@ -404,6 +518,32 @@ public sealed class OspfProvenanceSemanticIdentityTests
         return OspfTemplateCleanupClassifier.ClassifyOrThrow(BasePlan(provenance), rows);
     }
 
+    /// <summary>
+    /// Builds a captured superseded-template identity for the <c>site</c> area from the supplied properties; auth keys are only fingerprinted, never stored as plaintext.
+    /// <param name="interfaces">Interfaces property of the legacy template.</param>
+    /// <param name="networks">Networks property of the legacy template.</param>
+    /// <param name="type">Network type; <see langword="null"/> uses the RouterOS default.</param>
+    /// <param name="cost">Interface cost; <see langword="null"/> uses the default.</param>
+    /// <param name="auth">Authentication method; <see langword="null"/> uses the default.</param>
+    /// <param name="authId">Authentication key id.</param>
+    /// <param name="authKey">Authentication key; only its presence and fingerprint are captured.</param>
+    /// <param name="priority">Router priority; <see langword="null"/> uses the default.</param>
+    /// <param name="useBfd">Whether BFD is enabled; <see langword="null"/> uses the default.</param>
+    /// <param name="disabled">Whether the template is disabled.</param>
+    /// <param name="passive">Whether the template is passive.</param>
+    /// <param name="helloInterval">Hello interval; <see langword="null"/> uses the default.</param>
+    /// <param name="deadInterval">Dead interval; <see langword="null"/> uses the default.</param>
+    /// <param name="retransmitInterval">Retransmit interval; <see langword="null"/> uses the default.</param>
+    /// <param name="transmitDelay">Transmit delay; <see langword="null"/> uses the default.</param>
+    /// <param name="instanceId">OSPF instance id; <see langword="null"/> uses the default.</param>
+    /// <param name="areaInstanceName">Instance the area belongs to.</param>
+    /// <param name="prefixList">Prefix list reference.</param>
+    /// <param name="vlinkNeighborId">Virtual-link neighbour id.</param>
+    /// <param name="vlinkTransitArea">Virtual-link transit area.</param>
+    /// <param name="comment">Template comment.</param>
+    /// <param name="authKeyAmbiguous">Whether the auth key could not be read unambiguously.</param>
+    /// <returns>The captured semantic identity.</returns>
+    /// </summary>
     private static OspfSupersededTemplateIdentity Provenance(
         string interfaces,
         string networks,
@@ -467,6 +607,10 @@ public sealed class OspfProvenanceSemanticIdentityTests
             });
     }
 
+    /// <summary>
+    /// Builds the live interface-template row with the given id that a provenance identity would produce,
+    /// converting default tokens and intervals to RouterOS values.
+    /// </summary>
     private static OspfTemplateInventoryRow LiveFrom(OspfSupersededTemplateIdentity p, string id) =>
         new()
         {
@@ -505,6 +649,14 @@ public sealed class OspfProvenanceSemanticIdentityTests
             Comment = p.Comment,
         };
 
+    /// <summary>
+    /// Builds a plain live template row with default broadcast type, cost 1, priority 128 and no BFD.
+    /// <param name="id">RouterOS <c>.id</c> of the row.</param>
+    /// <param name="area">Area name.</param>
+    /// <param name="interfaces">Interfaces property.</param>
+    /// <param name="networks">Networks property.</param>
+    /// <param name="passive">Whether the template is passive.</param>
+    /// </summary>
     private static OspfTemplateInventoryRow LiveRow(
         string id,
         string area,
@@ -526,6 +678,9 @@ public sealed class OspfProvenanceSemanticIdentityTests
             AreaInstanceName = "default-v2",
         };
 
+    /// <summary>
+    /// Builds the live row for the planned backhaul template (<c>eth-01_BH</c>, 10.16.248.76/30, ptp, cost 10).
+    /// </summary>
     private static OspfTemplateInventoryRow PlannedBackhaul() =>
         new()
         {
@@ -542,6 +697,9 @@ public sealed class OspfProvenanceSemanticIdentityTests
             AreaInstanceName = "default-v2",
         };
 
+    /// <summary>
+    /// Builds the live row for the planned loopback template (<c>Loopback</c>, 10.16.0.11/32, passive).
+    /// </summary>
     private static OspfTemplateInventoryRow PlannedLoopback() =>
         new()
         {
@@ -558,6 +716,9 @@ public sealed class OspfProvenanceSemanticIdentityTests
             AreaInstanceName = "default-v2",
         };
 
+    /// <summary>
+    /// Builds the live row for the planned consolidated site template (<c>all</c> interfaces, 10.16.11.0/24, 100.64.0.0/10 and 172.16.0.0/12, passive).
+    /// </summary>
     private static OspfTemplateInventoryRow PlannedSite() =>
         new()
         {
@@ -574,6 +735,10 @@ public sealed class OspfProvenanceSemanticIdentityTests
             AreaInstanceName = "default-v2",
         };
 
+    /// <summary>
+    /// Builds a valid RouterOS v7 plan (backhaul, loopback, consolidated site template) carrying the supplied superseded-template provenance.
+    /// <param name="superseded">Provenance records to attach to the plan.</param>
+    /// </summary>
     private static OspfMigrationPlan BasePlan(IReadOnlyList<OspfSupersededTemplateIdentity> superseded) =>
         new()
         {
@@ -637,6 +802,9 @@ public sealed class OspfProvenanceSemanticIdentityTests
             ContentHash = "x",
         };
 
+    /// <summary>
+    /// Builds the fake <c>/routing/ospf/area/print</c> response containing the <c>backbone-v2</c> and <c>site</c> areas.
+    /// </summary>
     private static tik4net.ITikSentence[] AreaPrintSentences() =>
     [
         new TikFakeReSentence(new Dictionary<string, string>
@@ -656,6 +824,9 @@ public sealed class OspfProvenanceSemanticIdentityTests
         new TikFakeDoneSentence(),
     ];
 
+    /// <summary>
+    /// Builds a raw template row for the backbone backhaul with ptp type and cost 10.
+    /// </summary>
     private static Dictionary<string, string> DictBackhaul() => new()
     {
         [".id"] = "*1",
@@ -667,6 +838,9 @@ public sealed class OspfProvenanceSemanticIdentityTests
         ["disabled"] = "false",
     };
 
+    /// <summary>
+    /// Builds the raw RouterOS row for the planned loopback template.
+    /// </summary>
     private static Dictionary<string, string> DictLoopback() => new()
     {
         [".id"] = "*9",
@@ -681,6 +855,9 @@ public sealed class OspfProvenanceSemanticIdentityTests
         ["use-bfd"] = "false",
     };
 
+    /// <summary>
+    /// Builds the raw RouterOS row for the planned consolidated site template.
+    /// </summary>
     private static Dictionary<string, string> DictSite() => new()
     {
         [".id"] = "*A",
@@ -695,6 +872,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
         ["use-bfd"] = "false",
     };
 
+    /// <summary>
+    /// Builds the raw RouterOS row for a legacy site template (<c>*L</c>) with default broadcast semantics and the given interfaces and networks.
+    /// <param name="interfaces">Interfaces property of the legacy row.</param>
+    /// <param name="networks">Networks property of the legacy row.</param>
+    /// </summary>
     private static Dictionary<string, string> DictLegacy(string interfaces, string networks) => new()
     {
         [".id"] = "*L",

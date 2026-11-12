@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: LivePackageCompatibilityAuditReportWriter.cs
+//
+// Description:
+// Writes live fleet package-compatibility audit results to CSV and JSON under
+// the configured report directory.
+//
+// -----------------------------------------------------------------------------
+
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
@@ -6,14 +15,27 @@ using System.Text.Json.Serialization;
 
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// Writes live fleet package-compatibility audit CSV and JSON report files.
+/// </summary>
 internal static class LivePackageCompatibilityAuditReportWriter
 {
+    /// <summary>
+    /// Indented JSON that omits null values.
+    /// </summary>
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    /// <summary>
+    /// Writes the fleet audit report as a CSV and a JSON file, choosing file names that do not overwrite earlier reports.
+    /// </summary>
+    /// <param name="outputDirectory">Directory to write into; created when missing.</param>
+    /// <param name="report">Report to write.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>The paths of the CSV and JSON files written.</returns>
     public static async Task<(string CsvPath, string JsonPath)> WriteAsync(
         string outputDirectory,
         LiveFleetAuditReport report,
@@ -51,6 +73,9 @@ internal static class LivePackageCompatibilityAuditReportWriter
     private static string SerializeReport(LiveFleetAuditReport report) =>
         JsonSerializer.Serialize(ToJsonPayload(report), JsonOptions);
 
+    /// <summary>
+    /// Formats the fleet audit as CSV text.
+    /// </summary>
     public static string FormatCsv(LiveFleetAuditReport report)
     {
         StringBuilder sb = new();
@@ -113,6 +138,11 @@ internal static class LivePackageCompatibilityAuditReportWriter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Projects the report into the camelCase shape serialized to JSON.
+    /// </summary>
+    /// <param name="report">Report to project.</param>
+    /// <returns>An anonymous object ready for serialization.</returns>
     private static object ToJsonPayload(LiveFleetAuditReport report) =>
         new
         {
@@ -199,6 +229,12 @@ internal static class LivePackageCompatibilityAuditReportWriter
             }),
         };
 
+    /// <summary>
+    /// Returns a path in the directory that does not yet exist, adding a numeric suffix when the file name is taken.
+    /// </summary>
+    /// <param name="directory">Target directory.</param>
+    /// <param name="fileName">Preferred file name.</param>
+    /// <returns>An unused file path.</returns>
     private static string UniquePath(string directory, string fileName)
     {
         string path = Path.Combine(directory, fileName);
@@ -221,6 +257,11 @@ internal static class LivePackageCompatibilityAuditReportWriter
         return Path.Combine(directory, $"{name}-{Guid.NewGuid():N}{ext}");
     }
 
+    /// <summary>
+    /// Escapes a value for CSV, quoting it when it contains a quote, comma, or line break.
+    /// </summary>
+    /// <param name="value">Text to escape; null is treated as empty.</param>
+    /// <returns>The CSV-safe text.</returns>
     private static string Escape(string? value)
     {
         string text = value ?? string.Empty;

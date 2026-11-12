@@ -1,13 +1,27 @@
+// -----------------------------------------------------------------------------
+// File: FirmwarePackageCatalog.cs
+//
+// Description:
+// Scans FirmwareFiles for parseable *.npk packages, computes SHA-256, and exposes
+// IFirmwarePackageCatalog for assessors and upgrade package resolvers.
+//
+// -----------------------------------------------------------------------------
+
 using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 
 namespace MikrotikWorker.Assessment;
 
+/// <summary>
+/// Provides discovered firmware packages from the configured FirmwareFiles tree.
+/// </summary>
 internal interface IFirmwarePackageCatalog
 {
+    /// <summary>All parseable <c>*.npk</c> packages under the firmware root.</summary>
     IReadOnlyList<FirmwarePackageInfo> GetPackages();
 
+    /// <summary>Subset where <see cref="FirmwarePackageInfo.PackageName"/> is <c>routeros</c>.</summary>
     IReadOnlyList<FirmwarePackageInfo> GetRouterOsPackages();
 }
 
@@ -16,9 +30,11 @@ internal interface IFirmwarePackageCatalog
 /// </summary>
 internal sealed class FirmwarePackageCatalog(IOptions<FirmwareFilesOptions> options) : IFirmwarePackageCatalog
 {
+    /// <inheritdoc />
     public IReadOnlyList<FirmwarePackageInfo> GetRouterOsPackages() =>
         GetPackages().Where(static p => p.PackageName.Equals("routeros", StringComparison.Ordinal)).ToList();
 
+    /// <inheritdoc />
     public IReadOnlyList<FirmwarePackageInfo> GetPackages()
     {
         string root = options.Value.GetAbsolutePath();
@@ -54,6 +70,7 @@ internal sealed class FirmwarePackageCatalog(IOptions<FirmwareFilesOptions> opti
         return packages;
     }
 
+    /// <summary>Computes lowercase hex SHA-256 for <paramref name="path"/>.</summary>
     internal static string ComputeSha256Hex(string path)
     {
         using FileStream stream = File.OpenRead(path);
@@ -61,6 +78,7 @@ internal sealed class FirmwarePackageCatalog(IOptions<FirmwareFilesOptions> opti
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
+    /// <summary>Returns a forward-slash relative URL path under the firmware root.</summary>
     internal static string GetRelativeUrlPath(string firmwareRoot, string fullPath)
     {
         string relative = Path.GetRelativePath(firmwareRoot, fullPath).Replace('\\', '/');

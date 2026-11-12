@@ -1,6 +1,22 @@
+// -----------------------------------------------------------------------------
+// File: FirmwarePathTests.cs
+//
+// Description:
+// Tests FirmwareFilesOptions path resolution (relative vs absolute) and RequestPath
+// constant used by the static firmware middleware.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Tests.Configuration;
+/// <summary>
+/// Validates FirmwareFilesOptions path helpers and request path constant.
+/// </summary>
 public sealed class FirmwarePathTests
 {
+    /// <summary>
+    /// Relative Path=FirmwareFiles with default GetAbsolutePath.
+    /// Expects full path under AppContext.BaseDirectory, not an arbitrary CWD.
+    /// </summary>
     [Fact]
     public void RelativeFirmwarePath_ResolvesAgainstAppContextBaseDirectory()
     {
@@ -13,6 +29,10 @@ public sealed class FirmwarePathTests
             resolved);
     }
 
+    /// <summary>
+    /// Absolute Path with an ignored baseDirectory argument.
+    /// Expects the absolute path returned unchanged.
+    /// </summary>
     [Fact]
     public void AbsoluteFirmwarePath_IsPreserved()
     {
@@ -24,6 +44,10 @@ public sealed class FirmwarePathTests
         Assert.Equal(absolutePath, resolved);
     }
 
+    /// <summary>
+    /// Process CWD moved to temp while baseDirectory is a simulated app base.
+    /// Expects resolution against the simulated base, not Directory.GetCurrentDirectory().
+    /// </summary>
     [Fact]
     public void ChangingProcessWorkingDirectory_DoesNotChangeFirmwarePathResolution()
     {
@@ -52,6 +76,10 @@ public sealed class FirmwarePathTests
         }
     }
 
+    /// <summary>
+    /// TestHostFactory.CreateApplication pointed at a non-existent firmware root.
+    /// Expects OptionsValidationException mentioning Firmware directory does not exist.
+    /// </summary>
     [Fact]
     public void MissingFirmwareDirectory_PreventsStartup()
     {

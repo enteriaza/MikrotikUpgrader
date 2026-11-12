@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: DeviceIdentityClassification.cs
+//
+// Description:
+// Device-type prefixes, identity classification result, and DeviceIdentityClassifier
+// for the standard TYPEdd.POPddd.ddd.sss naming convention. All types remain
+// RouterOS 7 eligible; OSPF capture/plan validation is the fail-closed gate.
+//
+// -----------------------------------------------------------------------------
+
 using System.Diagnostics.CodeAnalysis;
 using System.Text.RegularExpressions;
 
@@ -8,10 +18,19 @@ namespace MikrotikWorker.Upgrade;
 /// </summary>
 public enum DeviceType
 {
+    /// <summary>Identity missing, empty, or not matching the standard pattern.</summary>
     Unknown = 0,
+
+    /// <summary>ACE (access) device type prefix.</summary>
     Ace = 1,
+
+    /// <summary>AP (access point) device type prefix.</summary>
     Ap = 2,
+
+    /// <summary>BR (border/backbone) device type prefix.</summary>
     Br = 3,
+
+    /// <summary>DCL device type prefix.</summary>
     Dcl = 4,
 }
 
@@ -20,6 +39,7 @@ public enum DeviceType
 /// </summary>
 public sealed class DeviceIdentityClassification
 {
+    /// <summary>Parsed device type, or <see cref="DeviceType.Unknown"/>.</summary>
     public required DeviceType DeviceType { get; init; }
 
     /// <summary>
@@ -38,6 +58,9 @@ public sealed class DeviceIdentityClassification
     /// </summary>
     public bool ShouldUpgradeToV7 => true;
 
+    /// <summary>
+    /// Human-readable eligibility reason used in logs and blocked-path detail text.
+    /// </summary>
     public string PolicyReason => DeviceType switch
     {
         DeviceType.Ace => "Device type ACE is eligible for RouterOS 7",
@@ -64,6 +87,10 @@ public static partial class DeviceIdentityClassifier
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.ExplicitCapture)]
     private static partial Regex StandardIdentityPattern();
 
+    /// <summary>
+    /// Classifies <paramref name="identity"/> into a <see cref="DeviceIdentityClassification"/>.
+    /// Never throws into the upgrade workflow.
+    /// </summary>
     public static DeviceIdentityClassification Classify(string? identity)
     {
         try
@@ -110,6 +137,9 @@ public static partial class DeviceIdentityClassifier
         }
     }
 
+    /// <summary>
+    /// Maps a matched type token to <see cref="DeviceType"/>; unknown tokens become Unknown.
+    /// </summary>
     private static DeviceType ParseType(string token) =>
         token.ToUpperInvariant() switch
         {

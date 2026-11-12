@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfProvenanceCommentAuthBfdTests.cs
+//
+// Description:
+// Comment, auth-key alias, use-bfd and type-canonicalisation provenance
+// coverage. Secrets are asserted only via fingerprints / presence markers —
+// never plaintext.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Upgrade.Ospf;
 using tik4net.Testing;
 
@@ -8,6 +18,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfProvenanceCommentAuthBfdTests
 {
+    /// <summary>
+    /// Scenario: the live template is built from provenance and its comment is still exactly "ops:vlan10".
+    /// Expected: the classifier reports it as known legacy.
+    /// Invariant: an unchanged comment is part of an exact semantic identity match.
+    /// </summary>
     [Fact]
     public void ExactCommentMatch_IsKnownLegacy()
     {
@@ -15,6 +30,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertKnownLegacy(Classify(provenance, LiveFrom(provenance)));
     }
 
+    /// <summary>
+    /// Scenario: the captured comment (null or "original") differs from the live comment ("added" or "changed").
+    /// Expected: the live template is classified unknown, and classification refuses to proceed.
+    /// Invariant: a comment edited after capture means someone touched the template, so it is not safe to delete.
+    /// </summary>
     [Theory]
     [InlineData(null, "added")]
     [InlineData("original", "changed")]
@@ -25,6 +45,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: provenance recorded comment "original" for a template under the planned consolidated management prefix, and the live comment is now null.
+    /// Expected: the template is still classified known legacy.
+    /// Invariant: under a consolidated prefix, attribute-only differences such as comment do not block removing an obsolete template.
+    /// </summary>
     [Fact]
     public void CommentClearedUnderConsolidatedPrefix_IsKnownLegacy()
     {
@@ -35,6 +60,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertKnownLegacy(Classify(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: provenance has no comment, and the live comment is first "" and then null.
+    /// Expected: both variants classify as known legacy.
+    /// Invariant: an absent comment and an empty comment are the same value.
+    /// </summary>
     [Fact]
     public void CommentAbsentAndEmpty_AreEquivalent()
     {
@@ -43,6 +73,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertKnownLegacy(Classify(provenance, LiveFrom(provenance) with { Comment = null }));
     }
 
+    /// <summary>
+    /// Scenario: the same secret arrives through <c>auth-key</c>, <c>authentication-key</c>, or both with equal values, and the live row carries its fingerprint.
+    /// Expected: <c>ResolveAuthKey</c> yields a present, unambiguous resolution with the secret's fingerprint, and the template classifies as known legacy.
+    /// Invariant: RouterOS auth-key aliases resolve to one canonical fingerprint, so alias spelling does not hide a match.
+    /// </summary>
     [Theory]
     [InlineData("auth-key")]
     [InlineData("authentication-key")]
@@ -73,6 +108,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertKnownLegacy(Classify(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: <c>auth-key</c> is "alpha" while <c>authentication-key</c> is "beta", and the live row is marked ambiguous.
+    /// Expected: the resolution is ambiguous and not present, and the template is classified unknown.
+    /// Invariant: conflicting auth-key aliases are never resolved by guessing, and block deletion.
+    /// </summary>
     [Fact]
     public void ConflictingAuthKeyAliases_AreUnknown()
     {
@@ -91,6 +131,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: the live row gains an auth key that provenance did not have ("add"), or carries a different key from the one captured ("change").
+    /// Expected: the template is classified unknown.
+    /// Invariant: an added or rotated auth key after capture marks a template as modified and not safe to delete.
+    /// </summary>
     [Theory]
     [InlineData("add")]
     [InlineData("change")]
@@ -118,6 +163,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: provenance recorded an auth key for a template under the consolidated management prefix, and the live row now has no key and no auth.
+    /// Expected: the template is classified known legacy.
+    /// Invariant: under a consolidated prefix, losing an auth key does not stop removal of an obsolete template.
+    /// </summary>
     [Fact]
     public void AuthKeyRemovedUnderConsolidatedPrefix_IsKnownLegacy()
     {
@@ -131,6 +181,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertKnownLegacy(Classify(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: provenance recorded auth md5 with a key, and the live row now reports auth sha256.
+    /// Expected: the template is classified unknown.
+    /// Invariant: a changed authentication method means the template no longer matches what was captured.
+    /// </summary>
     [Fact]
     public void AuthMethodChanged_IsUnknown()
     {
@@ -139,6 +194,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: <c>NormalizeUseBfd</c> is fed null, false/no/0 and true/yes/1 spellings.
+    /// Expected: null and the false spellings normalise to "false", and the true spellings normalise to "true".
+    /// Invariant: every RouterOS spelling of a boolean BFD flag compares as the same canonical token.
+    /// </summary>
     [Theory]
     [InlineData(null, "false")]
     [InlineData("false", "false")]
@@ -152,6 +212,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         Assert.Equal(expectedToken, OspfTemplateSemanticIdentity.NormalizeUseBfd(raw));
     }
 
+    /// <summary>
+    /// Scenario: the live <c>use-bfd</c> value is the unrecognised string "maybe".
+    /// Expected: the template is classified unknown.
+    /// Invariant: a value that cannot be normalised is never assumed to match the provenance.
+    /// </summary>
     [Fact]
     public void UseBfd_Malformed_IsUnknown()
     {
@@ -160,6 +225,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: <c>NormalizeType</c> is fed nbma, ptmp, point-to-multipoint, ptp-unnumbered, virtual-link, ptmp-broadcast, ptp, point-to-point, broadcast, null and a custom value.
+    /// Expected: long and short aliases collapse (point-to-multipoint to ptmp, point-to-point to ptp), broadcast and null become "default", and other types are preserved.
+    /// Invariant: only true aliases and the default are merged, so distinct network types stay distinct.
+    /// </summary>
     [Theory]
     [InlineData("nbma", "nbma")]
     [InlineData("ptmp", "ptmp")]
@@ -177,6 +247,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         Assert.Equal(expected, OspfTemplateSemanticIdentity.NormalizeType(raw));
     }
 
+    /// <summary>
+    /// Scenario: provenance recorded type broadcast (the default), and the live row now has type nbma.
+    /// Expected: the template is classified unknown.
+    /// Invariant: nbma is never treated as equivalent to the broadcast default.
+    /// </summary>
     [Fact]
     public void Type_NbmaDoesNotMatchBroadcastDefault()
     {
@@ -185,6 +260,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         AssertUnknown(ClassifyExpectThrow(provenance, live));
     }
 
+    /// <summary>
+    /// Scenario: content hashes are computed for plans whose provenance differs only by comment or auth key.
+    /// Expected: the hash differs between no comment and comment "x", between no key and key "k1", and between keys "k1" and "k2".
+    /// Invariant: the plan content hash covers comment and auth-key identity, so tampering with them invalidates the plan.
+    /// </summary>
     [Fact]
     public void PlanHash_ChangesForCommentAndAuthKey()
     {
@@ -200,6 +280,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
             OspfMigrationPlanner.ComputeContentHash(BasePlan([Provenance(authKey: "k2")])));
     }
 
+    /// <summary>
+    /// Scenario: <c>RemoveObsoleteTemplatesAsync</c> runs against a live store where the legacy template's comment was changed to "changed" after capture.
+    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
+    /// Invariant: one modified template aborts cleanup before any deletion.
+    /// </summary>
     [Fact]
     public async Task CommentChangedAfterCapture_AbortsWithZeroDeletes()
     {
@@ -241,6 +326,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         Assert.Equal(0, removes);
     }
 
+    /// <summary>
+    /// Scenario: the live legacy template has <c>auth-key</c>="alpha" and <c>authentication-key</c>="beta".
+    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
+    /// Invariant: ambiguous authentication aliases abort cleanup before any deletion.
+    /// </summary>
     [Fact]
     public async Task ConflictingAuthAliases_AbortsWithZeroDeletes()
     {
@@ -281,23 +371,39 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         Assert.Equal(0, removes);
     }
 
+    /// <summary>
+    /// Asserts that the report holds exactly one known-legacy template and no unknown ones.
+    /// </summary>
     private static void AssertKnownLegacy(OspfTemplateClassificationReport report)
     {
         Assert.Equal(OspfTemplateClassification.KnownLegacy, Assert.Single(report.KnownLegacy).Classification);
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Asserts that the exception reports unknown templates and states that no deletion was attempted.
+    /// </summary>
     private static void AssertUnknown(InvalidOperationException ex)
     {
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Contains("unknown", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Classifies the live template against the provenance and returns the <c>InvalidOperationException</c> that
+    /// classification is expected to throw.
+    /// </summary>
     private static InvalidOperationException ClassifyExpectThrow(
         OspfSupersededTemplateIdentity provenance,
         OspfTemplateInventoryRow live) =>
         Assert.Throws<InvalidOperationException>(() => Classify(provenance, live));
 
+    /// <summary>
+    /// Classifies the planned backhaul, loopback and site templates plus <paramref name="extras"/> against a single provenance record, throwing when unknown templates remain.
+    /// <param name="provenance">Superseded-template identity recorded in the plan.</param>
+    /// <param name="extras">Additional live templates to classify alongside the planned ones.</param>
+    /// <returns>The classification report.</returns>
+    /// </summary>
     private static OspfTemplateClassificationReport Classify(
         OspfSupersededTemplateIdentity provenance,
         params OspfTemplateInventoryRow[] extras)
@@ -312,6 +418,10 @@ public sealed class OspfProvenanceCommentAuthBfdTests
             ]);
     }
 
+    /// <summary>
+    /// Builds a superseded template identity for a non-management prefix with optional comment, auth, auth key and
+    /// type.
+    /// </summary>
     private static OspfSupersededTemplateIdentity Provenance(
         string? comment = null,
         string? auth = null,
@@ -319,6 +429,10 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         string? type = null) =>
         ProvenanceWithNetworks("10.99.99.0/27", comment, auth, authKey, type);
 
+    /// <summary>
+    /// Builds a superseded template identity for a prefix inside the management range with optional comment, auth,
+    /// auth key and type.
+    /// </summary>
     private static OspfSupersededTemplateIdentity ProvenanceUnderMgmt(
         string? comment = null,
         string? auth = null,
@@ -326,6 +440,10 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         string? type = null) =>
         ProvenanceWithNetworks("10.16.11.0/27", comment, auth, authKey, type);
 
+    /// <summary>
+    /// Builds a superseded template identity for the given networks from captured semantics, including auth key
+    /// presence and fingerprint.
+    /// </summary>
     private static OspfSupersededTemplateIdentity ProvenanceWithNetworks(
         string networks,
         string? comment = null,
@@ -349,6 +467,10 @@ public sealed class OspfProvenanceCommentAuthBfdTests
                 AreaInstanceName = "default-v2",
             });
 
+    /// <summary>
+    /// Builds the live interface-template row that a provenance identity would produce, mapping default tokens to
+    /// RouterOS defaults.
+    /// </summary>
     private static OspfTemplateInventoryRow LiveFrom(OspfSupersededTemplateIdentity p) =>
         new()
         {
@@ -371,6 +493,16 @@ public sealed class OspfProvenanceCommentAuthBfdTests
             Comment = p.Comment,
         };
 
+    /// <summary>
+    /// Builds a live row for a planned template with broadcast type, cost 1 and default priority unless overridden (priority 1 for non-passive, 128 for passive).
+    /// <param name="id">RouterOS <c>.id</c> of the row.</param>
+    /// <param name="area">Area name.</param>
+    /// <param name="interfaces">Interfaces property.</param>
+    /// <param name="networks">Networks property.</param>
+    /// <param name="passive">Whether the template is passive.</param>
+    /// <param name="type">Optional network type; defaults to broadcast.</param>
+    /// <param name="cost">Optional cost; defaults to 1.</param>
+    /// </summary>
     private static OspfTemplateInventoryRow Planned(
         string id,
         string area,
@@ -393,6 +525,10 @@ public sealed class OspfProvenanceCommentAuthBfdTests
             AreaInstanceName = "default-v2",
         };
 
+    /// <summary>
+    /// Builds a valid RouterOS v7 plan (backhaul, loopback, consolidated site template) carrying the supplied superseded-template provenance.
+    /// <param name="superseded">Provenance records to attach to the plan.</param>
+    /// </summary>
     private static OspfMigrationPlan BasePlan(IReadOnlyList<OspfSupersededTemplateIdentity> superseded) =>
         new()
         {
@@ -455,6 +591,9 @@ public sealed class OspfProvenanceCommentAuthBfdTests
             ContentHash = "x",
         };
 
+    /// <summary>
+    /// Builds the fake <c>/routing/ospf/area/print</c> response containing the <c>backbone-v2</c> and <c>site</c> areas.
+    /// </summary>
     private static tik4net.ITikSentence[] AreaPrint() =>
     [
         new TikFakeReSentence(new Dictionary<string, string>
@@ -472,6 +611,9 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         new TikFakeDoneSentence(),
     ];
 
+    /// <summary>
+    /// Builds the raw RouterOS row for the planned backhaul template (<c>eth-01_BH</c>, 10.16.248.76/30, ptp, cost 10).
+    /// </summary>
     private static Dictionary<string, string> DictBackhaul() => new()
     {
         [".id"] = "*1",
@@ -483,6 +625,9 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         ["disabled"] = "false",
     };
 
+    /// <summary>
+    /// Builds the raw RouterOS row for the planned loopback template (<c>Loopback</c>, 10.16.0.11/32, passive).
+    /// </summary>
     private static Dictionary<string, string> DictLoopback() => new()
     {
         [".id"] = "*9",
@@ -496,6 +641,9 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         ["priority"] = "128",
     };
 
+    /// <summary>
+    /// Builds a raw template row for the consolidated passive site matcher in the site area.
+    /// </summary>
     private static Dictionary<string, string> DictSite() => new()
     {
         [".id"] = "*A",
@@ -509,6 +657,9 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         ["priority"] = "128",
     };
 
+    /// <summary>
+    /// Builds the raw RouterOS row for the legacy site template (<c>*L</c>, <c>vlan10</c>, 10.99.99.0/27) carrying the comment <c>captured</c>.
+    /// </summary>
     private static Dictionary<string, string> DictLegacy() => new()
     {
         [".id"] = "*L",
@@ -523,6 +674,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
         ["comment"] = "captured",
     };
 
+    /// <summary>
+    /// Returns a copy of <paramref name="row"/> with its <c>comment</c> property replaced.
+    /// <param name="row">Raw RouterOS row to copy.</param>
+    /// <param name="comment">New comment value.</param>
+    /// </summary>
     private static Dictionary<string, string> WithComment(Dictionary<string, string> row, string comment)
     {
         Dictionary<string, string> copy = new(row) { ["comment"] = comment };

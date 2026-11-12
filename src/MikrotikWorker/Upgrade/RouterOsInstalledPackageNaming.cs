@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: RouterOsInstalledPackageNaming.cs
+//
+// Description:
+// Maps catalogue package identities to the installed package names RouterOS
+// reports after an upgrade. Main package naming differs by major version: v6
+// routeros-{arch}, v7+ routeros.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Assessment;
 
 namespace MikrotikWorker.Upgrade;

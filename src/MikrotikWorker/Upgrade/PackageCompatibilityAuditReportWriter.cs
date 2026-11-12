@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: PackageCompatibilityAuditReportWriter.cs
+//
+// Description:
+// Serializes non-live package-compatibility audit reports to CSV/JSON
+// artefacts.
+//
+// -----------------------------------------------------------------------------
+
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
@@ -7,14 +16,28 @@ using MikrotikWorker.Serialization;
 
 namespace MikrotikWorker.Upgrade;
 
+/// <summary>
+/// Writes non-live package-compatibility audit reports to CSV/JSON.
+/// </summary>
 internal static class PackageCompatibilityAuditReportWriter
 {
+    /// <summary>
+    /// Indented JSON that omits null values.
+    /// </summary>
     private static readonly JsonSerializerOptions DiagnosticJsonOptions = new()
     {
         WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    /// <summary>
+    /// Writes the catalogue coverage and device compatibility reports as both JSON and CSV files.
+    /// </summary>
+    /// <param name="outputDirectory">Directory to write into; created when missing.</param>
+    /// <param name="coverage">Catalogue coverage rows.</param>
+    /// <param name="deviceReports">Per-device compatibility reports.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>A task that completes when all files are written.</returns>
     public static async Task WriteAsync(
         string outputDirectory,
         IReadOnlyList<CatalogueCoverageArchitectureRow> coverage,
@@ -87,6 +110,11 @@ internal static class PackageCompatibilityAuditReportWriter
         return JsonSerializer.Serialize(devicePayload, DiagnosticJsonOptions);
     }
 
+    /// <summary>
+    /// Formats catalogue coverage rows as CSV text with a header row.
+    /// </summary>
+    /// <param name="rows">Coverage rows.</param>
+    /// <returns>The CSV text.</returns>
     public static string FormatCoverageCsv(IReadOnlyList<CatalogueCoverageArchitectureRow> rows)
     {
         StringBuilder sb = new();
@@ -105,6 +133,11 @@ internal static class PackageCompatibilityAuditReportWriter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Formats one CSV row per device stage, with a header row.
+    /// </summary>
+    /// <param name="reports">Per-device compatibility reports.</param>
+    /// <returns>The CSV text.</returns>
     public static string FormatDevicesCsv(IReadOnlyList<PackageCompatibilityDeviceReport> reports)
     {
         StringBuilder sb = new();
@@ -135,6 +168,11 @@ internal static class PackageCompatibilityAuditReportWriter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Escapes a value for CSV, quoting it when it contains a quote, comma, or line break.
+    /// </summary>
+    /// <param name="value">Text to escape; null is treated as empty.</param>
+    /// <returns>The CSV-safe text.</returns>
     private static string Escape(string? value)
     {
         string text = value ?? string.Empty;

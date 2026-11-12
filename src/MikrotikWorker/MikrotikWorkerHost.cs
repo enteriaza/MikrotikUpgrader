@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikWorkerHost.cs
+//
+// Description:
+// Shared host composition: options/validation DI, Serilog provider setup, Kestrel bind,
+// hosted services, and /firmware_files static .npk-only middleware.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;

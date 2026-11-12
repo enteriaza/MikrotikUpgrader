@@ -1,3 +1,15 @@
+// -----------------------------------------------------------------------------
+// File: OspfMigrationService.cs
+//
+// Description:
+// Coordinates OSPF migration stages used by RouterOsV6UpgradeExecutor: capture
+// and fleet-policy validation (optionally persist plan), then apply/reconcile
+// to RouterOS 7 desired state with pre-apply backbone invariants, verification,
+// and post-verify backbone assertion. Also exposes plan deletion for cleanup
+// and failure-preservation paths.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Assessment;
 using MikrotikWorker.Logging;
 using MikrotikWorker.Scheduling;
@@ -5,8 +17,15 @@ using tik4net;
 
 namespace MikrotikWorker.Upgrade.Ospf;
 
+/// <summary>
+/// OSPF capture/validate and apply/verify gates for the upgrade workflow.
+/// </summary>
 internal interface IOspfMigrationService
 {
+    /// <summary>
+    /// Captures live OSPF state, builds and validates a migration plan, and optionally persists it
+    /// when the RouterOS 7 stage may run (<paramref name="persistPlan"/>).
+    /// </summary>
     Task<OspfGateResult> CaptureAndValidateAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -16,6 +35,11 @@ internal interface IOspfMigrationService
         bool persistPlan,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Re-validates plan invariants against current addresses, reconciles v7 OSPF desired state,
+    /// verifies configuration, and asserts backbone/management safety after verify.
+    /// Uses <paramref name="inMemoryPlan"/> or loads from the plan store.
+    /// </summary>
     Task<OspfApplyGateResult> ApplyAndVerifyAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -24,6 +48,9 @@ internal interface IOspfMigrationService
         CancellationToken cancellationToken,
         string? managementHost = null);
 
+    /// <summary>
+    /// Deletes any persisted migration plan for the job (best-effort cleanup).
+    /// </summary>
     void DeletePlan(MikrotikScheduledJob job);
 }
 
@@ -37,6 +64,7 @@ internal sealed class OspfMigrationService(
     OspfV7MigrationVerifier verifier,
     ILogger<OspfMigrationService> logger) : IOspfMigrationService
 {
+    /// <inheritdoc />
     public async Task<OspfGateResult> CaptureAndValidateAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -137,6 +165,7 @@ internal sealed class OspfMigrationService(
         return OspfGateResult.Ok(validation.Plan);
     }
 
+    /// <inheritdoc />
     public async Task<OspfApplyGateResult> ApplyAndVerifyAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -261,22 +290,35 @@ internal sealed class OspfMigrationService(
         return OspfApplyGateResult.Ok(plan);
     }
 
+    /// <inheritdoc />
     public void DeletePlan(MikrotikScheduledJob job) => planStore.Delete(job);
 }
 
+/// <summary>
+/// Result of OSPF capture and plan validation before the RouterOS 7 / OSPF apply stages.
+/// </summary>
 internal sealed class OspfGateResult
 {
+    /// <summary>True when capture and fleet-policy validation succeeded.</summary>
     public bool Succeeded { get; private init; }
+
+    /// <summary>Failure outcome when <see cref="Succeeded"/> is false.</summary>
     public UpgradeOutcome? FailureOutcome { get; private init; }
+
+    /// <summary>Failure detail when unsuccessful.</summary>
     public string? Detail { get; private init; }
+
+    /// <summary>Validated or partially built plan (present on validation failure for diagnostics).</summary>
     public OspfMigrationPlan? Plan { get; private init; }
 
+    /// <summary>Successful capture and validation.</summary>
     public static OspfGateResult Ok(OspfMigrationPlan plan) => new()
     {
         Succeeded = true,
         Plan = plan,
     };
 
+    /// <summary>Capture threw or otherwise failed before a valid plan was built.</summary>
     public static OspfGateResult CaptureFailed(string detail) => new()
     {
         Succeeded = false,
@@ -284,6 +326,7 @@ internal sealed class OspfGateResult
         Detail = detail,
     };
 
+    /// <summary>Plan was built but failed fleet-policy validation.</summary>
     public static OspfGateResult ValidationFailed(string detail, OspfMigrationPlan plan) => new()
     {
         Succeeded = false,
@@ -293,19 +336,31 @@ internal sealed class OspfGateResult
     };
 }
 
+/// <summary>
+/// Result of OSPF reconcile/apply and post-apply verification.
+/// </summary>
 internal sealed class OspfApplyGateResult
 {
+    /// <summary>True when apply and verification (including backbone assertion) succeeded.</summary>
     public bool Succeeded { get; private init; }
+
+    /// <summary>Failure outcome when unsuccessful.</summary>
     public UpgradeOutcome FailureOutcome { get; private init; }
+
+    /// <summary>Failure detail when unsuccessful.</summary>
     public string? Detail { get; private init; }
+
+    /// <summary>Plan used for apply/verify when successful.</summary>
     public OspfMigrationPlan? Plan { get; private init; }
 
+    /// <summary>Successful apply and verification.</summary>
     public static OspfApplyGateResult Ok(OspfMigrationPlan plan) => new()
     {
         Succeeded = true,
         Plan = plan,
     };
 
+    /// <summary>Failed apply, invariant check, or verification.</summary>
     public static OspfApplyGateResult Failed(UpgradeOutcome outcome, string detail) => new()
     {
         Succeeded = false,

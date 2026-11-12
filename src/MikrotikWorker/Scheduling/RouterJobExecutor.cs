@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: RouterJobExecutor.cs
+//
+// Description:
+// Executes one dispatched router job: window/abort checks, credential resolve,
+// connect/login (with transient JobRetry), device info, pre-flight, compatibility
+// assessment, upgrade workflow, disconnect, and terminal outcome mapping via the
+// scheduler completer. Owns Conn₀ disposal; upgrade-stage reconnects are not retried here.
+//
+// -----------------------------------------------------------------------------
+
 using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
@@ -26,6 +37,14 @@ internal sealed class RouterJobExecutor(
     DeviceLogWriter? deviceLogWriter = null,
     DeviceLogIdentityRegistry? deviceLogIdentityRegistry = null)
 {
+    /// <summary>
+    /// Runs the full per-router workflow for <paramref name="workItem"/> and reports terminal/requeue
+    /// outcomes through <paramref name="completer"/>. Never leaves a dispatched job without a callback
+    /// on the happy/error paths handled here.
+    /// </summary>
+    /// <param name="workItem">Job plus opaque scheduler entry token.</param>
+    /// <param name="completer">Scheduler completion/retry callbacks.</param>
+    /// <param name="cancellationToken">Worker/host cancellation.</param>
     public async Task ExecuteAsync(
         RouterJobWorkItem workItem,
         IRouterJobExecutionCompleter completer,
@@ -578,6 +597,7 @@ internal sealed class RouterJobExecutor(
             connectEx);
     }
 
+    /// <summary>Logs one assessment finding at Error/Warning/Information based on severity.</summary>
     private void LogFinding(AssessmentFinding finding)
     {
         const string template =
@@ -597,6 +617,10 @@ internal sealed class RouterJobExecutor(
         }
     }
 
+    /// <summary>
+    /// Disposes Conn₀ after a pre-upgrade failure path. Disconnect errors become Failed;
+    /// otherwise completes Failed when <paramref name="alreadyFailed"/> is true.
+    /// </summary>
     private void SafeDispose(
         ITikConnection connection,
         RouterJobWorkItem workItem,
@@ -647,6 +671,7 @@ internal sealed class RouterJobExecutor(
         }
     }
 
+    /// <summary>Disposes the connection; returns any exception without throwing.</summary>
     private Exception? Disconnect(ITikConnection connection, MikrotikScheduledJob _)
     {
         try
@@ -661,6 +686,9 @@ internal sealed class RouterJobExecutor(
         }
     }
 
+    /// <summary>
+    /// Resolves credentials for the job; returns null on non-cancel failure (caller marks Failed).
+    /// </summary>
     private async Task<RouterCredentials?> ResolveCredentialsAsync(
         MikrotikScheduledJob job,
         CancellationToken cancellationToken)
@@ -692,6 +720,7 @@ internal sealed class RouterJobExecutor(
         }
     }
 
+    /// <summary>Logs and completes the dispatched job as <see cref="ScheduledJobTerminalState.Cancelled"/>.</summary>
     private void CompleteCancelled(
         RouterJobWorkItem workItem,
         IRouterJobExecutionCompleter completer,

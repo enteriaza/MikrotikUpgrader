@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfTemplateCleanupSafetyTests.cs
+//
+// Description:
+// Fake-based coverage for OSPF interface-template cleanup classification,
+// pre-deletion safety gate, fresh .id resolution, partial-failure recovery,
+// inventory mutation abort, and cleanup idempotency.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Logging.Abstractions;
 using MikrotikWorker.Upgrade.Ospf;
 using tik4net;
@@ -10,6 +20,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfTemplateCleanupSafetyTests
 {
+    /// <summary>
+    /// Scenario: one unrelated live template (<c>*U</c>) is added beside the planned templates: unexpected area, unrelated network, unrelated active or passive, or a disabled unrelated template.
+    /// Expected: <c>RemoveObsoleteTemplatesAsync</c> throws <c>InvalidOperationException</c> mentioning "No deletion was attempted" and <c>*U</c>; no ids are removed and all four templates remain.
+    /// Invariant: a single unrecognised template aborts cleanup before any deletion, whatever its flags.
+    /// </summary>
     [Theory]
     [InlineData("unexpected-area", "backbone-v2", "ether99", "10.255.255.0/30", true, false)]
     [InlineData("unrelated-network", "site", "Bridge-VLAN-99_MGMT", "192.0.2.0/24", true, false)]
@@ -46,6 +61,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Equal(4, store.Templates.Count);
     }
 
+    /// <summary>
+    /// Scenario: a second live template (<c>*DUP</c>) matches the planned backhaul's area, interface and network.
+    /// Expected: <c>OspfBackboneMutationGuardException</c> mentioning "No deletion was attempted", and no ids are removed.
+    /// Invariant: an ambiguous backbone template is never cleaned up around.
+    /// </summary>
     [Fact]
     public async Task AmbiguousBackhaul_Aborts_WithZeroDeletes()
     {
@@ -69,6 +89,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Empty(capturing.RemovedIds);
     }
 
+    /// <summary>
+    /// Scenario: the plan is classified against the three planned rows plus legacy rows; first with an unrelated <c>*U1</c> on ether99, then with two legacy 10.16.11.0/27 rows (one enabled, one disabled).
+    /// Expected: the first run throws <c>InvalidOperationException</c> naming <c>*U1</c> and "No deletion was attempted"; the second reports two known legacy rows, nothing unknown, and one backhaul, loopback and site matcher.
+    /// Invariant: the classifier separates removable legacy rows from unknown ones, and any unknown aborts the whole run.
+    /// </summary>
     [Fact]
     public void Classifier_IdentifiesUnknown_AndKnownLegacy()
     {
@@ -104,6 +129,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.All(report.KnownLegacy, l => Assert.Equal(OspfTemplateClassification.KnownLegacy, l.Classification));
     }
 
+    /// <summary>
+    /// Scenario: the plan has no legacy provenance, and the live inventory has an extra 192.0.2.0/24 template (<c>*OP</c>) in the site area.
+    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "No deletion was attempted", <c>*OP</c> and "consolidated-prefix replacement".
+    /// Invariant: without provenance, only prefixes inside the consolidated prefix can be treated as removable.
+    /// </summary>
     [Fact]
     public void Classifier_UnrelatedPrefixOutsideConsolidated_IsUnknown()
     {
@@ -122,6 +152,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Contains("consolidated-prefix replacement", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Scenario: the inventory contains only the planned backhaul (<c>*1</c>), loopback (<c>*9</c>) and site matcher (<c>*A</c>).
+    /// Expected: no item is known legacy, and each role maps to its single planned row.
+    /// Invariant: the backhaul, loopback and site matcher are protected and never marked for deletion.
+    /// </summary>
     [Fact]
     public void Classifier_NeverClassifiesProtectedRolesAsLegacy()
     {
@@ -140,6 +175,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Equal("*A", Assert.Single(report.SiteMatchers).Row.Id);
     }
 
+    /// <summary>
+    /// Scenario: the live store is missing or duplicates the planned backhaul, loopback or site matcher.
+    /// Expected: <c>RemoveObsoleteTemplatesAsync</c> throws an exception mentioning "No deletion was attempted", and no ids are removed.
+    /// Invariant: cleanup runs only when each protected role exists exactly once.
+    /// </summary>
     [Theory]
     [InlineData("missing-backhaul")]
     [InlineData("duplicate-backhaul")]
@@ -185,6 +225,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Empty(capturing.RemovedIds);
     }
 
+    /// <summary>
+    /// Scenario: three legacy templates (one enabled /27, one disabled /27, one /24 with no interface) sit beside the planned templates.
+    /// Expected: exactly <c>*L1</c>, <c>*L2</c> and <c>*L3</c> are removed, the protected <c>*1</c>, <c>*9</c> and <c>*A</c> remain, and each deletion is preceded by a fresh print (at least 1 + 3*2 + 1 prints).
+    /// Invariant: legacy templates are deleted regardless of enabled state, with each id re-checked against fresh state first.
+    /// </summary>
     [Fact]
     public async Task KnownLegacy_MixedEnabledDisabled_DeletedWithFreshIds()
     {
@@ -209,6 +254,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.All(store.Templates, t => Assert.Contains(t[".id"], (string[])["*1", "*9", "*A"]));
     }
 
+    /// <summary>
+    /// Scenario: three legacy templates exist and the second deletion fails.
+    /// Expected: the first run throws <c>InvalidOperationException</c> with one id removed and the protected templates intact; a second run removes the remaining two, leaving only <c>*1</c>, <c>*9</c> and <c>*A</c>.
+    /// Invariant: a partial failure never touches protected templates and is recoverable by re-running.
+    /// </summary>
     [Fact]
     public async Task PartialDeletionFailure_RecoversOnSubsequentRun()
     {
@@ -239,6 +289,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.All(store.Templates, t => Assert.Contains(t[".id"], (string[])["*1", "*9", "*A"]));
     }
 
+    /// <summary>
+    /// Scenario: after the first classification print, the legacy <c>*L1</c> has its network changed to 198.51.100.0/24 before the pre-delete refresh.
+    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted"; no ids are removed and <c>*L1</c> remains.
+    /// Invariant: a candidate that changes between classification and delete is re-evaluated, and an unrecognised result aborts instead of deleting.
+    /// </summary>
     [Fact]
     public async Task InventoryMutationBetweenRefresh_AbortsWithoutDeletingChangedCandidate()
     {
@@ -268,6 +323,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Contains(store.Templates, t => t[".id"] == "*L1");
     }
 
+    /// <summary>
+    /// Scenario: between classification and the refresh, the legacy template's id changes from <c>*OLD</c> to <c>*NEW</c> with identical content.
+    /// Expected: only <c>*NEW</c> is removed, never <c>*OLD</c>, and three templates remain.
+    /// Invariant: candidates are tracked by semantic fingerprint, and deletes use the fresh id.
+    /// </summary>
     [Fact]
     public async Task CandidateIdChange_ResolvedViaFingerprint_UsesFreshId()
     {
@@ -295,6 +355,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Equal(3, store.Templates.Count);
     }
 
+    /// <summary>
+    /// Scenario: the legacy template <c>*L1</c> disappears from the live store before the pre-delete refresh.
+    /// Expected: cleanup succeeds without removing anything, leaving three templates.
+    /// Invariant: an already-deleted candidate is skipped rather than failing or deleting by a stale id.
+    /// </summary>
     [Fact]
     public async Task CandidateDisappearsBeforeDelete_IsSkippedSafely()
     {
@@ -316,6 +381,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Equal(3, store.Templates.Count);
     }
 
+    /// <summary>
+    /// Scenario: a second row with the same content (<c>*L1b</c>) appears for the legacy candidate before the refresh.
+    /// Expected: <c>InvalidOperationException</c> mentioning "matches 2 live rows", and no ids are removed.
+    /// Invariant: a candidate must match exactly one live row to be deleted.
+    /// </summary>
     [Fact]
     public async Task DuplicateCandidateAppears_AbortsWithoutDelete()
     {
@@ -339,6 +409,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Empty(capturing.RemovedIds);
     }
 
+    /// <summary>
+    /// Scenario: cleanup runs three times against a store with two legacy templates (one disabled).
+    /// Expected: the first run removes two ids and leaves three templates; the second and third remove nothing, keep the same ids, and the later runs still print inventory.
+    /// Invariant: cleanup is idempotent and converges on the three protected templates.
+    /// </summary>
     [Fact]
     public async Task ThreeConsecutiveCleanupRuns_AreIdempotent()
     {
@@ -370,6 +445,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.DoesNotContain(store.Templates, t => t.TryGetValue("disabled", out string? d) && d is "true" or "yes");
     }
 
+    /// <summary>
+    /// Scenario: the full reconciler applies the plan three times to a store with one legacy template.
+    /// Expected: the first run removes <c>*L1</c> and leaves three templates; the second and third runs remove nothing and issue no further add, set or unset commands, with ids unchanged.
+    /// Invariant: re-applying a converged plan makes no RouterOS changes.
+    /// </summary>
     [Fact]
     public async Task ThreeConsecutiveReconcilerRuns_NoFurtherDeletesOrAdds()
     {
@@ -406,6 +486,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Equal(stableIds, store.Templates.Select(t => t[".id"]).OrderBy(static x => x).ToArray());
     }
 
+    /// <summary>
+    /// Scenario: the plan has no legacy provenance and the live site area holds an operator-managed 192.0.2.0/24 template (<c>*OP</c>).
+    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted"; no ids are removed and <c>*OP</c> remains.
+    /// Invariant: operator-managed templates outside the consolidated prefix are never deleted.
+    /// </summary>
     [Fact]
     public async Task OperatorManagedUnrelatedPrefix_AbortsCleanup()
     {
@@ -422,9 +507,17 @@ public sealed class OspfTemplateCleanupSafetyTests
         Assert.Contains(store.Templates, t => t[".id"] == "*OP");
     }
 
+    /// <summary>
+    /// Creates the real <c>OspfMikrotikOperations</c> with a null logger.
+    /// </summary>
     private static OspfMikrotikOperations CreateOps() =>
         new(NullLogger<OspfMikrotikOperations>.Instance);
 
+    /// <summary>
+    /// Builds a superseded-template identity (provenance) for a passive site template in
+    /// <c>default-v2</c>. Only rows matching these captured identities may be classified
+    /// known-legacy and deleted; anything else is unknown and aborts cleanup.
+    /// </summary>
     private static OspfSupersededTemplateIdentity Sem(
         string? interfaces,
         string networks,
@@ -440,6 +533,9 @@ public sealed class OspfTemplateCleanupSafetyTests
                 AreaInstanceName = "default-v2",
             });
 
+    /// <summary>
+    /// Lab cleanup fixtures keep logical live area name "site"; pin target to avoid remap churn.
+    /// </summary>
     private static OspfMigrationPlan MinimalPlan(bool includeLegacyProvenance = true) => new()
     {
         ImportId = Guid.NewGuid(),
@@ -530,6 +626,10 @@ public sealed class OspfTemplateCleanupSafetyTests
         ContentHash = "test-cleanup",
     };
 
+    /// <summary>
+    /// Live row for the protected planned backhaul (<c>*1</c>, active ptp cost 10); it must never
+    /// be classified as legacy or deleted.
+    /// </summary>
     private static Dictionary<string, string> PlannedBackhaul(OspfMigrationPlan plan) =>
         Row(
             "*1",
@@ -541,6 +641,9 @@ public sealed class OspfTemplateCleanupSafetyTests
             type: "ptp",
             cost: "10");
 
+    /// <summary>
+    /// Builds a raw template row for the plan's first passive loopback template.
+    /// </summary>
     private static Dictionary<string, string> PlannedLoopback(OspfMigrationPlan plan) =>
         Row(
             "*9",
@@ -550,6 +653,10 @@ public sealed class OspfTemplateCleanupSafetyTests
             passive: true,
             disabled: false);
 
+    /// <summary>
+    /// Live row for the planned consolidated site matcher (<c>*A</c>, interfaces=all, passive); a
+    /// protected role that must survive cleanup.
+    /// </summary>
     private static Dictionary<string, string> PlannedSite(OspfMigrationPlan plan) =>
         Row(
             "*A",
@@ -559,6 +666,10 @@ public sealed class OspfTemplateCleanupSafetyTests
             passive: true,
             disabled: false);
 
+    /// <summary>
+    /// Builds a raw interface-template row dictionary with the given id, area, interfaces, networks, passive and
+    /// disabled flags, adding optional type and cost.
+    /// </summary>
     private static Dictionary<string, string> Row(
         string id,
         string area,
@@ -599,6 +710,10 @@ public sealed class OspfTemplateCleanupSafetyTests
         return d;
     }
 
+    /// <summary>
+    /// Converts a raw RouterOS row dictionary into the typed inventory row the classifier consumes:
+    /// passive means the key is present and disabled is parsed from its textual flag.
+    /// </summary>
     private static OspfTemplateInventoryRow InventoryFrom(Dictionary<string, string> row) =>
         new()
         {
@@ -614,10 +729,22 @@ public sealed class OspfTemplateCleanupSafetyTests
             AreaInstanceName = "default-v2",
         };
 
+    /// <summary>
+    /// In-memory interface-template table seeded with the plan's protected backhaul, loopback and site templates,
+    /// to which tests add legacy or unknown rows.
+    /// </summary>
     private sealed class MutableTemplateStore
     {
+        /// <summary>
+        /// In-memory <c>/routing/ospf/interface-template</c> table that the fake connection prints
+        /// from and removes rows out of.
+        /// </summary>
         public List<Dictionary<string, string>> Templates { get; } = [];
 
+        /// <summary>
+        /// Creates a store containing exactly the plan's protected backhaul, loopback and site
+        /// templates so tests add legacy or unknown rows on top.
+        /// </summary>
         public static MutableTemplateStore WithPlanned(OspfMigrationPlan plan)
         {
             MutableTemplateStore store = new();
@@ -627,6 +754,9 @@ public sealed class OspfTemplateCleanupSafetyTests
             return store;
         }
 
+        /// <summary>
+        /// Creates a connection bound to this store with fake responses already attached.
+        /// </summary>
         public MutableTemplateConnection Connect()
         {
             MutableTemplateConnection connection = new(this);
@@ -635,18 +765,48 @@ public sealed class OspfTemplateCleanupSafetyTests
         }
     }
 
+    /// <summary>
+    /// Stateful connection fake backed by a template store that serves template print, remove, add and set and the
+    /// supporting reads, records removals and counts, and can fail a chosen remove or run a hook before each print.
+    /// </summary>
     private sealed class MutableTemplateConnection : DisposeTrackingConnection
     {
+        /// <summary>
+        /// Backing template store mutated by the scripted <c>remove</c> handler.
+        /// </summary>
         private readonly MutableTemplateStore _store;
+
+        /// <summary>
+        /// Underlying fake connection on which <see cref="AttachFakeResponses"/> registers
+        /// handlers.
+        /// </summary>
         private readonly TikFakeConnection _fake;
+
+        /// <summary>
+        /// Most recent <c>remove</c> command; its <c>.id</c> parameter is added after creation, so
+        /// the handler reads it from here.
+        /// </summary>
         private ITikCommand? _pendingRemove;
+
+        /// <summary>
+        /// 1-based count of remove executions, compared with <see cref="FailRemoveAtOrdinal"/> to
+        /// inject a failure at a chosen deletion.
+        /// </summary>
         private int _removeOrdinal;
 
+        /// <summary>
+        /// Creates a connection over a new fake; call <see cref="AttachFakeResponses"/> to wire the
+        /// handlers.
+        /// </summary>
         public MutableTemplateConnection(MutableTemplateStore store)
             : this(store, new TikFakeConnection())
         {
         }
 
+        /// <summary>
+        /// Chains the supplied fake into the base class while keeping a typed reference for handler
+        /// registration.
+        /// </summary>
         private MutableTemplateConnection(MutableTemplateStore store, TikFakeConnection fake)
             : base(fake)
         {
@@ -654,14 +814,51 @@ public sealed class OspfTemplateCleanupSafetyTests
             _fake = fake;
         }
 
+        /// <summary>
+        /// Ids of templates actually removed, in order. Empty asserts the zero-delete abort
+        /// guarantee; exact contents assert that fresh ids were used.
+        /// </summary>
         public List<string> RemovedIds { get; } = [];
+
+        /// <summary>
+        /// Number of interface-template prints. Cleanup must reprint before each delete, so this
+        /// proves the pre-delete refresh and post-delete verification happen.
+        /// </summary>
         public int PrintCount { get; private set; }
+
+        /// <summary>
+        /// Number of template adds; must not grow across repeated reconciliations (idempotence).
+        /// </summary>
         public int AddCount { get; private set; }
+
+        /// <summary>
+        /// Number of template sets; must not grow across repeated reconciliations (idempotence).
+        /// </summary>
         public int SetCount { get; private set; }
+
+        /// <summary>
+        /// Number of template unsets; must not grow across repeated reconciliations (idempotence).
+        /// </summary>
         public int UnsetCount { get; private set; }
+
+        /// <summary>
+        /// 1-based remove ordinal at which the fake throws, simulating a partial deletion failure
+        /// that a later run must recover from.
+        /// </summary>
         public int? FailRemoveAtOrdinal { get; set; }
+
+        /// <summary>
+        /// Hook run at the start of every template print with its 1-based ordinal. It lets tests
+        /// mutate the router between classification (print 1) and the pre-delete refresh (print 2)
+        /// to model concurrent operator edits.
+        /// </summary>
         public Action<int>? BeforePrint { get; set; }
 
+        /// <summary>
+        /// Registers stateful handlers for template print/remove/add/set/unset plus the instance,
+        /// area, filter, route and neighbour reads reconciler runs need, so cleanup and full
+        /// reconciliation operate on realistic data.
+        /// </summary>
         public void AttachFakeResponses()
         {
             _fake.WithResponse(
@@ -770,6 +967,9 @@ public sealed class OspfTemplateCleanupSafetyTests
                     static _ => [new TikFakeDoneSentence()]);
         }
 
+        /// <summary>
+        /// Tracks template remove commands, then returns the inner command.
+        /// </summary>
         public override ITikCommand CreateCommand(string commandText, params ITikCommandParameter[] parameters)
         {
             ITikCommand cmd = base.CreateCommand(commandText, parameters);
@@ -777,6 +977,9 @@ public sealed class OspfTemplateCleanupSafetyTests
             return cmd;
         }
 
+        /// <summary>
+        /// Overload with an explicit parameter format; tracks identically.
+        /// </summary>
         public override ITikCommand CreateCommand(
             string commandText,
             TikCommandParameterFormat defaultParameterFormat,
@@ -787,6 +990,10 @@ public sealed class OspfTemplateCleanupSafetyTests
             return cmd;
         }
 
+        /// <summary>
+        /// Remembers the pending template <c>remove</c> command so its <c>.id</c> can be read when
+        /// the handler runs.
+        /// </summary>
         private void Track(string commandText, ITikCommand cmd)
         {
             if (commandText.Equals("/routing/ospf/interface-template/remove", StringComparison.Ordinal))
@@ -801,39 +1008,118 @@ public sealed class OspfTemplateCleanupSafetyTests
     /// </summary>
     private sealed class RecordingTemplateOps(OspfMikrotikOperations real) : IOspfMikrotikOperations
     {
+        /// <summary>
+        /// Delegates to the real operations so reconciler runs exercise genuine ensure logic (and
+        /// its idempotence) against the fake connection.
+        /// </summary>
         public Task EnsureBackhaulTemplateAsync(ITikConnection connection, OspfPlanBackhaulTemplate template, CancellationToken cancellationToken = default) =>
             real.EnsureBackhaulTemplateAsync(connection, template, cancellationToken);
 
+        /// <summary>
+        /// Delegates to the real loopback ensure, including protected-backhaul handling.
+        /// </summary>
         public Task EnsureLoopbackTemplateAsync(ITikConnection connection, OspfPlanLoopbackTemplate template, IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls, CancellationToken cancellationToken = default) =>
             real.EnsureLoopbackTemplateAsync(connection, template, protectedBackhauls, cancellationToken);
 
+        /// <summary>
+        /// Delegates to the real site-matcher ensure, including protected-backhaul handling.
+        /// </summary>
         public Task EnsureSiteNetworkTemplateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls, CancellationToken cancellationToken = default) =>
             real.EnsureSiteNetworkTemplateAsync(connection, template, protectedBackhauls, cancellationToken);
 
 
+        /// <summary>
+        /// Delegates to the real site read-back assertion.
+        /// </summary>
         public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default) =>
             real.AssertSiteNetworkTemplateStateAsync(connection, template, cancellationToken);
+
+        /// <summary>
+        /// Delegates to the real cleanup, the code path whose safety gate and idempotence these
+        /// tests lock down.
+        /// </summary>
         public Task RemoveObsoleteTemplatesAsync(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default) =>
             real.RemoveObsoleteTemplatesAsync(connection, plan, cancellationToken);
 
+        /// <summary>
+        /// Returns the Tommy lab baseline instead of querying a router, keeping the
+        /// management-plane stage deterministic.
+        /// </summary>
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(ITikConnection connection, OspfMigrationPlan plan, string managementHost, CancellationToken cancellationToken = default) =>
             Task.FromResult(OspfTestBaselines.Tommy(managementHost));
 
+        /// <summary>
+        /// No-op: the backbone guard is stubbed so cleanup behaviour can be tested in isolation.
+        /// </summary>
         public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: routing-filter removal is outside this scenario, so the fake completes without
+        /// recording or failing.
+        /// </summary>
         public Task RemoveAllRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: clearing instance in-filter/out-filter references is not under test in this
+        /// scenario.
+        /// </summary>
         public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: redistribution clearing is not under test in this scenario.
+        /// </summary>
         public Task ClearOspfRedistributionAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: the router-id in the fake inventory is already correct, so no router-id write is
+        /// modelled.
+        /// </summary>
         public Task SetInstanceRouterIdAsync(ITikConnection connection, string instanceName, string routerId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: area reconciliation is not under test in this scenario.
+        /// </summary>
         public Task EnsureOspfAreaAsync(ITikConnection connection, string instanceName, OspfPlanArea area, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: area-range reconciliation is not under test in this scenario.
+        /// </summary>
         public Task EnsureOspfAreaRangeAsync(ITikConnection connection, OspfPlanAreaRange range, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: OSPFv3 removal is not under test in this scenario.
+        /// </summary>
         public Task RemoveOspfV3Async(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// Reports zero routing filters so the "routing filters remain" read-back check cannot fail
+        /// for reasons unrelated to this scenario.
+        /// </summary>
         public Task<int> CountRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult(0);
+
+        /// <summary>
+        /// Returns an inventory matching <c>MinimalPlan()</c> so identity resolution and
+        /// verification pass.
+        /// </summary>
         public Task<OspfV7Inventory> ReadV7InventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
             Task.FromResult(OspfTestBaselines.InventoryMatchingPlan(MinimalPlan()));
+
+        /// <summary>
+        /// Always throws <see cref="NotSupportedException"/>: this fake only supports the v7
+        /// reconcile/verify path, never a live capture.
+        /// </summary>
         public Task<OspfCaptureSnapshot> CaptureAsync(ITikConnection connection, OspfCaptureRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        /// <summary>
+        /// Returns no neighbours; the adjacency guard is not exercised by this scenario.
+        /// </summary>
         public Task<IReadOnlyList<Dictionary<string, string>>> ReadOspfNeighboursAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<Dictionary<string, string>>>([]);
+
+        /// <summary>
+        /// Returns a single <c>10.16.0.11/32</c> Loopback address so loopback-derived router-id
+        /// validation sees one consistent /32.
+        /// </summary>
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
             Task.FromResult(OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
     }

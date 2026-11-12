@@ -1,8 +1,21 @@
+// -----------------------------------------------------------------------------
+// File: OspfV7Reconciler.cs
+//
+// Description:
+// Applies a validated OSPF migration plan onto RouterOS 7: desired-state
+// reconcile of instances, areas, templates, filters, and cleanup of superseded
+// objects with backbone safety gates.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Logging;
 using tik4net;
 
 namespace MikrotikWorker.Upgrade.Ospf;
 
+/// <summary>
+/// Reconciles live RouterOS 7 OSPF configuration to a validated migration plan.
+/// </summary>
 internal sealed class OspfV7Reconciler(
     IOspfMikrotikOperations ops,
     ILogger<OspfV7Reconciler> logger)
@@ -183,10 +196,20 @@ internal sealed class OspfV7Reconciler(
     }
 }
 
+/// <summary>
+/// Verifies post-apply OSPF configuration against the migration plan.
+/// </summary>
 internal sealed class OspfV7MigrationVerifier(
     IOspfMikrotikOperations ops,
     ILogger<OspfV7MigrationVerifier> logger)
 {
+    /// <summary>
+    /// Re-reads the live RouterOS 7 state and checks it against the plan, collecting every mismatch.
+    /// </summary>
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="plan">Migration plan that was applied.</param>
+    /// <param name="cancellationToken">Token to cancel the verification.</param>
+    /// <returns>A result that succeeds only when no mismatch was found.</returns>
     public async Task<OspfVerificationResult> VerifyAsync(
         ITikConnection connection,
         OspfMigrationPlan plan,
@@ -660,13 +683,33 @@ internal sealed class OspfV7MigrationVerifier(
         return errors;
     }
 
+    /// <summary>
+    /// Normalises a CIDR for comparison, falling back to the trimmed text when it cannot be parsed.
+    /// </summary>
+    /// <param name="cidr">CIDR text.</param>
+    /// <returns>The normalised CIDR, or an empty string for null.</returns>
     private static string Normalize(string? cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p) ? p.ToCidrString() : cidr?.Trim() ?? string.Empty;
 }
 
+/// <summary>
+/// Result of post-apply OSPF configuration verification.
+/// </summary>
 internal sealed class OspfVerificationResult
 {
+    /// <summary>
+    /// Gets a value indicating whether verification found no problems.
+    /// </summary>
     public required bool Succeeded { get; init; }
+    /// <summary>
+    /// One message per mismatch between the live ROS7 OSPF configuration and the migration plan
+    /// (identity, areas, templates, backhaul cost and similar). Empty when <see cref="Succeeded"/> is
+    /// <see langword="true"/>.
+    /// </summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
+    /// <summary>
+    /// Single-line failure message built by joining <see cref="Errors"/> with <c>"; "</c>, suitable for
+    /// logs and gate failures. <see langword="null"/> when verification succeeded.
+    /// </summary>
     public string? Detail => Succeeded ? null : string.Join("; ", Errors);
 }

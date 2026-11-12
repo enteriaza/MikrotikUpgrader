@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: MikrotikApiClient.cs
+//
+// Description:
+// Production tik4net implementation of IMikrotikApiClient and IMikrotikRouterOperations.
+// Opens short-lived sessions for GetDeviceInfoAsync; other methods operate on a caller-owned
+// ITikConnection for package inventory, backup, fetch, reboot, legacy cleanup, and RouterBOARD upgrade.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
@@ -14,6 +24,7 @@ internal sealed class MikrotikApiClient(
     IOptions<MikroTikOptions> options,
     ILogger<MikrotikApiClient> logger) : IMikrotikApiClient, IMikrotikRouterOperations
 {
+    /// <inheritdoc />
     public async Task<MikrotikDeviceInfo> GetDeviceInfoAsync(
         MikrotikConnectionOptions connection,
         CancellationToken cancellationToken = default)
@@ -64,6 +75,7 @@ internal sealed class MikrotikApiClient(
         }
     }
 
+    /// <inheritdoc />
     public async Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
         ITikConnection connection,
         string host,
@@ -105,6 +117,7 @@ internal sealed class MikrotikApiClient(
         };
     }
 
+    /// <inheritdoc />
     public async Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -138,6 +151,7 @@ internal sealed class MikrotikApiClient(
         return packages;
     }
 
+    /// <inheritdoc />
     public async Task ExportConfigurationToFileAsync(
         ITikConnection connection,
         string fileNameWithoutExtension,
@@ -154,6 +168,7 @@ internal sealed class MikrotikApiClient(
         logger.LogInformation("Issued /export file={File}", fileNameWithoutExtension);
     }
 
+    /// <inheritdoc />
     public async Task SaveSystemBackupAsync(
         ITikConnection connection,
         string fileNameWithoutExtension,
@@ -175,6 +190,7 @@ internal sealed class MikrotikApiClient(
         logger.LogInformation("Issued /system/backup/save name={File}", fileNameWithoutExtension);
     }
 
+    /// <inheritdoc />
     public async Task<RouterFileInfo?> FindFileAsync(
         ITikConnection connection,
         string fileName,
@@ -211,6 +227,7 @@ internal sealed class MikrotikApiClient(
         return null;
     }
 
+    /// <inheritdoc />
     public async Task RemoveFileAsync(
         ITikConnection connection,
         string fileName,
@@ -242,6 +259,7 @@ internal sealed class MikrotikApiClient(
         logger.LogInformation("Issued /file/remove for {File}", fileName);
     }
 
+    /// <inheritdoc />
     public async Task WaitForFileAsync(
         ITikConnection connection,
         string fileName,
@@ -266,6 +284,7 @@ internal sealed class MikrotikApiClient(
         throw new TimeoutException($"Router file '{fileName}' was not ready with non-zero size within {timeout}.");
     }
 
+    /// <inheritdoc />
     public async Task FetchUrlToFileAsync(
         ITikConnection connection,
         string url,
@@ -353,6 +372,7 @@ internal sealed class MikrotikApiClient(
         logger.LogInformation("Completed /tool/fetch dst-path={File}", destinationFileName);
     }
 
+    /// <inheritdoc />
     public async Task RebootAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -375,12 +395,14 @@ internal sealed class MikrotikApiClient(
         }
     }
 
+    /// <inheritdoc />
     public Task<int> CountSystemScriptsByNameAsync(
         ITikConnection connection,
         string scriptName,
         CancellationToken cancellationToken = default) =>
         CountNamedObjectsAsync(connection, "/system/script/print", scriptName, cancellationToken);
 
+    /// <inheritdoc />
     public async Task RemoveSystemScriptsByNameAsync(
         ITikConnection connection,
         string scriptName,
@@ -391,12 +413,14 @@ internal sealed class MikrotikApiClient(
         logger.LogInformation("Removed /system/script objects named {Name}", scriptName);
     }
 
+    /// <inheritdoc />
     public Task<int> CountSchedulersByNameAsync(
         ITikConnection connection,
         string schedulerName,
         CancellationToken cancellationToken = default) =>
         CountNamedObjectsAsync(connection, "/system/scheduler/print", schedulerName, cancellationToken);
 
+    /// <inheritdoc />
     public async Task RemoveSchedulersByNameAsync(
         ITikConnection connection,
         string schedulerName,
@@ -412,6 +436,7 @@ internal sealed class MikrotikApiClient(
         logger.LogInformation("Removed /system/scheduler objects named {Name}", schedulerName);
     }
 
+    /// <inheritdoc />
     public async Task UpgradeRouterboardAsync(
         ITikConnection connection,
         CancellationToken cancellationToken = default)
@@ -424,6 +449,14 @@ internal sealed class MikrotikApiClient(
         logger.LogInformation("Issued /system/routerboard/upgrade");
     }
 
+    /// <summary>
+    /// Counts rows from a RouterOS print command whose <c>name</c> equals the given name exactly (case-sensitive).
+    /// </summary>
+    /// <param name="connection">Open router connection.</param>
+    /// <param name="printCommand">Print command to enumerate, for example <c>/system/script/print</c>.</param>
+    /// <param name="name">Exact object name to count.</param>
+    /// <param name="cancellationToken">Token to cancel the request.</param>
+    /// <returns>The number of matching objects.</returns>
     private async Task<int> CountNamedObjectsAsync(
         ITikConnection connection,
         string printCommand,
@@ -452,6 +485,16 @@ internal sealed class MikrotikApiClient(
         return count;
     }
 
+    /// <summary>
+    /// Removes every object returned by a print command whose <c>name</c> equals the given name exactly, one at a time by RouterOS <c>.id</c>.
+    /// Fails closed rather than removing by name or number when a matching row has no <c>.id</c>.
+    /// </summary>
+    /// <param name="connection">Open router connection.</param>
+    /// <param name="printCommand">Print command used to enumerate objects.</param>
+    /// <param name="removeCommand">Remove command issued once per matching object.</param>
+    /// <param name="name">Exact object name to remove.</param>
+    /// <param name="cancellationToken">Token to cancel the request.</param>
+    /// <exception cref="InvalidOperationException">Thrown when a matching object has no usable <c>.id</c>.</exception>
     private async Task RemoveNamedObjectsAsync(
         ITikConnection connection,
         string printCommand,
@@ -496,6 +539,13 @@ internal sealed class MikrotikApiClient(
         }
     }
 
+    /// <summary>
+    /// Reads <c>/system/routerboard/print</c>, treating failure as RouterBOARD data being unavailable (for example on CHR or x86).
+    /// </summary>
+    /// <param name="connection">Open router connection.</param>
+    /// <param name="host">Router host, used for diagnostics.</param>
+    /// <param name="cancellationToken">Token to cancel the request.</param>
+    /// <returns>The RouterBOARD row, or null when it is unavailable.</returns>
     private async Task<ITikReSentence?> TryReadRouterboardAsync(
         ITikConnection connection,
         string host,
@@ -522,6 +572,11 @@ internal sealed class MikrotikApiClient(
         }
     }
 
+    /// <summary>
+    /// Returns null for null or whitespace-only input; otherwise the value unchanged.
+    /// </summary>
+    /// <param name="value">Text to normalise.</param>
+    /// <returns>The original text, or null.</returns>
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value;
 }

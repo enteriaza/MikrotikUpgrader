@@ -1,11 +1,35 @@
+// -----------------------------------------------------------------------------
+// File: CsvDateTimeParser.cs
+//
+// Description:
+// Parses CSV date/time literals into UTC using configured culture, format list,
+// and time zone. Rejects empty values, invalid DST gaps, and prefers the earlier
+// (standard-time) offset when a local time is ambiguous.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 
 namespace MikrotikWorker.Scheduling;
 
+/// <summary>
+/// Converts schedule CSV date/time strings into UTC <see cref="DateTime"/> values.
+/// </summary>
+/// <param name="options">CSV culture, formats, and time-zone configuration.</param>
 internal sealed class CsvDateTimeParser(IOptions<CsvOptions> options)
 {
+    /// <summary>
+    /// Parses <paramref name="rawValue"/> with configured formats and converts it to UTC.
+    /// Ambiguous local times use the earliest offset; invalid DST gap times are rejected.
+    /// </summary>
+    /// <param name="rawValue">Raw cell text from the CSV.</param>
+    /// <param name="fileName">File name for structured exceptions.</param>
+    /// <param name="rowNumber">Parser row for structured exceptions.</param>
+    /// <param name="columnName">Column name for structured exceptions.</param>
+    /// <returns>UTC instant with <see cref="DateTimeKind.Utc"/> semantics via <c>UtcDateTime</c> conversion.</returns>
+    /// <exception cref="CsvScheduleException">Thrown when the value is empty, unparsable, or invalid in the configured zone.</exception>
     public DateTime ParseToUtc(string rawValue, string fileName, int rowNumber, string columnName)
     {
         CsvOptions csvOptions = options.Value;

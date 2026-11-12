@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: OspfConsolidatedPrefixObsolescence.cs
+//
+// Description:
+// Simple same-area consolidated-prefix obsolescence: a live template whose
+// every network is a strictly more-specific subnet of a planned consolidated
+// site prefix is obsolete and may be removed. No provenance fingerprints or
+// semantic attribute matching are required.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 
 namespace MikrotikWorker.Upgrade.Ospf;
@@ -94,6 +105,12 @@ internal static class OspfConsolidatedPrefixObsolescence
         return covering.Contains(specific.BaseAddress);
     }
 
+    /// <summary>
+    /// Parses a comma-separated list of networks.
+    /// </summary>
+    /// <param name="networks">Comma-separated CIDR list.</param>
+    /// <param name="parsed">Receives the parsed networks; empty on failure.</param>
+    /// <returns><see langword="true"/> when the list is non-empty and every entry is valid.</returns>
     public static bool TryParseNetworks(string? networks, out List<IPNetwork> parsed)
     {
         parsed = [];
@@ -118,6 +135,13 @@ internal static class OspfConsolidatedPrefixObsolescence
         return parsed.Count > 0;
     }
 
+    /// <summary>
+    /// Determines whether every live network is strictly contained in some planned network.
+    /// </summary>
+    /// <param name="liveNets">Networks currently on the router.</param>
+    /// <param name="plannedNets">Networks in the plan.</param>
+    /// <param name="folds">Receives a description of each live network and its covering planned network; empty on failure.</param>
+    /// <returns><see langword="true"/> when all live networks are covered.</returns>
     private static bool AllLiveNetworksStrictlyContained(
         IReadOnlyList<IPNetwork> liveNets,
         IReadOnlyList<IPNetwork> plannedNets,
@@ -148,6 +172,11 @@ internal static class OspfConsolidatedPrefixObsolescence
         return folds.Count > 0;
     }
 
+    /// <summary>
+    /// Formats a network as base address and prefix length.
+    /// </summary>
+    /// <param name="network">Network to format.</param>
+    /// <returns>The CIDR text.</returns>
     private static string Format(IPNetwork network) =>
         $"{network.BaseAddress}/{network.PrefixLength}";
 }

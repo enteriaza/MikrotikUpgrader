@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: ReadOnlyMikrotikInventoryCollectorTests.cs
+//
+// Description:
+// Unit tests for ReadOnlyMikrotikInventoryCollector parsing and
+// authentication-failure classification.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Logging.Abstractions;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Upgrade;
@@ -5,8 +14,17 @@ using tik4net;
 using tik4net.Testing;
 
 namespace MikrotikWorker.Tests.Upgrade.Live;
+/// <summary>
+/// Unit tests for read-only inventory parsing and auth failure classification.
+/// </summary>
 public sealed class ReadOnlyMikrotikInventoryCollectorTests
 {
+    /// <summary>
+    /// A full collection from <c>10.0.0.x</c> succeeds with identity <c>AP01.POP001.001.access</c>, version 6.49.10
+    /// and architecture mipsbe. <c>routeros-mipsbe</c> and <c>user-manager</c> are independent, while <c>ipv6</c>
+    /// is a bundled component of <c>routeros-mipsbe</c>. The connection is disposed once and every command issued
+    /// is in <c>AllowedCommands</c>.
+    /// </summary>
     [Fact]
     public async Task Collects_SuccessfulInventory_IncludingBundle()
     {
@@ -34,6 +52,12 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.All(recording.Commands, static c => Assert.Contains(c, ReadOnlyTikCommandExecutor.AllowedCommands));
     }
 
+    /// <summary>
+    /// Scenario: A scripted router fails the identity read but still answers the resource and package reads.
+    /// Expected: The identity status is Failed, while the RouterOS version (6.49.10), architecture (mipsbe) and
+    /// package list are still collected. The collection status is Succeeded and the inventory is usable.
+    /// Invariant: An identity failure is never mistaken for an incomplete package inventory.
+    /// </summary>
     [Fact]
     public async Task IdentityUnavailable_StillCollectsRemainingInventory()
     {
@@ -74,6 +98,10 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.True(result.HasUsableInventory);
     }
 
+    /// <summary>
+    /// A resource print that has an architecture but no version leaves <c>RouterOsVersion</c> null and the
+    /// collection status <c>Partial</c>.
+    /// </summary>
     [Fact]
     public async Task VersionUnavailable_RecordsPartial()
     {
@@ -113,6 +141,10 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.Equal(LiveInventoryCollectionStatus.Partial, result.CollectionStatus);
     }
 
+    /// <summary>
+    /// A resource print that has a version but no architecture leaves <c>Architecture</c> null and the collection
+    /// status <c>Partial</c>.
+    /// </summary>
     [Fact]
     public async Task ArchitectureUnavailable_RecordsPartial()
     {
@@ -152,6 +184,10 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.Equal(LiveInventoryCollectionStatus.Partial, result.CollectionStatus);
     }
 
+    /// <summary>
+    /// When <c>/system/package/print</c> returns a trap ('cannot read packages'), collection is <c>Partial</c> with
+    /// an empty package list. The failure detail mentions 'package'.
+    /// </summary>
     [Fact]
     public async Task PackageInventoryUnavailable_RecordsPartial()
     {
@@ -166,6 +202,10 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.Contains("package", result.FailureDetail!, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// A factory that throws 'invalid user name or password' gives <c>AuthenticationFailed</c> for that router, and
+    /// the failure detail does not leak the supplied password 'bad'.
+    /// </summary>
     [Fact]
     public async Task AuthenticationFailure_IsIsolated()
     {
@@ -179,6 +219,10 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.DoesNotContain("bad", result.FailureDetail ?? string.Empty, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A factory that throws <c>OperationCanceledException</c> with a 1 ms timeout gives <c>TimedOut</c> rather
+    /// than a cancellation.
+    /// </summary>
     [Fact]
     public async Task ConnectionTimeout_IsIsolated()
     {
@@ -190,6 +234,9 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.Equal(LiveInventoryCollectionStatus.TimedOut, result.CollectionStatus);
     }
 
+    /// <summary>
+    /// Collecting with an already-cancelled token gives <c>Cancelled</c>.
+    /// </summary>
     [Fact]
     public async Task Cancellation_StopsAndDisposes()
     {
@@ -203,6 +250,9 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.Equal(LiveInventoryCollectionStatus.Cancelled, result.CollectionStatus);
     }
 
+    /// <summary>
+    /// A factory that throws <c>IOException</c> 'connection refused' gives <c>ConnectionFailed</c> for that router.
+    /// </summary>
     [Fact]
     public async Task ConnectionFailure_IsIsolated()
     {
@@ -215,6 +265,10 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
         Assert.Equal(LiveInventoryCollectionStatus.ConnectionFailed, result.CollectionStatus);
     }
 
+    /// <summary>
+    /// <c>EnsureAllowed</c> throws <c>InvalidOperationException</c> for <c>/tool/fetch</c>, <c>/system/reboot</c>,
+    /// <c>/system/backup/save</c> and <c>/export</c>.
+    /// </summary>
     [Fact]
     public void DisallowedCommand_IsRejectedByExecutor()
     {
@@ -228,6 +282,8 @@ public sealed class ReadOnlyMikrotikInventoryCollectorTests
             ReadOnlyTikCommandExecutor.EnsureAllowed("/export"));
     }
 
+    /// <summary>Creates the collector under test over <paramref name="factory"/>.</summary>
+    /// <param name="factory">Connection factory fake.</param>
     private static ReadOnlyMikrotikInventoryCollector Create(IMikrotikConnectionFactory factory) =>
         new(factory, NullLogger<ReadOnlyMikrotikInventoryCollector>.Instance);
 }

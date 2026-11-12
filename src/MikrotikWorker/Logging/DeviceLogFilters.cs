@@ -1,7 +1,20 @@
+// -----------------------------------------------------------------------------
+// File: DeviceLogFilters.cs
+//
+// Description:
+// Serilog filter predicates that keep device-detail Information/Debug events out
+// of the service console/file sinks while leaving warnings, errors, service
+// summaries, and explicit service-only markers in the service log.
+//
+// -----------------------------------------------------------------------------
+
 using Serilog.Events;
 
 namespace MikrotikWorker.Logging;
 
+/// <summary>
+/// Shared Serilog filter helpers for device vs service sink routing.
+/// </summary>
 internal static class DeviceLogFilters
 {
     /// <summary>
@@ -30,6 +43,10 @@ internal static class DeviceLogFilters
         return logEvent.Level < LogEventLevel.Warning;
     }
 
+    /// <summary>
+    /// True when the event carries <see cref="DeviceLogNaming.ServiceOnlyPropertyName"/>
+    /// and must not be mirrored into a per-device file.
+    /// </summary>
     public static bool IsServiceOnlyEvent(LogEvent logEvent)
     {
         ArgumentNullException.ThrowIfNull(logEvent);

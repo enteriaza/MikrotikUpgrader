@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: OspfBackboneSafety.cs
+//
+// Description:
+// Explicit OSPF role invariants and pre-mutation backbone / management-plane
+// safety gates used before and after OSPF apply.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 
 namespace MikrotikWorker.Upgrade.Ospf;
@@ -7,8 +16,13 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal enum OspfTemplateRole
 {
+    /// <summary>Designated active backhaul / backbone adjacency template.</summary>
     ActiveBackhaul = 0,
+
+    /// <summary>Passive loopback template.</summary>
     PassiveLoopback = 1,
+
+    /// <summary>Passive site or customer matcher template.</summary>
     PassiveSiteOrCustomer = 2,
 }
 
@@ -18,6 +32,9 @@ internal enum OspfTemplateRole
 /// </summary>
 internal static class OspfBackboneSafety
 {
+    /// <summary>
+    /// Validates plan backhaul/role invariants against current IP address inventory; returns error strings.
+    /// </summary>
     public static IReadOnlyList<string> ValidatePlanInvariants(
         OspfMigrationPlan plan,
         IReadOnlyList<OspfIpAddressRow> addresses)
@@ -184,6 +201,9 @@ internal static class OspfBackboneSafety
         return errors;
     }
 
+    /// <summary>
+    /// True when the live template matches a planned designated active backhaul.
+    /// </summary>
     public static bool IsDesignatedBackhaulTemplate(
         OspfInterfaceTemplateRow template,
         OspfPlanBackhaulTemplate backhaul) =>
@@ -191,6 +211,9 @@ internal static class OspfBackboneSafety
         && string.Equals(template.Interfaces, backhaul.Interface, StringComparison.Ordinal)
         && string.Equals(Normalize(template.Networks), Normalize(backhaul.NetworkCidr), StringComparison.Ordinal);
 
+    /// <summary>
+    /// True when the live template .id is one of the designated backhaul ids in the plan.
+    /// </summary>
     public static bool IsDesignatedBackhaulId(
         string? id,
         IReadOnlyList<OspfInterfaceTemplateRow> templates,
@@ -211,6 +234,12 @@ internal static class OspfBackboneSafety
         return backhauls.Any(b => IsDesignatedBackhaulTemplate(row, b));
     }
 
+    /// <summary>
+    /// Determines whether an interface address belongs to the expected subnet with the same prefix length.
+    /// </summary>
+    /// <param name="addr">Interface address row.</param>
+    /// <param name="expected">Expected subnet.</param>
+    /// <returns><see langword="true"/> when the address is in the subnet at the same prefix length.</returns>
     private static bool TryHostInPrefix(OspfIpAddressRow addr, OspfIpPrefix expected)
     {
         if (!OspfIpPrefix.TryParseHost(addr.Address, out uint host, out int len))
@@ -229,6 +258,11 @@ internal static class OspfBackboneSafety
         return expected.ContainsHost(host) && len == expected.PrefixLength;
     }
 
+    /// <summary>
+    /// Normalises a CIDR for comparison, falling back to the trimmed text when it cannot be parsed.
+    /// </summary>
+    /// <param name="cidr">CIDR text.</param>
+    /// <returns>The normalised CIDR, or an empty string for null.</returns>
     private static string Normalize(string? cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p) ? p.ToCidrString() : cidr?.Trim() ?? string.Empty;
 }
@@ -239,26 +273,77 @@ internal static class OspfBackboneSafety
 /// </summary>
 internal sealed class OspfManagementPlaneBaseline
 {
+    /// <summary>
+    /// Management host address used for route observation.
+    /// </summary>
     public required string ManagementHost { get; init; }
+    /// <summary>
+    /// Observed backbone/backhaul interface name when known.
+    /// </summary>
     public required string? BackboneInterface { get; init; }
+    /// <summary>
+    /// Live .id of the designated backbone template when known.
+    /// </summary>
     public required string? BackboneTemplateId { get; init; }
+    /// <summary>
+    /// Backbone area name observed/expected.
+    /// </summary>
     public required string? BackboneArea { get; init; }
+    /// <summary>
+    /// Backbone/backhaul network prefix.
+    /// </summary>
     public required string? BackboneNetwork { get; init; }
+    /// <summary>
+    /// True when the backbone template was active at baseline capture.
+    /// </summary>
     public required bool BackboneWasActive { get; init; }
+    /// <summary>
+    /// True when the backbone template was passive (unsafe).
+    /// </summary>
     public required bool BackboneTemplatePassive { get; init; }
+    /// <summary>
+    /// True when the backbone template was disabled.
+    /// </summary>
     public required bool BackboneTemplateDisabled { get; init; }
+    /// <summary>
+    /// Observed OSPF neighbour address when known.
+    /// </summary>
     public required string? NeighbourAddress { get; init; }
+    /// <summary>
+    /// Observed OSPF neighbour router-id when known.
+    /// </summary>
     public required string? NeighbourRouterId { get; init; }
+    /// <summary>
+    /// Observed OSPF neighbour state string.
+    /// </summary>
     public required string? NeighbourState { get; init; }
+    /// <summary>
+    /// True when a FULL neighbour was observed at baseline.
+    /// </summary>
     public required bool NeighbourWasFull { get; init; }
 
     /// <summary>Selected <c>/ip/route</c> destination covering <see cref="ManagementHost"/>.</summary>
     public required string? ManagementRouteDst { get; init; }
 
+    /// <summary>
+    /// Gateway of the observed management route.
+    /// </summary>
     public required string? ManagementRouteGateway { get; init; }
+    /// <summary>
+    /// Immediate gateway of the observed management route.
+    /// </summary>
     public required string? ManagementRouteImmediateGw { get; init; }
+    /// <summary>
+    /// Outgoing interface of the observed management route.
+    /// </summary>
     public required string? ManagementOutgoingInterface { get; init; }
+    /// <summary>
+    /// True when the observed management route is active.
+    /// </summary>
     public required bool ManagementRouteActive { get; init; }
+    /// <summary>
+    /// True when a covering management route was observed.
+    /// </summary>
     public required bool ManagementRouteObserved { get; init; }
 
     /// <summary>
@@ -274,13 +359,22 @@ internal sealed class OspfManagementPlaneBaseline
     public bool EndToEndManagementConnectivityVerified => false;
 }
 
+/// <summary>
+/// Thrown when a backbone/management safety gate refuses an OSPF mutation or verify.
+/// </summary>
 internal sealed class OspfBackboneMutationGuardException : InvalidOperationException
 {
+    /// <summary>
+    /// Creates a backbone/management safety abort exception.
+    /// </summary>
     public OspfBackboneMutationGuardException(string message)
         : base(message)
     {
     }
 
+    /// <summary>
+    /// Creates a backbone/management safety abort exception.
+    /// </summary>
     public OspfBackboneMutationGuardException(string message, Exception innerException)
         : base(message, innerException)
     {

@@ -1,3 +1,11 @@
+// -----------------------------------------------------------------------------
+// File: LiveMikrotikPreflightTests.cs
+//
+// Description:
+// Live category preflight checks against lab MikroTik devices.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
@@ -14,10 +22,18 @@ namespace MikrotikWorker.Tests.Upgrade.Live;
 [Trait("Category", "Live")]
 public sealed class LiveMikrotikPreflightTests
 {
+    /// <summary>Lab router address targeted by this opt-in live test.</summary>
     private const string LiveHost = "198.18.0.83";
+    /// <summary>Temp file where the preflight result JSON is written for review.</summary>
     private static readonly string SummaryPath =
         Path.Combine(Path.GetTempPath(), "mikrotik-live-preflight-result.json");
 
+    /// <summary>
+    /// Deliberate pre-upgrade baseline for the next authorised live run.
+    /// Arms the live gate, loads local credentials, checks TCP reachability,
+    /// then reads device info and asserts pre-flight succeeded.
+    /// Invariant: secrets must never appear in log or validation failure text.
+    /// </summary>
     [Fact]
     public async Task LiveRouter_Preflight_ConnectReadDisconnect()
     {
@@ -128,6 +144,9 @@ public sealed class LiveMikrotikPreflightTests
             static m => m.Contains("Password=", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Serialises the summary object as indented JSON and writes it to the preflight summary file.
+    /// </summary>
     private static async Task WriteSummaryAsync(object summary)
     {
         await File.WriteAllTextAsync(
@@ -135,6 +154,10 @@ public sealed class LiveMikrotikPreflightTests
             JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    /// <summary>
+    /// Looks for <c>appsettings.Development.local.json</c> in the worker project folder, the test output folder and
+    /// the current directory, returning the first existing path or null.
+    /// </summary>
     private static string? FindLocalConfigPath()
     {
         string[] candidates =
@@ -148,11 +171,19 @@ public sealed class LiveMikrotikPreflightTests
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    /// <summary>
+    /// Replaces every occurrence of the password in the message with <c>***</c>, leaving the message unchanged when
+    /// the password is empty.
+    /// </summary>
     private static string Sanitize(string message, string password) =>
         string.IsNullOrEmpty(password)
             ? message
             : message.Replace(password, "***", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Maps an exception to a coarse failure label (cancellation, timeout, TCP connectivity, API authentication,
+    /// API command, or unknown) for the preflight summary.
+    /// </summary>
     private static string ClassifyFailure(Exception ex) =>
         ex switch
         {
@@ -171,6 +202,10 @@ public sealed class LiveMikrotikPreflightTests
             _ => "Unknown / see exception",
         };
 
+    /// <summary>
+    /// Attempts a TCP connect to the host and port within the timeout and returns true on success, false on any
+    /// failure.
+    /// </summary>
     private static async Task<bool> IsTcpReachableAsync(string host, int port, TimeSpan timeout)
     {
         try

@@ -1,12 +1,30 @@
+// -----------------------------------------------------------------------------
+// File: FirmwareDeploymentTests.cs
+//
+// Description:
+// Tests firmware directory deployment/serving assumptions used by advertised base URL
+// fetch workflows.
+//
+// -----------------------------------------------------------------------------
+
 using System.Diagnostics;
 using System.Security.Cryptography;
 
 namespace MikrotikWorker.Tests.Hosting;
+/// <summary>
+/// Covers firmware directory deployment/serving assumptions.
+/// </summary>
 public sealed class FirmwareDeploymentTests
 {
+    /// <summary>Upper bound for each host start/stop and HTTP wait in these tests.</summary>
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>Sample firmware payload served and compared byte-for-byte.</summary>
     private static readonly byte[] SampleFirmware = "deployed-firmware-bytes"u8.ToArray();
 
+    /// <summary>
+    /// Compares repo source FirmwareFiles to worker build output FirmwareFiles.
+    /// Expects every source file present with matching SHA-256.
+    /// </summary>
     [Fact]
     public void FirmwareFiles_AreCopiedToBuildOutput()
     {
@@ -19,6 +37,10 @@ public sealed class FirmwareDeploymentTests
         AssertFirmwareTreeCopied(sourceRoot, outputRoot);
     }
 
+    /// <summary>
+    /// dotnet publish of the worker project to a temp directory.
+    /// Expects FirmwareFiles tree copied with matching hashes.
+    /// </summary>
     [Fact]
     public void FirmwareFiles_AreIncludedInPublishOutput()
     {
@@ -42,6 +64,10 @@ public sealed class FirmwareDeploymentTests
         }
     }
 
+    /// <summary>
+    /// Build-output FirmwareFiles tree.
+    /// Expects nested mikrotik/ paths preserved (not flattened).
+    /// </summary>
     [Fact]
     public void NestedDirectoryStructures_ArePreservedInBuildOutput()
     {
@@ -55,6 +81,10 @@ public sealed class FirmwareDeploymentTests
                 || path.Contains("/mikrotik/", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Writes sample.npk under AppContext FirmwareFiles; CWD moved to temp; relative firmware root.
+    /// Expects HTTP download matches bytes and options resolve against BaseDirectory.
+    /// </summary>
     [Fact]
     public async Task HttpRequests_RetrieveFilesFromDeployedFirmwareDirectory()
     {
@@ -106,6 +136,9 @@ public sealed class FirmwareDeploymentTests
         }
     }
 
+    /// <summary>
+    /// Asserts every source file exists at the destination with identical SHA-256.
+    /// </summary>
     private static void AssertFirmwareTreeCopied(string sourceRoot, string destinationRoot)
     {
         string[] sourceFiles = Directory.GetFiles(sourceRoot, "*", SearchOption.AllDirectories);
@@ -121,6 +154,9 @@ public sealed class FirmwareDeploymentTests
         }
     }
 
+    /// <summary>
+    /// Hex-encoded SHA-256 of a file's contents.
+    /// </summary>
     private static string ComputeSha256(string path)
     {
         using FileStream stream = File.OpenRead(path);
@@ -128,12 +164,15 @@ public sealed class FirmwareDeploymentTests
         return Convert.ToHexString(hash);
     }
 
+    /// <summary>
+    /// Runs dotnet publish -c Release and asserts exit code 0.
+    /// </summary>
     private static void RunDotnetPublish(string projectPath, string outputDirectory)
     {
         ProcessStartInfo startInfo = new()
         {
             FileName = "dotnet",
-            Arguments = $"publish \"{projectPath}\" -c Release -o \"{outputDirectory}\"",
+            Arguments = $"publish \"{projectPath}\" -c Release -o \"{outputDirectory}\" -p:NoWarn=NU1507",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,

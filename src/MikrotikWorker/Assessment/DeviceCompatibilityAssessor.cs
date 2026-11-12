@@ -1,20 +1,39 @@
+// -----------------------------------------------------------------------------
+// File: DeviceCompatibilityAssessor.cs
+//
+// Description:
+// Classifies device RouterOS version against the fixed v6 stepping target and
+// dynamic v7 catalogue target, matches packages, and produces overall upgrade readiness.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Upgrade;
 
 namespace MikrotikWorker.Assessment;
 
+/// <summary>
+/// Assesses whether a connected device can follow the automatic upgrade path.
+/// </summary>
 internal interface IDeviceCompatibilityAssessor
 {
+    /// <summary>
+    /// Builds a credential-free assessment from <paramref name="deviceInfo"/>.
+    /// </summary>
     DeviceCompatibilityAssessment Assess(
         string routerIp,
         MikrotikDeviceInfo deviceInfo,
         DateTimeOffset assessedAtUtc);
 }
 
+/// <summary>
+/// Production assessor using the firmware catalogue and live v7 target provider.
+/// </summary>
 internal sealed class DeviceCompatibilityAssessor(
     IFirmwarePackageCatalog packageCatalog,
     IRouterOsV7TargetProvider v7TargetProvider) : IDeviceCompatibilityAssessor
 {
+    /// <inheritdoc />
     public DeviceCompatibilityAssessment Assess(
         string routerIp,
         MikrotikDeviceInfo deviceInfo,
@@ -86,6 +105,9 @@ internal sealed class DeviceCompatibilityAssessor(
         };
     }
 
+    /// <summary>
+    /// Maps a parsed device version to older/at/newer-than stepping, v7+, or unknown.
+    /// </summary>
     private static RouterOsVersionClassification ClassifyAgainstStepping(
         RouterOsVersion device,
         RouterOsVersion stepping)
@@ -114,6 +136,9 @@ internal sealed class DeviceCompatibilityAssessor(
         return RouterOsVersionClassification.NewerThanTargetV6;
     }
 
+    /// <summary>
+    /// Chooses the upgrade path status and appends path findings for the classification.
+    /// </summary>
     private static UpgradePathStatus AssessUpgradePath(
         RouterOsVersionClassification classification,
         RouterOsVersion? deviceVersion,
@@ -181,6 +206,10 @@ internal sealed class DeviceCompatibilityAssessor(
         }
     }
 
+    /// <summary>
+    /// Selects the package version to match: fixed v6 stepping for older-v6 devices,
+    /// otherwise the dynamic v7 target when available (falls back to stepping for diagnostics).
+    /// </summary>
     private static RouterOsVersion ResolvePackageTarget(
         RouterOsVersionClassification classification,
         RouterOsVersion? deviceVersion,
@@ -201,6 +230,9 @@ internal sealed class DeviceCompatibilityAssessor(
         return stepping;
     }
 
+    /// <summary>
+    /// Locates a unique <c>routeros</c> package matching device architecture and <paramref name="target"/>.
+    /// </summary>
     private PackageMatchResult MatchPackage(
         string? deviceArchitecture,
         RouterOsVersion target,
@@ -292,6 +324,9 @@ internal sealed class DeviceCompatibilityAssessor(
         return new(PackageCompatibilityStatus.Compatible, match.FileName, match.Architecture, match.Version);
     }
 
+    /// <summary>
+    /// Compares RouterBOARD current vs upgrade firmware when both parse; does not issue upgrades.
+    /// </summary>
     private static RouterboardFirmwareStatus AssessRouterboard(
         MikrotikDeviceInfo deviceInfo,
         List<AssessmentFinding> findings)
@@ -358,6 +393,11 @@ internal sealed class DeviceCompatibilityAssessor(
         return RouterboardFirmwareStatus.Inconclusive;
     }
 
+    /// <summary>
+    /// Rolls path/package/blocker findings into ReadyForUpgrade, AlreadyAtTarget, or Blocked.
+    /// Does not currently emit <see cref="DeviceAssessmentStatus.ManualReviewRequired"/> or
+    /// <see cref="DeviceAssessmentStatus.Unsupported"/>.
+    /// </summary>
     private static DeviceAssessmentStatus DetermineOverall(
         RouterOsVersionClassification classification,
         UpgradePathStatus upgradePath,
@@ -412,9 +452,11 @@ internal sealed class DeviceCompatibilityAssessor(
         return DeviceAssessmentStatus.Blocked;
     }
 
+    /// <summary>Returns null when <paramref name="value"/> is null/whitespace; otherwise the value.</summary>
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value;
 
+    /// <summary>Internal package-match outcome carried into the assessment DTO.</summary>
     private readonly record struct PackageMatchResult(
         PackageCompatibilityStatus Status,
         string? FileName,

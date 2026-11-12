@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: ScheduledJobCsvParser.cs
+//
+// Description:
+// Validates and enumerates ScheduledJobs CSV files: size/record limits, required
+// headers, shared maintenance window rules, IP literals, and date parsing.
+// Result columns are allowed and ignored on import; obsolete executionmode is
+// rejected. Emits <see cref="CsvParseResult"/> and <see cref="MikrotikScheduledJob"/> streams.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
@@ -8,16 +19,35 @@ using MikrotikWorker.Configuration;
 
 namespace MikrotikWorker.Scheduling;
 
+/// <summary>
+/// Parses and validates schedule CSVs, then enumerates jobs from an accepted file.
+/// </summary>
+/// <param name="scheduledJobsOptions">File size, record, and retained-error limits.</param>
+/// <param name="dateTimeParser">Culture/time-zone aware date conversion.</param>
 internal sealed class ScheduledJobCsvParser(
     IOptions<ScheduledJobsOptions> scheduledJobsOptions,
     CsvDateTimeParser dateTimeParser)
 {
+    /// <summary>
+    /// Lower-case column names every scheduled job CSV must contain.
+    /// </summary>
     private static readonly string[] RequiredHeaders = ["datestart", "datestop", "routername", "routerip"];
 
+    /// <summary>
+    /// Name of the retired <c>ExecutionMode</c> column, which is rejected with guidance to remove it.
+    /// </summary>
     private const string RemovedExecutionModeHeader = "executionmode";
 
     // Application-owned output columns on the Accepted CSV. Present after jobs finish; ignored on re-import.
 
+    /// <summary>
+    /// Full-file validation pass: existence, size, headers, per-row window/IP rules, and shared start/stop.
+    /// Does not mutate the file.
+    /// </summary>
+    /// <param name="filePath">CSV to validate.</param>
+    /// <param name="utcNow">Current UTC used to reject already-closed windows.</param>
+    /// <param name="cancellationToken">Cancels mid-scan.</param>
+    /// <returns>Accepted result with counts/window, or Rejected with retained errors.</returns>
     public async Task<CsvParseResult> ValidateAsync(
         string filePath,
         DateTime utcNow,
@@ -130,6 +160,13 @@ internal sealed class ScheduledJobCsvParser(
         return CsvParseResult.Accepted(recordCount, expectedStartUtc!.Value, expectedStopUtc!.Value);
     }
 
+    /// <summary>
+    /// Streams jobs from a previously validated Accepted CSV. Assumes headers/rows are valid;
+    /// missing header yields an empty sequence.
+    /// </summary>
+    /// <param name="filePath">Accepted CSV path.</param>
+    /// <param name="importId">Import id stamped onto each job.</param>
+    /// <param name="cancellationToken">Cancels between rows.</param>
     public async IAsyncEnumerable<MikrotikScheduledJob> EnumerateJobsAsync(
         string filePath,
         Guid importId,
@@ -170,6 +207,7 @@ internal sealed class ScheduledJobCsvParser(
         }
     }
 
+    /// <summary>Creates a CsvHelper reader with trimmed, lowercased header matching.</summary>
     private static CsvReader CreateReader(TextReader reader)
     {
         CsvConfiguration configuration = new(CultureInfo.InvariantCulture)
@@ -186,6 +224,10 @@ internal sealed class ScheduledJobCsvParser(
         return new CsvReader(reader, configuration);
     }
 
+    /// <summary>
+    /// Builds a header→index map, rejecting obsolete <c>executionmode</c> and missing required columns.
+    /// Result columns are permitted and ignored by <see cref="ReadRow"/>.
+    /// </summary>
     private static Dictionary<string, int> BuildHeaderMap(
         CsvReader csv,
         string fileName,
@@ -241,6 +283,7 @@ internal sealed class ScheduledJobCsvParser(
         return map;
     }
 
+    /// <summary>Reads required schedule fields from the current CSV row into a <see cref="ParsedCsvRow"/>.</summary>
     private static ParsedCsvRow ReadRow(
         CsvReader csv,
         Dictionary<string, int> headers,
@@ -260,6 +303,7 @@ internal sealed class ScheduledJobCsvParser(
         return new ParsedCsvRow(routerName, routerIp, dateStartUtc, dateStopUtc);
     }
 
+    /// <summary>Gets a non-empty trimmed field or throws <see cref="CsvScheduleException"/>.</summary>
     private static string GetRequiredField(
         CsvReader csv,
         Dictionary<string, int> headers,
@@ -281,6 +325,10 @@ internal sealed class ScheduledJobCsvParser(
         return value.Trim();
     }
 
+    /// <summary>
+    /// Parses an IPv4/IPv6 literal; rejects hostnames and non-literal forms that
+    /// <see cref="IPAddress.TryParse(string?, out IPAddress?)"/> might accept.
+    /// </summary>
     private static IPAddress ParseIpAddress(string value, string fileName, int rowNumber)
     {
         if (value.Any(char.IsLetter) && !value.Contains(':', StringComparison.Ordinal))
@@ -322,6 +370,7 @@ internal sealed class ScheduledJobCsvParser(
         return address;
     }
 
+    /// <summary>Heuristic that the original text looks like a dotted IPv4 or colon IPv6 literal.</summary>
     private static bool LooksLikeIpLiteral(string value, IPAddress address)
     {
         if (address.AddressFamily == AddressFamily.InterNetworkV6)
@@ -332,6 +381,9 @@ internal sealed class ScheduledJobCsvParser(
         return value.All(static ch => char.IsDigit(ch) || ch == '.');
     }
 
+    /// <summary>
+    /// Enforces stop &gt; start, stop still open relative to <paramref name="utcNow"/>, and shared window across rows.
+    /// </summary>
     private static void ValidateRow(
         string fileName,
         int? rowNumber,
@@ -388,20 +440,35 @@ internal sealed class ScheduledJobCsvParser(
         }
     }
 
+    /// <summary>Normalized required fields from one CSV data row.</summary>
+    /// <param name="RouterName">Trimmed router name.</param>
+    /// <param name="RouterIp">Parsed IP literal.</param>
+    /// <param name="DateStartUtc">Inclusive window start (UTC).</param>
+    /// <param name="DateStopUtc">Exclusive window end (UTC).</param>
     private sealed record ParsedCsvRow(
         string RouterName,
         IPAddress RouterIp,
         DateTime DateStartUtc,
         DateTime DateStopUtc);
 
+    /// <summary>
+    /// Counts all validation errors while retaining only the first <paramref name="maxRetained"/> for reports.
+    /// </summary>
+    /// <param name="maxRetained">Cap from <see cref="ScheduledJobsOptions.MaxValidationErrorsRetained"/>.</param>
     private sealed class ErrorAccumulator(int maxRetained)
     {
+        /// <summary>
+        /// Errors kept for the reject report, capped at the maximum retained.
+        /// </summary>
         private readonly List<CsvValidationError> _retained = [];
 
+        /// <summary>Total errors seen, including those omitted from <see cref="Retained"/>.</summary>
         public int TotalCount { get; private set; }
 
+        /// <summary>Errors kept for the reject report (≤ max retained).</summary>
         public IReadOnlyList<CsvValidationError> Retained => _retained;
 
+        /// <summary>Increments <see cref="TotalCount"/> and appends when under the retain cap.</summary>
         public void Add(CsvValidationError error)
         {
             TotalCount++;
@@ -413,8 +480,20 @@ internal sealed class ScheduledJobCsvParser(
     }
 }
 
+/// <summary>
+/// Outcome of <see cref="ScheduledJobCsvParser.ValidateAsync"/>: either accepted counts/window or retained errors.
+/// </summary>
 internal sealed class CsvParseResult
 {
+    /// <summary>
+    /// Creates a result; use <see cref="Accepted"/> or <see cref="Rejected"/>.
+    /// </summary>
+    /// <param name="isAccepted">Whether validation passed.</param>
+    /// <param name="recordCount">Number of data rows accepted.</param>
+    /// <param name="dateStartUtc">Shared window start in UTC.</param>
+    /// <param name="dateStopUtc">Shared window stop in UTC.</param>
+    /// <param name="errors">Retained validation errors.</param>
+    /// <param name="totalErrorCount">Total errors found, including any not retained.</param>
     private CsvParseResult(
         bool isAccepted,
         int recordCount,
@@ -431,21 +510,29 @@ internal sealed class CsvParseResult
         TotalErrorCount = totalErrorCount;
     }
 
+    /// <summary><c>true</c> when the file may proceed to Accepted/scheduling.</summary>
     public bool IsAccepted { get; }
 
+    /// <summary>Validated data-row count when accepted; otherwise 0.</summary>
     public int RecordCount { get; }
 
+    /// <summary>Shared maintenance window start when accepted.</summary>
     public DateTime DateStartUtc { get; }
 
+    /// <summary>Shared maintenance window stop when accepted.</summary>
     public DateTime DateStopUtc { get; }
 
+    /// <summary>Retained validation errors (may be fewer than <see cref="TotalErrorCount"/>).</summary>
     public IReadOnlyList<CsvValidationError> Errors { get; }
 
+    /// <summary>Total validation errors discovered (including omitted ones).</summary>
     public int TotalErrorCount { get; }
 
+    /// <summary>Factory for a successful validation result.</summary>
     public static CsvParseResult Accepted(int recordCount, DateTime dateStartUtc, DateTime dateStopUtc) =>
         new(true, recordCount, dateStartUtc, dateStopUtc, [], 0);
 
+    /// <summary>Factory for a rejected validation result.</summary>
     public static CsvParseResult Rejected(IReadOnlyList<CsvValidationError> errors, int totalErrorCount) =>
         new(false, 0, default, default, errors, totalErrorCount);
 }

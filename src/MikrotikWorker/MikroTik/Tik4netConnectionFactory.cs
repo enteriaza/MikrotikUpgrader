@@ -1,11 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: Tik4netConnectionFactory.cs
+//
+// Description:
+// Production IMikrotikConnectionFactory using tik4net. Merges per-device
+// MikrotikConnectionOptions with Mikrotik:Port and Mikrotik:ConnectionTimeout
+// defaults, then opens a TikConnectionType.Api session.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using tik4net;
 
 namespace MikrotikWorker.MikroTik;
 
+/// <summary>
+/// Opens short-lived tik4net API connections using shared <see cref="MikroTikOptions"/> defaults.
+/// </summary>
 internal sealed class Tik4netConnectionFactory(IOptions<MikroTikOptions> options) : IMikrotikConnectionFactory
 {
+    /// <inheritdoc />
     public async Task<ITikConnection> CreateAsync(
         MikrotikConnectionOptions connection,
         CancellationToken cancellationToken)

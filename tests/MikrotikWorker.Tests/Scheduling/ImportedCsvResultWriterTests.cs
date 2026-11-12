@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: ImportedCsvResultWriterTests.cs
+//
+// Description:
+// Unit/integration tests for ImportedCsvResultWriter column formatting,
+// concurrency, CSV edge cases (quotes/newlines), re-import ignoring result
+// columns, and scheduler terminal path writing before Completed archive.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -10,8 +20,15 @@ using MikrotikWorker.Scheduling;
 
 namespace MikrotikWorker.Tests.Scheduling;
 
+/// <summary>
+/// Exercises in-place Accepted CSV result writes for start/completion/result columns.
+/// </summary>
 public sealed class ImportedCsvResultWriterTests
 {
+    /// <summary>
+    /// Record start, advance five minutes, record Succeeded.
+    /// Expects ISO timestamps for start/completion, Result=Success, and identity columns unchanged.
+    /// </summary>
     [Fact]
     public async Task SuccessfulJob_WritesStartCompletionAndSuccess()
     {
@@ -34,6 +51,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal("10.0.0.1", row.RouterIp);
     }
 
+    /// <summary>
+    /// Start then Failed with upgrade detail.
+    /// Expects both timestamps populated and Result starting with Failed - Firmware upgrade.
+    /// </summary>
     [Fact]
     public async Task FailedUpgrade_WritesBothTimestampsAndFailure()
     {
@@ -54,6 +75,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.StartsWith("Failed - Firmware upgrade", row.Result, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Terminal Failed without a prior start record.
+    /// Expects blank UpgradeStarted, populated UpgradeCompleted, and a Failed result.
+    /// </summary>
     [Fact]
     public async Task FailureBeforeUpgrade_LeavesStartBlank()
     {
@@ -72,6 +97,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Contains("Failed", row.Result, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Completed as Cancelled with no detail.
+    /// Expects Result exactly Cancelled.
+    /// </summary>
     [Fact]
     public async Task Cancellation_WritesTerminalResult()
     {
@@ -87,6 +116,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal("Cancelled", harness.ReadRow(2).Result);
     }
 
+    /// <summary>
+    /// Job carrying retry metadata but no RecordJobCompleted yet.
+    /// Expects result columns absent until a terminal write; then Failed - Connection.
+    /// </summary>
     [Fact]
     public async Task TransientFailure_DoesNotWriteCompletion_UntilTerminal()
     {
@@ -108,6 +141,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.StartsWith("Failed - Connection", harness.ReadRow(2).Result, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Prior connection failures then Succeeded after start.
+    /// Expects final Result=Success with start present — no leftover failure text.
+    /// </summary>
     [Fact]
     public async Task RetryThenSuccess_WritesOnlyFinalResult()
     {
@@ -128,6 +165,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.False(string.IsNullOrWhiteSpace(row.UpgradeStarted));
     }
 
+    /// <summary>
+    /// Three parallel RecordJobCompleted calls on distinct rows.
+    /// Expects each row's Success/Failed/Cancelled preserved without clobbering siblings.
+    /// </summary>
     [Fact]
     public async Task ConcurrentCompletions_DoNotLoseUpdates()
     {
@@ -149,6 +190,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal("Cancelled", harness.ReadRow(4).Result);
     }
 
+    /// <summary>
+    /// Interleaved start on A with completions on A and B.
+    /// Expects A's start and completion timestamps both survive concurrent writers.
+    /// </summary>
     [Fact]
     public async Task ConcurrentStartAndCompletion_PreservesBoth()
     {
@@ -170,6 +215,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal("Success", harness.ReadRow(3).Result);
     }
 
+    /// <summary>
+    /// Two rows sharing 10.0.0.9 with distinct names/notes.
+    /// Expects row-number addressing: Success vs Failed without swapping Note fields.
+    /// </summary>
     [Fact]
     public async Task SameRouterIp_DifferentRows_UpdateIndependently()
     {
@@ -197,6 +246,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal("second", harness.ReadRow(3).Get("Note"));
     }
 
+    /// <summary>
+    /// Path store points at a missing CSV.
+    /// Expects RecordJobCompleted completes without throwing (errors logged only).
+    /// </summary>
     [Fact]
     public async Task FailedCsvUpdate_DoesNotThrowToCaller_AndLeavesOutcomeUnchanged()
     {
@@ -214,6 +267,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal(ScheduledJobTerminalState.Succeeded, ScheduledJobTerminalState.Succeeded);
     }
 
+    /// <summary>
+    /// Note with comma and router name with embedded newline.
+    /// Expects round-trip preserves quoted special characters after a result write.
+    /// </summary>
     [Fact]
     public async Task PreservesQuotedCommasAndEmbeddedNewlines()
     {
@@ -233,6 +290,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal("line\nbreak", harness.ReadRow(3).RouterName);
     }
 
+    /// <summary>
+    /// CSV already containing result columns after a successful write.
+    /// Expects Validate/Enumerate accept the file and jobs do not carry result metadata in memory.
+    /// </summary>
     [Fact]
     public async Task Reimport_IgnoresResultColumns()
     {
@@ -277,6 +338,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Null(jobs[0].LastRetryFailureReason);
     }
 
+    /// <summary>
+    /// Failed result on disk; new import id overwrites with Success.
+    /// Expects old Failed remains until the new completion write replaces it.
+    /// </summary>
     [Fact]
     public async Task ExistingResults_RemainOnDisk_UntilNewCompletionOverwrites()
     {
@@ -298,6 +363,10 @@ public sealed class ImportedCsvResultWriterTests
         Assert.Equal("Success", harness.ReadRow(2).Result);
     }
 
+    /// <summary>
+    /// Writer + path store wired like the scheduler terminal path.
+    /// Expects Success on the Accepted CSV before archive dispose cleanup.
+    /// </summary>
     [Fact]
     public async Task SchedulerTerminalPath_WritesCsv_BeforeArchive()
     {
@@ -359,6 +428,9 @@ public sealed class ImportedCsvResultWriterTests
         try { Directory.Delete(root, true); } catch { /* ignore */ }
     }
 
+    /// <summary>
+    /// Reads the Result column for a 1-based CSV row number via CsvHelper.
+    /// </summary>
     private static string ReadResult(string path, int rowNumber)
     {
         using StreamReader reader = new(path, Encoding.UTF8);
@@ -382,8 +454,21 @@ public sealed class ImportedCsvResultWriterTests
         throw new InvalidOperationException($"Row {rowNumber} not found.");
     }
 
+    /// <summary>
+    /// Temp Accepted CSV, FakeTimeProvider, path store, and ImportedCsvResultWriter.
+    /// Creates N data rows and maps CreateJob to import id / row / IP.
+    /// </summary>
     private sealed class CsvHarness : IAsyncDisposable
     {
+        /// <summary>
+        /// Initializes the harness state.
+        /// </summary>
+        /// <param name="root">Temporary directory containing the CSV, deleted on disposal.</param>
+        /// <param name="csvPath">Path of the generated import CSV.</param>
+        /// <param name="importId">Import id registered against the CSV in the path store.</param>
+        /// <param name="time">Fake clock used for timestamps.</param>
+        /// <param name="pathStore">Accepted path store shared with the writer.</param>
+        /// <param name="writer">Result writer under test.</param>
         private CsvHarness(
             string root,
             string csvPath,
@@ -400,13 +485,43 @@ public sealed class ImportedCsvResultWriterTests
             Writer = writer;
         }
 
+        /// <summary>
+        /// Temporary directory that contains the import CSV; it is removed when the harness is disposed.
+        /// </summary>
         public string Root { get; }
+
+        /// <summary>
+        /// Path of the generated import CSV, which holds the requested number of data rows.
+        /// </summary>
         public string CsvPath { get; }
+
+        /// <summary>
+        /// Import id registered in the path store against <see cref="CsvPath"/>; the writer uses it to find the file
+        /// to update.
+        /// </summary>
         public Guid ImportId { get; }
+
+        /// <summary>
+        /// Fake clock that supplies the timestamps the writer records, so tests can assert exact values.
+        /// </summary>
         public FakeTimeProvider Time { get; }
+
+        /// <summary>
+        /// Accepted path store shared with the writer; it holds the registration of <see cref="CsvPath"/> under <see
+        /// cref="ImportId"/>.
+        /// </summary>
         public ImportedCsvPathStore PathStore { get; }
+
+        /// <summary>
+        /// Result writer under test, bound to the harness CSV through the shared path store.
+        /// </summary>
         public ImportedCsvResultWriter Writer { get; }
 
+        /// <summary>
+        /// Creates a temp import CSV with the requested number of data rows and a writer bound to it.
+        /// </summary>
+        /// <param name="rowCount">Number of data rows (edge-a, edge-b, ... on 10.0.0.1, 10.0.0.2, ...).</param>
+        /// <returns>A harness whose temp directory is removed on disposal.</returns>
         public static Task<CsvHarness> CreateAsync(int rowCount = 1)
         {
             string root = Directory.CreateTempSubdirectory("csv-results-").FullName;
@@ -428,6 +543,14 @@ public sealed class ImportedCsvResultWriterTests
             return Task.FromResult(new CsvHarness(root, csvPath, importId, time, store, writer));
         }
 
+        /// <summary>
+        /// Builds a MikrotikScheduledJob for the harness clock and import.
+        /// </summary>
+        /// <param name="rowNumber">1-based CSV row number of the job.</param>
+        /// <param name="ip">Router IP address.</param>
+        /// <param name="name">Router name.</param>
+        /// <param name="importId">Import id override; defaults to the harness import.</param>
+        /// <returns>A job whose window starts at the harness clock time and lasts one hour.</returns>
         public MikrotikScheduledJob CreateJob(
             int rowNumber,
             string ip = "10.0.0.1",
@@ -444,12 +567,22 @@ public sealed class ImportedCsvResultWriterTests
                 DateStopUtc = Time.GetUtcNow().UtcDateTime.AddHours(1),
             };
 
+        /// <summary>
+        /// Determines whether the CSV header already contains the Result column.
+        /// </summary>
+        /// <returns><see langword="true"/> when the header includes the Result column; otherwise <see langword="false"/>.</returns>
         public bool HasResultColumns()
         {
             string header = File.ReadLines(CsvPath).First();
             return header.Contains(ImportedCsvResultColumns.Result, StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// Reads a data row from the import CSV into a case-insensitive column map.
+        /// </summary>
+        /// <param name="rowNumber">1-based CSV row number as reported by the parser.</param>
+        /// <returns>The row's fields keyed by header name.</returns>
+        /// <exception cref="InvalidOperationException">The row does not exist.</exception>
         public CsvRow ReadRow(int rowNumber)
         {
             using StreamReader reader = new(CsvPath, Encoding.UTF8);
@@ -482,6 +615,10 @@ public sealed class ImportedCsvResultWriterTests
             throw new InvalidOperationException($"Row {rowNumber} not found.");
         }
 
+        /// <summary>
+        /// Deletes the temporary directory, ignoring cleanup failures.
+        /// </summary>
+        /// <returns>A completed task.</returns>
         public ValueTask DisposeAsync()
         {
             try { Directory.Delete(Root, true); } catch { /* ignore */ }
@@ -489,13 +626,46 @@ public sealed class ImportedCsvResultWriterTests
         }
     }
 
+    /// <summary>
+    /// Case-insensitive column map with helpers for result/timestamp/identity fields.
+    /// </summary>
+    /// <param name="fields">Row values keyed by CSV header name.</param>
     private sealed class CsvRow(Dictionary<string, string> fields)
     {
+        /// <summary>
+        /// UpgradeStarted timestamp text for this row, or an empty string when the column is absent or blank, which
+        /// lets tests assert that no start time was written.
+        /// </summary>
         public string UpgradeStarted => Get(ImportedCsvResultColumns.UpgradeStarted);
+
+        /// <summary>
+        /// UpgradeCompleted timestamp text for this row, or an empty string when the column is absent or blank, which
+        /// lets tests assert that no completion time was written.
+        /// </summary>
         public string UpgradeCompleted => Get(ImportedCsvResultColumns.UpgradeCompleted);
+
+        /// <summary>
+        /// Result text written for this row, or an empty string when the column is absent or blank, which lets tests
+        /// assert that no outcome was recorded.
+        /// </summary>
         public string Result => Get(ImportedCsvResultColumns.Result);
+
+        /// <summary>
+        /// RouterName identity column value that identifies this row; result writing is expected to leave it
+        /// unchanged.
+        /// </summary>
         public string RouterName => Get("RouterName");
+
+        /// <summary>
+        /// RouterIp identity column value that identifies this row; result writing is expected to leave it unchanged.
+        /// </summary>
         public string RouterIp => Get("RouterIp");
+
+        /// <summary>
+        /// Gets a field by header name (case-insensitive).
+        /// </summary>
+        /// <param name="name">CSV header name.</param>
+        /// <returns>The field value, or empty when the column does not exist.</returns>
         public string Get(string name) => fields.TryGetValue(name, out string? v) ? v : string.Empty;
     }
 }

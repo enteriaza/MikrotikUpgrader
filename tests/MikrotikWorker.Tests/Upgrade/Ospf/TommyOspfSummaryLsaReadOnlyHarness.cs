@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: TommyOspfSummaryLsaReadOnlyHarness.cs
+//
+// Description:
+// Strictly read-only investigation of OSPF summary LSA origination /
+// area-range behaviour on Tommy. No mutations, backups, resets, or reconciler
+// apply.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -20,10 +30,19 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class TommyOspfSummaryLsaReadOnlyHarness
 {
+    /// <summary>
+    /// Name of the environment variable that overrides the directory where read-only investigation evidence is written; defaults to a timestamped folder under <c>Reports/OperationalEvidence</c>.
+    /// </summary>
     public const string EvidenceRootEnv = "TOMMY_OSPF_SUMMARY_LSA_EVIDENCE_DIR";
 
+    /// <summary>
+    /// Serializer options used for evidence files so they are human-readable.
+    /// </summary>
     private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
 
+    /// <summary>
+    /// Area ranges (prefix and comment) expected to be configured on Tommy, whose summary LSA origination and component routes are investigated.
+    /// </summary>
     private static readonly (string Prefix, string Comment)[] ExpectedRanges =
     [
         ("10.16.11.0/24", "MGMT"),
@@ -31,6 +50,17 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         ("172.26.197.4/30", "HEROTEL_INACTIVE_POOL"),
     ];
 
+    /// <summary>
+    /// Scenario: Read-only live investigation of why the area ranges on BR01.POP011.016.Tommy (198.18.240.11,
+    /// RouterOS 7.25.1, mipsbe) may not originate summary LSAs. It runs only when the live gate is armed, issues
+    /// print commands only, and writes numbered JSON evidence. For each expected range it analyses the component
+    /// routes (connected, or any route whose destination falls in the range, including blackhole routes) and the
+    /// self-originated inter-area summary LSAs.
+    /// Expected: FirmwareUpgrade.Enabled remains false and the router identity, version and architecture match. The
+    /// router is still reachable with its OSPF neighbour Full after the investigation, and
+    /// 99-investigation-report.json is written with blackhole and inter-area findings.
+    /// Invariant: The investigation makes no configuration change on the router.
+    /// </summary>
     [Fact]
     [Trait("Category", "Live")]
     public async Task Investigate_Tommy_Summary_Lsa_ReadOnly()
@@ -320,6 +350,9 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         Assert.True(File.Exists(Path.Combine(evidenceDir, "99-investigation-report.json")));
     }
 
+    /// <summary>
+    /// Asserts that a neighbour is in the Full state with router-id 198.18.255.253 at address 10.16.248.77.
+    /// </summary>
     private static void AssertNeighbourFull(IReadOnlyList<Dictionary<string, string>> neighbours)
     {
         Assert.Contains(
@@ -329,11 +362,18 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
                  && string.Equals(Get(n, "address"), "10.16.248.77", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Returns true when any neighbour is in the Full state with router-id 198.18.255.253.
+    /// </summary>
     private static bool NeighbourIsFull(IReadOnlyList<Dictionary<string, string>> neighbours) =>
         neighbours.Any(n =>
             string.Equals(Get(n, "state"), "Full", StringComparison.OrdinalIgnoreCase)
             && string.Equals(Get(n, "router-id"), "198.18.255.253", StringComparison.Ordinal));
 
+    /// <summary>
+    /// Projects a raw LSA row into a brief object with type, id, originator, area, instance, sequence, checksum,
+    /// age, options, netmask, metric and the raw row.
+    /// </summary>
     private static object LsaBrief(Dictionary<string, string> l) => new
     {
         Type = Get(l, "type"),
@@ -352,6 +392,12 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         Raw = l,
     };
 
+    /// <summary>
+    /// Extracts the value of <paramref name="key"/> from an LSA <c>body</c> of whitespace/newline-separated <c>key=value</c> pairs.
+    /// <param name="body">Raw LSA body text; may be <see langword="null"/>.</param>
+    /// <param name="key">Field name to look for, compared case-insensitively.</param>
+    /// <returns>The trimmed value, or <see langword="null"/> when the body is empty or the key is absent.</returns>
+    /// </summary>
     private static string? ExtractBodyField(string? body, string key)
     {
         if (string.IsNullOrWhiteSpace(body))
@@ -377,6 +423,9 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         return null;
     }
 
+    /// <summary>
+    /// Returns true when the LSA's id, netmask or body corresponds to the given CIDR prefix.
+    /// </summary>
     private static bool LsaMatchesPrefix(Dictionary<string, string> lsa, string cidr)
     {
         if (!OspfIpPrefix.TryParse(cidr, out OspfIpPrefix expected))
@@ -414,6 +463,12 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
                    || body.Contains(PrefixToDottedMask(expected.PrefixLength), StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Determines whether a route destination equals, lies within, or has a host address inside the given range.
+    /// <param name="dst">Route destination (CIDR or host address).</param>
+    /// <param name="rangeCidr">Area range prefix in CIDR notation.</param>
+    /// <returns><see langword="true"/> when the destination is covered by the range.</returns>
+    /// </summary>
     private static bool RoutePrefixCoveredByRange(string? dst, string rangeCidr)
     {
         if (string.IsNullOrWhiteSpace(dst) || !OspfIpPrefix.TryParse(rangeCidr, out OspfIpPrefix range))
@@ -435,6 +490,12 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         return OspfIpPrefix.TryParseHost(dst, out uint host, out _) && range.ContainsHost(host);
     }
 
+    /// <summary>
+    /// Determines whether the host portion of an interface address (CIDR) lies inside the given range.
+    /// <param name="addressCidr">Interface address, for example <c>10.16.11.30/27</c>.</param>
+    /// <param name="rangeCidr">Area range prefix in CIDR notation.</param>
+    /// <returns><see langword="true"/> when the address is inside the range.</returns>
+    /// </summary>
     private static bool AddressInRange(string? addressCidr, string rangeCidr)
     {
         if (string.IsNullOrWhiteSpace(addressCidr)
@@ -446,6 +507,12 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         return OspfIpPrefix.TryParseHost(addressCidr, out uint host, out _) && range.ContainsHost(host);
     }
 
+    /// <summary>
+    /// Compares two prefixes by value so that differently formatted representations of the same prefix are treated as equal.
+    /// <param name="left">First prefix; blank values never match.</param>
+    /// <param name="right">Second prefix.</param>
+    /// <returns><see langword="true"/> when both parse to the same prefix or are identical strings.</returns>
+    /// </summary>
     private static bool PrefixEqual(string? left, string right)
     {
         if (string.IsNullOrWhiteSpace(left))
@@ -463,6 +530,11 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
                && a.Equals(b);
     }
 
+    /// <summary>
+    /// Converts a dotted-decimal subnet mask into its prefix length by counting leading one bits.
+    /// <param name="mask">Subnet mask address.</param>
+    /// <returns>The number of contiguous leading one bits.</returns>
+    /// </summary>
     private static int MaskToPrefixLength(IPAddress mask)
     {
         byte[] bytes = mask.GetAddressBytes();
@@ -485,6 +557,11 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         return len;
     }
 
+    /// <summary>
+    /// Converts a prefix length into a dotted-decimal subnet mask string.
+    /// <param name="prefixLength">Prefix length from 0 to 32.</param>
+    /// <returns>The mask, for example <c>255.255.255.0</c> for 24.</returns>
+    /// </summary>
     private static string PrefixToDottedMask(int prefixLength)
     {
         uint mask = prefixLength == 0 ? 0u : uint.MaxValue << (32 - prefixLength);
@@ -493,6 +570,11 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
             $"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}");
     }
 
+    /// <summary>
+    /// Interprets a RouterOS flag value as set when it is <c>true</c>, <c>yes</c>, <c>1</c> or empty (a bare flag).
+    /// <param name="value">Raw property value; may be <see langword="null"/>.</param>
+    /// <returns><see langword="true"/> when the flag is considered set.</returns>
+    /// </summary>
     private static bool IsTruthy(string? value) =>
         value is not null
         && (value.Equals("true", StringComparison.OrdinalIgnoreCase)
@@ -500,9 +582,20 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
             || value == ""
             || value == "1");
 
+    /// <summary>
+    /// Reads a property from a RouterOS row without throwing when the row or key is missing.
+    /// <param name="d">Row to read; may be <see langword="null"/>.</param>
+    /// <param name="key">Property name.</param>
+    /// <returns>The value, or <see langword="null"/> when unavailable.</returns>
+    /// </summary>
     private static string? Get(Dictionary<string, string>? d, string key) =>
         d is not null && d.TryGetValue(key, out string? v) ? v : null;
 
+    /// <summary>
+    /// Sends a single ICMP echo with a two-second timeout and reports whether it succeeded; any exception counts as unreachable.
+    /// <param name="host">Host name or IP address to ping.</param>
+    /// <returns><see langword="true"/> when the host replied successfully.</returns>
+    /// </summary>
     private static async Task<bool> PingOkAsync(string host)
     {
         try
@@ -517,6 +610,11 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         }
     }
 
+    /// <summary>
+    /// Registers the minimal services needed for read-only RouterOS access (options, device logging, connection factory, API client and OSPF operations); no backup, RouterBOARD or migration services are added.
+    /// <param name="services">Service collection to populate.</param>
+    /// <param name="configuration">Configuration providing the option sections.</param>
+    /// </summary>
     private static void ConfigureServices(IServiceCollection services, IConfiguration configuration)
     {
         services.AddOptions<MikroTikOptions>()
@@ -545,9 +643,18 @@ public sealed class TommyOspfSummaryLsaReadOnlyHarness
         services.AddSingleton<IOspfMikrotikOperations, OspfMikrotikOperations>();
     }
 
+    /// <summary>
+    /// Serializes <paramref name="value"/> as indented JSON into <paramref name="name"/> inside the evidence directory.
+    /// <param name="dir">Evidence directory.</param>
+    /// <param name="name">Target file name.</param>
+    /// <param name="value">Object to serialize.</param>
+    /// </summary>
     private static async Task WriteJson(string dir, string name, object value) =>
         await File.WriteAllTextAsync(Path.Combine(dir, name), JsonSerializer.Serialize(value, Indented));
 
+    /// <summary>
+    /// Executes a read-only print command on the connection and returns each reply row as a dictionary.
+    /// </summary>
     private static async Task<List<Dictionary<string, string>>> PrintAsync(
         ITikConnection connection,
         string command,

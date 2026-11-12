@@ -1,3 +1,14 @@
+// -----------------------------------------------------------------------------
+// File: ScheduledJobsWatcherService.cs
+//
+// Description:
+// Hosted watcher for ScheduledJobs Incoming CSVs: FileSystemWatcher events plus
+// periodic reconciliation feed a bounded discovery channel drained by a fixed
+// pool of ingestion workers. Coalesces duplicate paths, recovers from watcher
+// errors, and warns about leftover Processing files at startup.
+//
+// -----------------------------------------------------------------------------
+
 using System.Threading.Channels;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
@@ -9,18 +20,55 @@ namespace MikrotikWorker.Scheduling;
 /// </summary>
 internal sealed class ScheduledJobsWatcherService : BackgroundService
 {
+    /// <summary>
+    /// Resolved ScheduledJobs folder layout.
+    /// </summary>
     private readonly ScheduledJobsPaths _paths;
+    /// <summary>
+    /// Ingests each discovered CSV.
+    /// </summary>
     private readonly ScheduledJobFileProcessor _processor;
+    /// <summary>
+    /// Scan interval, worker count, and queue capacity settings.
+    /// </summary>
     private readonly IOptions<ScheduledJobsOptions> _options;
+    /// <summary>
+    /// Logger for watcher and ingestion diagnostics.
+    /// </summary>
     private readonly ILogger<ScheduledJobsWatcherService> _logger;
+    /// <summary>
+    /// Bounded channel of discovered CSV paths drained by the ingestion workers.
+    /// </summary>
     private readonly Channel<string> _discovery;
+    /// <summary>
+    /// Normalised paths already queued or being ingested, used to coalesce duplicates. Guarded by <c>_pendingGate</c>.
+    /// </summary>
     private readonly HashSet<string> _pendingKeys = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Lock guarding <c>_pendingKeys</c>.
+    /// </summary>
     private readonly object _pendingGate = new();
+    /// <summary>
+    /// Lock guarding creation and disposal of <c>_watcher</c>.
+    /// </summary>
     private readonly object _watcherGate = new();
+    /// <summary>
+    /// Current file system watcher, or null when stopped. Guarded by <c>_watcherGate</c>.
+    /// </summary>
     private FileSystemWatcher? _watcher;
+    /// <summary>
+    /// Host stopping token captured in <see cref="ExecuteAsync"/>, used to suppress watcher recreation during shutdown.
+    /// </summary>
     private CancellationToken _stoppingToken;
+    /// <summary>
+    /// Running count of times the discovery queue was full, used in warning logs.
+    /// </summary>
     private int _saturationSignals;
 
+    /// <summary>
+    /// Creates the watcher service with a bounded discovery channel sized by
+    /// <see cref="ScheduledJobsOptions.DiscoveryQueueCapacity"/>.
+    /// </summary>
     public ScheduledJobsWatcherService(
         ScheduledJobsPaths paths,
         ScheduledJobFileProcessor processor,
@@ -39,6 +87,10 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         });
     }
 
+    /// <summary>
+    /// Ensures folders, warns about Processing leftovers, starts watcher + ingestion workers,
+    /// and periodically rescans Incoming until shutdown.
+    /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _stoppingToken = stoppingToken;
@@ -91,6 +143,10 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Drains the discovery channel and invokes <see cref="ScheduledJobFileProcessor.ProcessIncomingAsync"/>
+    /// for paths that still look like Incoming CSVs; always clears the pending key afterward.
+    /// </summary>
     private async Task RunIngestionWorkerAsync(CancellationToken cancellationToken)
     {
         try
@@ -127,6 +183,7 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         }
     }
 
+    /// <summary>Enqueues every top-level <c>*.csv</c> under the ScheduledJobs root.</summary>
     private void EnqueueIncomingScan()
     {
         foreach (string file in Directory.EnumerateFiles(_paths.Root, "*.csv", SearchOption.TopDirectoryOnly))
@@ -135,6 +192,11 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Coalesces by full path into the discovery channel. On channel saturation, drops the
+    /// pending reservation so periodic reconciliation can retry.
+    /// </summary>
+    /// <returns><c>true</c> when enqueued or already pending; <c>false</c> when saturated.</returns>
     private bool TryEnqueuePath(string path)
     {
         string key = NormalizeKey(path);
@@ -166,6 +228,7 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         return false;
     }
 
+    /// <summary>Removes a coalescing key after an ingestion attempt finishes.</summary>
     private void CompleteDiscovery(string key)
     {
         lock (_pendingGate)
@@ -174,9 +237,11 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         }
     }
 
+    /// <summary>Full-path key used for pending coalescing.</summary>
     private static string NormalizeKey(string path) =>
         Path.GetFullPath(path);
 
+    /// <summary>Creates/replaces the FileSystemWatcher for root <c>*.csv</c> create/change/rename events.</summary>
     private void StartWatcher()
     {
         lock (_watcherGate)
@@ -205,6 +270,7 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         }
     }
 
+    /// <summary>Disposes the current watcher under <c>_watcherGate</c>.</summary>
     private void StopWatcher()
     {
         lock (_watcherGate)
@@ -213,6 +279,7 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         }
     }
 
+    /// <summary>Unsubscribes and disposes <c>_watcher</c>; caller must hold <c>_watcherGate</c>.</summary>
     private void StopWatcherLocked()
     {
         if (_watcher is null)
@@ -229,10 +296,13 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         _watcher = null;
     }
 
+    /// <summary>Created/Changed handler → discovery enqueue.</summary>
     private void OnChanged(object sender, FileSystemEventArgs e) => TryEnqueuePath(e.FullPath);
 
+    /// <summary>Renamed handler → discovery enqueue of the new path.</summary>
     private void OnRenamed(object sender, RenamedEventArgs e) => TryEnqueuePath(e.FullPath);
 
+    /// <summary>Recreates the watcher after an error unless shutdown is in progress.</summary>
     private void OnError(object sender, ErrorEventArgs e)
     {
         _logger.LogError(e.GetException(), "FileSystemWatcher error; recreating watcher");
@@ -255,6 +325,9 @@ internal sealed class ScheduledJobsWatcherService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// True when <paramref name="path"/> is an existing <c>.csv</c> directly under the ScheduledJobs root.
+    /// </summary>
     private bool IsIncomingCsv(string path)
     {
         if (!string.Equals(Path.GetExtension(path), ".csv", StringComparison.OrdinalIgnoreCase))

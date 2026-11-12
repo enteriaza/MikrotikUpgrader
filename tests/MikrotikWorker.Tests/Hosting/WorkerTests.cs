@@ -1,8 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: WorkerTests.cs
+//
+// Description:
+// Tests Worker heartbeat behaviour and Mikrotik:Enabled logging without opening
+// device connections.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Tests.Hosting;
+/// <summary>
+/// Covers Worker heartbeat and Mikrotik enabled logging.
+/// </summary>
 public sealed class WorkerTests
 {
+    /// <summary>Upper bound for each host start/stop and wait in these tests.</summary>
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Default TestHostFactory application.
+    /// Expects Worker registered as IHostedService and HeartbeatInterval from test host config (50ms).
+    /// </summary>
     [Fact]
     public void ProductionRegistration_ResolvesWorkerAsHostedService()
     {
@@ -25,6 +42,10 @@ public sealed class WorkerTests
         }
     }
 
+    /// <summary>
+    /// HeartbeatInterval=TimeSpan.Zero.
+    /// Expects OptionsValidationException citing HeartbeatInterval on Start.
+    /// </summary>
     [Fact]
     public void InvalidHeartbeatInterval_PreventsHostStartup()
     {
@@ -45,6 +66,10 @@ public sealed class WorkerTests
         }
     }
 
+    /// <summary>
+    /// 40ms heartbeat with recording logger.
+    /// Expects ≥2 Worker heartbeat lines plus started/stopped lifecycle messages.
+    /// </summary>
     [Fact]
     public async Task Worker_EmitsHeartbeatSignals()
     {
@@ -91,6 +116,10 @@ public sealed class WorkerTests
         }
     }
 
+    /// <summary>
+    /// 30s heartbeat interval; StopAsync after first heartbeat within TestTimeout.
+    /// Expects MikrotikWorker stopped without waiting out the full delay.
+    /// </summary>
     [Fact]
     public async Task Cancellation_InterruptsLongHeartbeatDelayPromptly()
     {

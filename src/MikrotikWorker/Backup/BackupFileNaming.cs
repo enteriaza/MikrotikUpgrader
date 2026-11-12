@@ -1,12 +1,32 @@
+// -----------------------------------------------------------------------------
+// File: BackupFileNaming.cs
+//
+// Description:
+// Builds shared backup stems ({Identity}_{IP}_{timestamp}) and atomically
+// reserves unique .rsc/.backup/.json path triples via a process-wide lock and
+// .stem.alloc sidecar marker under Manifests.
+//
+// -----------------------------------------------------------------------------
+
 using System.Globalization;
 using System.Net;
 using MikrotikWorker.Logging;
 
 namespace MikrotikWorker.Backup;
 
+/// <summary>
+/// Naming and unique-stem allocation for pre-upgrade backup artefacts.
+/// </summary>
 internal static class BackupFileNaming
 {
+    /// <summary>
+    /// Process-wide lock that makes stem reservation atomic.
+    /// </summary>
     private static readonly object StemAllocationGate = new();
+
+    /// <summary>
+    /// Sidecar extension used to claim a stem before content files exist.
+    /// </summary>
     public const string StemAllocationMarkerExtension = ".stem.alloc";
 
     /// <summary>
@@ -75,6 +95,10 @@ internal static class BackupFileNaming
             $"Unable to allocate a unique backup stem for identity '{routerIdentity}' at {routerIp}.");
     }
 
+    /// <summary>
+    /// Returns <paramref name="fileName"/> under <paramref name="directory"/>, or <c>{stem}_{n}{ext}</c>
+    /// when the preferred path already exists.
+    /// </summary>
     public static string EnsureUniquePath(string directory, string fileName)
     {
         Directory.CreateDirectory(directory);
@@ -98,6 +122,7 @@ internal static class BackupFileNaming
         throw new IOException($"Unable to allocate a unique backup filename for '{fileName}'.");
     }
 
+    /// <summary>Creates an empty marker file with <see cref="FileMode.CreateNew"/>.</summary>
     private static void ReserveNewFile(string path)
     {
         using FileStream stream = new(
@@ -107,5 +132,10 @@ internal static class BackupFileNaming
             FileShare.None);
     }
 
+    /// <summary>
+    /// Determines whether a path is already taken by a file or a directory.
+    /// </summary>
+    /// <param name="path">Path to test.</param>
+    /// <returns><see langword="true"/> when a file or directory exists at the path.</returns>
     private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
 }

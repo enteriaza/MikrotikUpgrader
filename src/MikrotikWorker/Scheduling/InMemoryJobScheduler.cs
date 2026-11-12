@@ -1,3 +1,15 @@
+// -----------------------------------------------------------------------------
+// File: InMemoryJobScheduler.cs
+//
+// Description:
+// Time-aware, capacity-bounded in-memory job scheduler and its hosted loop.
+// Tracks import batches (Remaining, HeldForDispatch, AcceptedOnDisk), holds jobs
+// until the Accepted CSV is on disk, dispatches due work to the execution queue,
+// applies transient connect/login retries, and closes imports via Completed
+// archive or retire-leaving-Accepted when activation was incomplete.
+//
+// -----------------------------------------------------------------------------
+
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
@@ -5,28 +17,51 @@ using MikrotikWorker.Logging;
 
 namespace MikrotikWorker.Scheduling;
 
+/// <summary>
+/// Contract for registering CSV imports, scheduling rows, aborting batches, and running the wake loop.
+/// </summary>
 internal interface IInMemoryJobScheduler
 {
+    /// <summary>Configured ceiling for simultaneously pending (queued + dispatched) jobs.</summary>
     int MaximumPendingJobs { get; }
 
+    /// <summary>Current count of queued plus dispatched (non-terminal) jobs.</summary>
     int PendingCount { get; }
 
+    /// <summary>Returns whether an import batch is still tracked in memory.</summary>
+    /// <param name="importId">Import to query.</param>
     bool IsTracked(Guid importId);
 
+    /// <summary>
+    /// Creates a new import batch with <paramref name="jobCount"/> validated rows as initial Remaining.
+    /// </summary>
+    /// <param name="importId">Unique import identifier.</param>
+    /// <param name="jobCount">Validated CSV row count (≥ 0).</param>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="jobCount"/> is negative.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when the import is already registered or the scheduler is stopping.</exception>
     void RegisterImport(Guid importId, int jobCount);
 
+    /// <summary>
+    /// Confirms the Accepted CSV is on disk, populates the path store, releases
+    /// <c>HeldForDispatch</c> jobs into the priority queue, and may attempt import closure.
+    /// </summary>
+    /// <param name="importId">Import whose Accepted path is now real.</param>
+    /// <param name="acceptedPath">Full path to the Accepted CSV.</param>
     void SetAcceptedPath(Guid importId, string acceptedPath);
 
     /// <summary>
     /// Registers the intended Accepted path before the filesystem move completes.
     /// Completion to Completed is blocked until <see cref="SetAcceptedPath"/> confirms the on-disk path.
     /// </summary>
+    /// <param name="importId">Import being activated.</param>
+    /// <param name="intendedAcceptedPath">Expected Accepted path (pre-move).</param>
     void BindAcceptedPathIntent(Guid importId, string intendedAcceptedPath);
 
     /// <summary>
     /// Marks import activation finished (all intended rows scheduled, or activation stopped early).
     /// Reconciles <c>Remaining</c> so never-scheduled rows are not treated as outstanding work.
     /// </summary>
+    /// <param name="importId">Import whose activation ended.</param>
     /// <param name="scheduledCount">Rows successfully accepted by <see cref="ScheduleAsync"/>.</param>
     /// <param name="activationIncomplete">
     /// True when activation stopped early (cancel/failure) and <paramref name="scheduledCount"/> may be
@@ -34,49 +69,107 @@ internal interface IInMemoryJobScheduler
     /// </param>
     void FinalizeImportActivation(Guid importId, int scheduledCount, bool activationIncomplete);
 
+    /// <summary>
+    /// Accepts a job into capacity, tracking tables, and either the priority queue or
+    /// <c>HeldForDispatch</c> until <see cref="SetAcceptedPath"/> runs.
+    /// </summary>
+    /// <param name="job">Job to schedule.</param>
+    /// <param name="cancellationToken">Cancels waiting for capacity; linked with scheduler stop.</param>
     ValueTask ScheduleAsync(MikrotikScheduledJob job, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Removes the import and all of its pending/dispatched entries, clears the path store,
+    /// and leaves any Processing/Accepted file on disk for manual recovery.
+    /// </summary>
+    /// <param name="importId">Import to abort.</param>
+    /// <param name="cancellationToken">Checked before work begins.</param>
     Task AbortImportAsync(Guid importId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Runs the due-job / idle-wait loop until cancellation, then discards remaining in-memory work.
+    /// </summary>
+    /// <param name="cancellationToken">Host stop token.</param>
     Task RunAsync(CancellationToken cancellationToken);
 
+    /// <summary>Requests graceful stop: rejects new schedules, drains in-flight schedule ops, discards pending.</summary>
+    /// <param name="cancellationToken">Unused; stop is coordinated via internal lifecycle.</param>
     Task StopAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>
 /// Time-aware bounded in-memory scheduler. Future jobs never block eligible jobs.
+/// Implements <see cref="IRouterJobExecutionCompleter"/> for the execution pool.
 /// </summary>
 internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobExecutionCompleter, IAsyncDisposable
 {
+    /// <summary>Scheduler process lifecycle used to reject schedules during shutdown.</summary>
     private enum Lifecycle
     {
+        /// <summary>Accepting schedules and running the wake loop.</summary>
         Running = 0,
+
+        /// <summary>Stop requested; waiting for in-flight <see cref="ScheduleAsync"/> calls.</summary>
         Stopping = 1,
+
+        /// <summary>Capacity disposed; instance is finished.</summary>
         Disposed = 2,
     }
 
+    /// <summary>Scheduled-jobs folder layout; supplies the Completed folder that finished imports are archived into.</summary>
     private readonly ScheduledJobsPaths _paths;
+    /// <summary>Moves an Accepted CSV to Completed when its import closes successfully.</summary>
     private readonly IScheduledJobFileMover _fileMover;
+    /// <summary>Clock used for eligibility checks, retry delays and idle waits; injectable for tests.</summary>
     private readonly TimeProvider _timeProvider;
+    /// <summary>Diagnostic logger for scheduling, dispatch and import-closure events.</summary>
     private readonly ILogger<InMemoryJobScheduler> _logger;
+    /// <summary>Persists terminal per-row results to the imported CSV; a no-op writer when none was supplied.</summary>
     private readonly IImportedCsvResultWriter _csvResultWriter;
+    /// <summary>Registry of the Accepted CSV path for each import, shared with result writing.</summary>
     private readonly ImportedCsvPathStore _csvPathStore;
+    /// <summary>Bounded hand-off queue through which due jobs are dispatched to the router execution pool.</summary>
     private readonly RouterJobExecutionQueue _executionQueue;
+    /// <summary>Transient-failure retry delays and attempt limits; defaults when none were configured.</summary>
     private readonly JobRetryOptions _retryOptions;
+    /// <summary>Counts free pending-job slots (queued plus dispatched); acquired when a job is scheduled and released exactly once when it ends.</summary>
     private readonly SemaphoreSlim _capacity;
+    /// <summary>Guards <c>_queue</c>, <c>_entries</c> and <c>_dispatched</c> so queue membership and the tracking tables change together.</summary>
     private readonly object _gate = new();
+    /// <summary>Priority queue of schedulable entries ordered by effective eligible time, then arrival sequence. It can contain stale heads for entries that were removed or already dispatched; those are skipped lazily.</summary>
     private readonly PriorityQueue<JobEntry, JobPriority> _queue = new();
+    /// <summary>Pending entries (accepted, not yet dispatched) keyed by import id and CSV row number; guarded by <c>_gate</c>.</summary>
     private readonly Dictionary<(Guid ImportId, int RowNumber), JobEntry> _entries = new();
+    /// <summary>Entries handed to the execution queue and not yet terminal, keyed by import id and row number; guarded by <c>_gate</c>.</summary>
     private readonly Dictionary<(Guid ImportId, int RowNumber), JobEntry> _dispatched = new();
+    /// <summary>In-memory state of each registered import, keyed by import id.</summary>
     private readonly ConcurrentDictionary<Guid, ImportBatch> _imports = new();
+    /// <summary>Guards swapping and reading <c>_wakeSignal</c> so a wake request is never lost between snapshot and wait.</summary>
     private readonly object _wakeGate = new();
+    /// <summary>Guards <c>_lifecycle</c> and <c>_activeScheduleOperations</c> and is used to wait for in-flight schedule calls during stop.</summary>
     private readonly object _lifecycleGate = new();
+    /// <summary>Cancelled when stop begins; unblocks callers waiting for capacity or the wake loop.</summary>
     private readonly CancellationTokenSource _stoppingCts = new();
+    /// <summary>Completion source signalled to wake the run loop; replaced after each signal. Access under <c>_wakeGate</c>.</summary>
     private TaskCompletionSource _wakeSignal = NewWakeSignal();
+    /// <summary>Monotonic arrival counter used as the tie-breaker for jobs with equal eligible time (FIFO within a time).</summary>
     private int _sequence;
+    /// <summary>Number of <see cref="ScheduleAsync"/> calls currently in progress; stop waits for it to reach zero. Guarded by <c>_lifecycleGate</c>.</summary>
     private int _activeScheduleOperations;
+    /// <summary>Current scheduler lifecycle stage; guarded by <c>_lifecycleGate</c>.</summary>
     private Lifecycle _lifecycle = Lifecycle.Running;
 
+    /// <summary>
+    /// Creates a scheduler bound to the given paths, execution queue, and optional CSV/retry collaborators.
+    /// </summary>
+    /// <param name="options">Supplies <see cref="MaximumPendingJobs"/>.</param>
+    /// <param name="paths">Completed folder for Accepted→Completed archival.</param>
+    /// <param name="fileMover">Moves Accepted CSVs to Completed on successful closure.</param>
+    /// <param name="executionQueue">Bounded handoff for eligible jobs.</param>
+    /// <param name="timeProvider">Clock for eligibility, retries, and idle waits (testable).</param>
+    /// <param name="logger">Scheduler diagnostics.</param>
+    /// <param name="retryOptions">Transient retry delays and maxima; defaults when null.</param>
+    /// <param name="csvResultWriter">Persists terminal results; no-op when null.</param>
+    /// <param name="csvPathStore">Accepted path registry; a private store is created when null.</param>
     public InMemoryJobScheduler(
         IOptions<ScheduledJobsOptions> options,
         ScheduledJobsPaths paths,
@@ -100,6 +193,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         _csvPathStore = csvPathStore ?? new ImportedCsvPathStore();
     }
 
+    /// <inheritdoc />
     public int MaximumPendingJobs { get; }
 
     /// <summary>
@@ -108,6 +202,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
     /// </summary>
     internal Func<Task>? AfterWakeSnapshotBeforeQueueCheckAsync { get; set; }
 
+    /// <inheritdoc />
     public int PendingCount
     {
         get
@@ -119,6 +214,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>Test seam: jobs in the pending table (not yet dispatched).</summary>
     internal int QueuedCount
     {
         get
@@ -130,6 +226,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>Test seam: jobs handed to the execution queue and not yet terminal.</summary>
     internal int DispatchedCount
     {
         get
@@ -141,6 +238,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <inheritdoc />
     public bool IsTracked(Guid importId) => _imports.ContainsKey(importId);
 
     /// <summary>
@@ -158,6 +256,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
     /// </summary>
     internal void ProcessDueJobsForTests() => ProcessDueJobs();
 
+    /// <inheritdoc />
     public void RegisterImport(Guid importId, int jobCount)
     {
         ThrowIfNotRunning();
@@ -179,6 +278,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             jobCount);
     }
 
+    /// <inheritdoc />
     public void BindAcceptedPathIntent(Guid importId, string intendedAcceptedPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(intendedAcceptedPath);
@@ -205,6 +305,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             intendedAcceptedPath);
     }
 
+    /// <inheritdoc />
     public void SetAcceptedPath(Guid importId, string acceptedPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(acceptedPath);
@@ -243,6 +344,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <inheritdoc />
     public void FinalizeImportActivation(Guid importId, int scheduledCount, bool activationIncomplete)
     {
         if (!_imports.TryGetValue(importId, out ImportBatch? batch))
@@ -359,6 +461,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return false;
     }
 
+    /// <inheritdoc />
     public async ValueTask ScheduleAsync(MikrotikScheduledJob job, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(job);
@@ -464,6 +567,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <inheritdoc />
     public Task AbortImportAsync(Guid importId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -531,6 +635,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc />
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation(
@@ -574,13 +679,20 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <inheritdoc />
     public Task StopAsync(CancellationToken cancellationToken = default) => StopCoreAsync();
 
+    /// <summary>Stops the scheduler and releases resources (same path as <see cref="StopAsync"/>).</summary>
     public async ValueTask DisposeAsync()
     {
         await StopCoreAsync().ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Idle wait that snapshots the wake signal before peeking the queue (lost-wakeup-safe),
+    /// then sleeps until the next due time, a wake, or cancellation.
+    /// </summary>
+    /// <returns><c>false</c> when cancellation ended the wait and the loop should exit.</returns>
     private async Task<bool> IdleWaitAsync(CancellationToken cancellationToken)
     {
         // Snapshot the wake task BEFORE inspecting the queue to avoid lost wake-ups.
@@ -614,6 +726,10 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return !cancellationToken.IsCancellationRequested;
     }
 
+    /// <summary>
+    /// Dequeues due priority-queue heads: expires past DateStopUtc, otherwise marks dispatched
+    /// and hands eligible jobs to <see cref="DispatchEligibleJob"/>.
+    /// </summary>
     private void ProcessDueJobs()
     {
         DateTime utcNow = _timeProvider.GetUtcNow().UtcDateTime;
@@ -681,6 +797,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Writes a work item to the execution queue; on capacity failure requeues or fails the job.
+    /// </summary>
     private void DispatchEligibleJob(JobEntry entry)
     {
         MikrotikScheduledJob job = entry.Job;
@@ -711,6 +830,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <inheritdoc />
     public void CompleteDispatchedJob(
         object entryToken,
         ScheduledJobTerminalState state,
@@ -725,6 +845,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         CompleteDispatchedJob(entry, state, executionDuration, error);
     }
 
+    /// <summary>
+    /// Marks a dispatched entry terminal, removes it from the dispatched table, and runs shared terminal handling.
+    /// </summary>
     private void CompleteDispatchedJob(
         JobEntry entry,
         ScheduledJobTerminalState state,
@@ -744,6 +867,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         CompleteTerminalJob(entry, state, executionDuration, error);
     }
 
+    /// <inheritdoc />
     public bool TryRequeueDispatchedJob(object entryToken)
     {
         if (entryToken is not JobEntry entry)
@@ -754,6 +878,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return TryRequeueDispatchedJob(entry);
     }
 
+    /// <summary>
+    /// Moves a dispatched entry back to pending/priority queue when still Running; otherwise releases capacity.
+    /// </summary>
     private bool TryRequeueDispatchedJob(JobEntry entry)
     {
         if (!entry.TryMarkRequeued())
@@ -781,6 +908,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return true;
     }
 
+    /// <inheritdoc />
     public bool TryScheduleTransientRetry(
         object entryToken,
         JobRetryFailureCategory category,
@@ -860,6 +988,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return true;
     }
 
+    /// <inheritdoc />
     public bool IsImportAbortedOrStopping(Guid importId)
     {
         if (_stoppingCts.IsCancellationRequested)
@@ -875,6 +1004,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return Volatile.Read(ref batch.AbortedFlag) != 0;
     }
 
+    /// <summary>
+    /// Shared terminal path: outcome logging under ServiceOnly, capacity release, CSV persistence, Remaining decrement.
+    /// </summary>
     private void CompleteTerminalJob(
         JobEntry entry,
         ScheduledJobTerminalState state,
@@ -991,6 +1123,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Synchronously persists CSV completion; failures are logged and do not change the in-memory outcome.
+    /// </summary>
     private void PersistCsvCompletion(MikrotikScheduledJob job, ScheduledJobTerminalState state, Exception? error)
     {
         try
@@ -1015,6 +1150,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Moves jobs buffered in <see cref="ImportBatch.HeldForDispatch"/> into the priority queue after AcceptedOnDisk.
+    /// </summary>
     private void ReleaseHeldJobsForDispatch(ImportBatch batch)
     {
         List<(JobEntry Entry, JobPriority Priority)> held;
@@ -1045,6 +1183,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         SignalWake();
     }
 
+    /// <summary>
+    /// Decrements Remaining for a terminal scheduled job and attempts closure when work and AcceptedOnDisk allow.
+    /// </summary>
     private void OnJobTerminal(Guid importId)
     {
         if (!_imports.TryGetValue(importId, out ImportBatch? batch))
@@ -1077,6 +1218,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Periodic sweep: retries closure for any import that is fully terminal, accepted on disk, and not mid-completion.
+    /// </summary>
     private void TryCompletePendingImports()
     {
         foreach (ImportBatch batch in _imports.Values)
@@ -1133,6 +1277,10 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Drops import tracking and path-store entry while leaving the Accepted CSV on disk for manual re-import.
+    /// Used when activation was incomplete and Remaining has reached zero.
+    /// </summary>
     private void RetireImportLeavingAcceptedFile(ImportBatch batch)
     {
         string? acceptedPath;
@@ -1187,6 +1335,10 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Archives Accepted→Completed when activation was complete (or fully scheduled).
+    /// On move failure, clears CompletionInProgress and wakes the loop for retry.
+    /// </summary>
     private void TryCompleteImport(ImportBatch batch)
     {
         string? acceptedPath;
@@ -1277,6 +1429,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Caller must hold <c>_gate</c>. Returns the next non-stale queue head's eligible time, or null when empty.
+    /// </summary>
     private DateTimeOffset? PeekNextWakeUtc_NoLock()
     {
         while (_queue.Count > 0)
@@ -1298,6 +1453,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return null;
     }
 
+    /// <summary>Clamps delays to a positive range compatible with <see cref="Task.Delay(TimeSpan)"/>.</summary>
     private static TimeSpan CapDelay(TimeSpan delay)
     {
         TimeSpan max = TimeSpan.FromMilliseconds(int.MaxValue - 1);
@@ -1309,6 +1465,10 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         return delay > max ? max : delay;
     }
 
+    /// <summary>
+    /// Waits until <paramref name="due"/>, <paramref name="wakeTask"/>, or cancellation.
+    /// Avoids linking delay cancellation to wake so a wake cannot tear down <see cref="RunAsync"/>.
+    /// </summary>
     private async Task WaitUntilAsync(DateTimeOffset due, Task wakeTask, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -1358,6 +1518,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         cancellationToken.ThrowIfCancellationRequested();
     }
 
+    /// <summary>Waits for a wake signal or cancellation when the queue has no next due time.</summary>
     private static async Task WaitForSignalAsync(Task wakeTask, CancellationToken cancellationToken)
     {
         Task cancelTask = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
@@ -1365,6 +1526,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         cancellationToken.ThrowIfCancellationRequested();
     }
 
+    /// <summary>Captures the current wake TCS task under <c>_wakeGate</c> for lost-wakeup-safe waits.</summary>
     private Task SnapshotWakeTask()
     {
         lock (_wakeGate)
@@ -1373,6 +1535,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>Completes the current wake signal and installs a fresh one.</summary>
     private void SignalWake()
     {
         TaskCompletionSource previous;
@@ -1385,9 +1548,11 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         previous.TrySetResult();
     }
 
+    /// <summary>Creates a wake TCS that runs continuations asynchronously.</summary>
     private static TaskCompletionSource NewWakeSignal() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    /// <summary>Releases one capacity slot once per entry (idempotent via <see cref="JobEntry.TryReleaseCapacity"/>).</summary>
     private void ReleaseCapacity(JobEntry entry)
     {
         if (entry.TryReleaseCapacity())
@@ -1403,6 +1568,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>Throws when lifecycle is not <see cref="Lifecycle.Running"/>.</summary>
     private void ThrowIfNotRunning()
     {
         lock (_lifecycleGate)
@@ -1414,6 +1580,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>Increments the in-flight schedule counter while still Running.</summary>
     private void EnterScheduleOperation()
     {
         lock (_lifecycleGate)
@@ -1427,6 +1594,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>Decrements the in-flight schedule counter and pulses stop waiters when zero during Stopping.</summary>
     private void ExitScheduleOperation()
     {
         lock (_lifecycleGate)
@@ -1439,6 +1607,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         }
     }
 
+    /// <summary>
+    /// Transitions Running→Stopping→Disposed, waits for schedule ops, discards pending work, disposes capacity once.
+    /// </summary>
     private async Task StopCoreAsync()
     {
         bool shouldDisposeCapacity = false;
@@ -1486,6 +1657,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Clears queues/tables, completes the execution channel, marks entries removed, and drops import tracking.
+    /// </summary>
     private void DiscardAllPendingOnShutdown()
     {
         List<JobEntry> pending;
@@ -1510,10 +1684,17 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         _imports.Clear();
     }
 
+    /// <summary>
+    /// Per-import tracking: Remaining work, Accepted path/on-disk flags, held pre-dispatch jobs, and closure state.
+    /// </summary>
+    /// <param name="importId">Import identifier.</param>
+    /// <param name="jobCount">Validated row count; seeds <see cref="Remaining"/>.</param>
     private sealed class ImportBatch(Guid importId, int jobCount)
     {
+        /// <summary>Import identifier shared with scheduled jobs.</summary>
         public Guid ImportId { get; } = importId;
 
+        /// <summary>Fine-grained lock for Remaining/path/activation fields (nested under scheduler <c>_gate</c> when both needed).</summary>
         public object Sync { get; } = new();
 
         /// <summary>Validated CSV row count at registration (immutable).</summary>
@@ -1537,6 +1718,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         /// </summary>
         public bool ActivationIncomplete { get; set; }
 
+        /// <summary>Intended or confirmed Accepted path string (see <see cref="AcceptedOnDisk"/>).</summary>
         public string? AcceptedPath { get; set; }
 
         /// <summary>
@@ -1555,27 +1737,46 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         /// </summary>
         public bool Archived { get; set; }
 
+        /// <summary>Prevents concurrent Accepted→Completed / retire attempts for the same batch.</summary>
         public bool CompletionInProgress { get; set; }
 
+        /// <summary>True after <see cref="AbortImportAsync"/> marked the batch aborted under <see cref="Sync"/>.</summary>
         public bool Aborted { get; set; }
 
+        /// <summary>
+        /// Lock-free abort signal for schedule/dispatch checks (<c>0</c> active, non-zero aborted).
+        /// </summary>
         public int AbortedFlag;
     }
 
+    /// <summary>
+    /// Atomic lifecycle wrapper around one <see cref="MikrotikScheduledJob"/> (pending/dispatched/terminal/removed).
+    /// </summary>
+    /// <param name="job">Scheduled job payload.</param>
     private sealed class JobEntry(MikrotikScheduledJob job)
     {
         // 0 = pending, 1 = terminal, 2 = removed, 3 = dispatched
+        /// <summary>Entry lifecycle state accessed with interlocked operations: 0 pending, 1 terminal, 2 removed, 3 dispatched.</summary>
         private int _state;
+        /// <summary>Set to 1 once the entry's capacity slot has been released, making release idempotent.</summary>
         private int _capacityReleased;
 
+        /// <summary>Job payload shared with the execution pool.</summary>
         public MikrotikScheduledJob Job { get; } = job;
 
+        /// <summary>True when state is not pending (stale priority-queue heads can be skipped).</summary>
         public bool IsRemovedOrTerminalOrDispatched => Volatile.Read(ref _state) != 0;
 
+        /// <summary>CAS pending→dispatched.</summary>
         public bool TryMarkDispatched() => Interlocked.CompareExchange(ref _state, 3, 0) == 0;
 
+        /// <summary>CAS dispatched→pending for requeue/retry.</summary>
         public bool TryMarkRequeued() => Interlocked.CompareExchange(ref _state, 0, 3) == 3;
 
+        /// <summary>
+        /// CAS pending or dispatched → terminal. The <paramref name="state"/> argument is unused for CAS
+        /// (outcome is recorded by the caller); returns false if already terminal/removed.
+        /// </summary>
         public bool TryMarkTerminal(ScheduledJobTerminalState state)
         {
             _ = state;
@@ -1602,6 +1803,7 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             }
         }
 
+        /// <summary>CAS any non-terminal/non-removed state → removed (abort/shutdown).</summary>
         public bool TryMarkRemoved()
         {
             while (true)
@@ -1619,11 +1821,18 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
             }
         }
 
+        /// <summary>Returns true exactly once so capacity is released a single time per entry.</summary>
         public bool TryReleaseCapacity() => Interlocked.Exchange(ref _capacityReleased, 1) == 0;
     }
 
+    /// <summary>
+    /// Priority-queue key: earlier <see cref="DateStartUtc"/> first, then insertion <see cref="Sequence"/>.
+    /// </summary>
+    /// <param name="DateStartUtc">Effective eligibility instant (schedule start or retry).</param>
+    /// <param name="Sequence">Monotonic tie-breaker from the scheduler.</param>
     private readonly record struct JobPriority(DateTime DateStartUtc, int Sequence) : IComparable<JobPriority>
     {
+        /// <inheritdoc />
         public int CompareTo(JobPriority other)
         {
             int cmp = DateStartUtc.CompareTo(other.DateStartUtc);
@@ -1633,12 +1842,16 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
 }
 
 /// <summary>
-/// Hosts the in-memory scheduler loop.
+/// Hosts the in-memory scheduler loop as a <see cref="BackgroundService"/>.
 /// </summary>
+/// <param name="scheduler">Scheduler whose <see cref="IInMemoryJobScheduler.RunAsync"/> is hosted.</param>
+/// <param name="logger">Service start/stop logging.</param>
 internal sealed class InMemoryJobSchedulerService(
     IInMemoryJobScheduler scheduler,
     ILogger<InMemoryJobSchedulerService> logger) : BackgroundService
 {
+    /// <summary>Runs <see cref="IInMemoryJobScheduler.RunAsync"/> until host cancellation.</summary>
+    /// <param name="stoppingToken">Host stop token.</param>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Scheduled job scheduler service starting");

@@ -1,10 +1,24 @@
+// -----------------------------------------------------------------------------
+// File: FirmwareUpgradeOptionsValidator.cs
+//
+// Description:
+// IValidateOptions for FirmwareUpgradeOptions. Always validates timeouts, SCP
+// port, and backup directory; AdvertisedBaseUrl shape is required only when
+// FirmwareUpgrade:Enabled is true (loopback hosts rejected).
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using Microsoft.Extensions.Options;
 
 namespace MikrotikWorker.Configuration;
 
+/// <summary>
+/// Validates <see cref="FirmwareUpgradeOptions"/> at options bind / host start.
+/// </summary>
 internal sealed class FirmwareUpgradeOptionsValidator : IValidateOptions<FirmwareUpgradeOptions>
 {
+    /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, FirmwareUpgradeOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -82,6 +96,9 @@ internal sealed class FirmwareUpgradeOptionsValidator : IValidateOptions<Firmwar
             : ValidateOptionsResult.Fail(errors);
     }
 
+    /// <summary>
+    /// True when <paramref name="host"/> is <c>localhost</c> or a loopback IP.
+    /// </summary>
     private static bool IsLoopbackHost(string host) =>
         string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
         || IPAddress.TryParse(host, out IPAddress? address) && IPAddress.IsLoopback(address);

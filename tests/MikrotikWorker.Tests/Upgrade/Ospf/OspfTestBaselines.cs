@@ -1,6 +1,18 @@
+// -----------------------------------------------------------------------------
+// File: OspfTestBaselines.cs
+//
+// Description:
+// Shared OSPF test baseline snapshots and helpers for planner/reconciler
+// regression fixtures.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Upgrade.Ospf;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
+/// <summary>
+/// Shared OSPF baseline snapshots/helpers for planner and reconciler regressions.
+/// </summary>
 internal static class OspfTestBaselines
 {
     /// <summary>
@@ -18,6 +30,8 @@ internal static class OspfTestBaselines
         },
     ];
 
+    /// <summary>Builds the loopback /32 address rows implied by <paramref name="plan"/>.</summary>
+    /// <param name="plan">Plan supplying the router id and loopback interface name.</param>
     public static IReadOnlyList<OspfIpAddressRow> LoopbackSlash32ForPlan(OspfMigrationPlan plan) =>
         LoopbackSlash32(
             plan.RouterId,
@@ -34,6 +48,8 @@ internal static class OspfTestBaselines
             Interface = iface,
         };
 
+    /// <summary>Creates a baseline with only a management host and no backbone details.</summary>
+    /// <param name="managementHost">Management host address.</param>
     public static OspfManagementPlaneBaseline Minimal(string managementHost = "198.18.240.11") => new()
     {
         ManagementHost = managementHost,
@@ -57,6 +73,8 @@ internal static class OspfTestBaselines
         ManagementRouteDependsOnBackbone = false,
     };
 
+    /// <summary>Creates the baseline modelled on the Tommy router's backbone and management plane.</summary>
+    /// <param name="managementHost">Management host address.</param>
     public static OspfManagementPlaneBaseline Tommy(string managementHost = "198.18.240.11") => new()
     {
         ManagementHost = managementHost,

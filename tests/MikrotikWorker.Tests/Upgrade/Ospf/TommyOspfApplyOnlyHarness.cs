@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: TommyOspfApplyOnlyHarness.cs
+//
+// Description:
+// Disposable lab harness: capture → plan → ApplyAndVerifyAsync → stop. Does
+// NOT invoke OspfOnlyLabRecoveryRunner (which continues to
+// backup/RouterBOARD).
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Text.Json;
@@ -22,8 +32,16 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class TommyOspfApplyOnlyHarness
 {
+    /// <summary>
+    /// Name of the environment variable that overrides the directory where run evidence (JSON snapshots, probe log, verdict) is written; defaults to a timestamped folder under the temp path.
+    /// </summary>
     public const string EvidenceRootEnv = "TOMMY_OSPF_EVIDENCE_DIR";
 
+    /// <summary>
+    /// Scenario: live, opt-in run against the Tommy lab router (198.18.240.11): with an external management probe running, capture or rebuild the plan from the pre-upgrade .rsc reference, then ApplyAndVerifyAsync with firmware upgrade disabled.
+    /// Expected: the test is armed through LiveMikrotikTestGate, the probe is healthy and shows no failures during the apply window, identity/version/architecture match (BR01.POP011.016.Tommy, 7.23.8, mipsbe), the apply gate succeeds, and the previously Full neighbour is still Full afterwards; evidence and a verdict file are written.
+    /// Invariant: every precondition failure and post-apply safety failure fails the test loudly and records a verdict, and an unarmed run fails closed rather than silently passing.
+    /// </summary>
     [Fact]
     [Trait("Category", "LiveTommyOspfApplyOnly")]
     public async Task Execute_ApplyAndVerifyOnly_OnTommyLab()
@@ -420,6 +438,9 @@ public sealed class TommyOspfApplyOnlyHarness
         logger.LogInformation("Apply-and-verify completed successfully. Evidence={Dir}", evidenceDir);
     }
 
+    /// <summary>
+    /// Intentionally NO backup service, NO RouterBOARD, NO upgrade executor.
+    /// </summary>
     private static void ConfigureServices(IServiceCollection services, IConfiguration configuration)
     {
         services.AddOptions<MikroTikOptions>()
@@ -453,11 +474,26 @@ public sealed class TommyOspfApplyOnlyHarness
         // Intentionally NO backup service, NO RouterBOARD, NO upgrade executor.
     }
 
+    /// <summary>
+    /// Serializer options used for evidence files so they are human-readable.
+    /// </summary>
     private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
 
+    /// <summary>
+    /// Serializes <paramref name="value"/> as indented JSON into <paramref name="name"/> inside the evidence directory.
+    /// <param name="dir">Evidence directory.</param>
+    /// <param name="name">Target file name.</param>
+    /// <param name="value">Object to serialize.</param>
+    /// </summary>
     private static async Task WriteJson(string dir, string name, object value) =>
         await File.WriteAllTextAsync(Path.Combine(dir, name), JsonSerializer.Serialize(value, Indented));
 
+    /// <summary>
+    /// Writes <c>verdict.txt</c> in the evidence directory containing the verdict line and, when supplied, the detail on the following line.
+    /// <param name="dir">Evidence directory.</param>
+    /// <param name="verdict">Single-line outcome summary.</param>
+    /// <param name="detail">Optional supporting detail.</param>
+    /// </summary>
     private static void WriteVerdict(string dir, string verdict, string? detail)
     {
         File.WriteAllText(
@@ -465,9 +501,18 @@ public sealed class TommyOspfApplyOnlyHarness
             detail is null ? verdict : $"{verdict}{Environment.NewLine}{detail}");
     }
 
+    /// <summary>
+    /// Returns the value for the key in the dictionary, or null when the dictionary is null or lacks the key.
+    /// </summary>
     private static string? Get(Dictionary<string, string>? d, string key) =>
         d is not null && d.TryGetValue(key, out string? v) ? v : null;
 
+    /// <summary>
+    /// Runs a RouterOS <c>print</c> command and returns each row as a property dictionary.
+    /// <param name="connection">Open RouterOS connection.</param>
+    /// <param name="command">Print command path, for example <c>/ip/route/print</c>.</param>
+    /// <param name="cancellationToken">Token to cancel the call.</param>
+    /// </summary>
     private static async Task<List<Dictionary<string, string>>> PrintAsync(
         ITikConnection connection,
         string command,
@@ -480,17 +525,50 @@ public sealed class TommyOspfApplyOnlyHarness
         return rows.Select(static r => r.Words.ToDictionary(static kv => kv.Key, static kv => kv.Value)).ToList();
     }
 
+    /// <summary>
+    /// Background ping probe that checks the router every 500 ms and tracks success and failure counts and
+    /// timestamps, to show management reachability during the apply.
+    /// </summary>
     private sealed class ProbeHost : IDisposable
     {
+        /// <summary>
+        /// Cancels the background ping loop on <see cref="Dispose"/>.
+        /// </summary>
         private readonly CancellationTokenSource _cts = new();
+        /// <summary>
+        /// Background task that pings the host every 500 ms until cancelled.
+        /// </summary>
         private readonly Task _loop;
+        /// <summary>
+        /// Guards the counters and timestamps shared between the ping loop and readers.
+        /// </summary>
         private readonly object _gate = new();
+        /// <summary>
+        /// Number of successful pings.
+        /// </summary>
         private int _success;
+        /// <summary>
+        /// Number of failed pings, including exceptions.
+        /// </summary>
         private int _failure;
+        /// <summary>
+        /// Timestamp of the most recent successful ping.
+        /// </summary>
         private DateTimeOffset? _lastSuccess;
+        /// <summary>
+        /// Timestamp of the most recent failed ping.
+        /// </summary>
         private DateTimeOffset? _lastFailure;
+        /// <summary>
+        /// Description of the most recent failure (status or exception).
+        /// </summary>
         private string? _lastError;
 
+        /// <summary>
+        /// Starts the background ping loop, writing one log line per attempt to <paramref name="logPath"/>.
+        /// <param name="host">Host to ping.</param>
+        /// <param name="logPath">File that receives the probe log.</param>
+        /// </summary>
         private ProbeHost(string host, string logPath)
         {
             _loop = Task.Run(async () =>
@@ -549,23 +627,40 @@ public sealed class TommyOspfApplyOnlyHarness
             });
         }
 
+        /// <summary>
+        /// Starts probing <paramref name="host"/> and logging to <paramref name="logPath"/>.
+        /// <param name="host">Host to ping.</param>
+        /// <param name="logPath">File that receives the probe log.</param>
+        /// </summary>
         public static ProbeHost Start(string host, string logPath) => new(host, logPath);
 
+        /// <summary>
+        /// Whether at least one ping has succeeded.
+        /// </summary>
         public bool HadSuccess
         {
             get { lock (_gate) return _success > 0; }
         }
 
+        /// <summary>
+        /// Whether at least one ping has failed.
+        /// </summary>
         public bool HadFailure
         {
             get { lock (_gate) return _failure > 0; }
         }
 
+        /// <summary>
+        /// Total number of failed pings so far.
+        /// </summary>
         public int FailureCount
         {
             get { lock (_gate) return _failure; }
         }
 
+        /// <summary>
+        /// Whether the host is currently reachable: at least one success and the latest success is newer than the latest failure.
+        /// </summary>
         public bool IsHealthy
         {
             get
@@ -579,6 +674,9 @@ public sealed class TommyOspfApplyOnlyHarness
             }
         }
 
+        /// <summary>
+        /// Returns a point-in-time copy of the probe counters and timestamps, suitable for JSON evidence output.
+        /// </summary>
         public object Snapshot()
         {
             lock (_gate)
@@ -595,6 +693,9 @@ public sealed class TommyOspfApplyOnlyHarness
             }
         }
 
+        /// <summary>
+        /// Cancels the ping loop, waits briefly for it to finish and releases the cancellation source.
+        /// </summary>
         public void Dispose()
         {
             _cts.Cancel();

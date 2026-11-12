@@ -1,3 +1,12 @@
+// -----------------------------------------------------------------------------
+// File: SharedRouterCredentialTests.cs
+//
+// Description:
+// Tests that AppSettingsRouterCredentialResolver returns shared Mikrotik options
+// credentials for every job and never reads passwords from CSV fields.
+//
+// -----------------------------------------------------------------------------
+
 using System.Collections.Concurrent;
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -9,11 +18,25 @@ using tik4net;
 using tik4net.Testing;
 
 namespace MikrotikWorker.Tests.Configuration;
+/// <summary>
+/// Validates shared appsettings credential resolution for scheduled jobs.
+/// </summary>
 public sealed class SharedRouterCredentialTests
 {
+    /// <summary>
+    /// Shared API username configured in <see cref="MikroTikOptions"/> for all routers.
+    /// </summary>
     private const string SharedUsername = "shared-api-user";
+
+    /// <summary>
+    /// Shared API password configured in <see cref="MikroTikOptions"/>; asserted never to appear in logs or error text.
+    /// </summary>
     private const string SharedPassword = "SuperSecretShared!42";
 
+    /// <summary>
+    /// Resolver backed by shared username/password options.
+    /// Expects ResolveAsync returns those credentials for a job.
+    /// </summary>
     [Fact]
     public async Task AppSettingsResolver_ReturnsSharedCredentials()
     {
@@ -28,6 +51,10 @@ public sealed class SharedRouterCredentialTests
         Assert.Equal(SharedPassword, credentials.Password);
     }
 
+    /// <summary>
+    /// Two jobs with different RouterIp values.
+    /// Expects identical username/password — credentials are not per-device from CSV.
+    /// </summary>
     [Fact]
     public async Task AppSettingsResolver_ReturnsIdenticalCredentials_ForDifferentRouterIps()
     {
@@ -42,6 +69,10 @@ public sealed class SharedRouterCredentialTests
         Assert.Equal(first.Password, second.Password);
     }
 
+    /// <summary>
+    /// Enabled MikroTikOptions with blank username.
+    /// Expects failure citing Username and must not echo the password in failure text.
+    /// </summary>
     [Fact]
     public void Validator_RejectsMissingUsername_WhenEnabled()
     {
@@ -59,6 +90,10 @@ public sealed class SharedRouterCredentialTests
         Assert.DoesNotContain(result.Failures, static f => f.Contains(SharedPassword, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Enabled options with empty password.
+    /// Expects failure citing Password without dumping credential assignment text.
+    /// </summary>
     [Fact]
     public void Validator_RejectsMissingPassword_WhenEnabled()
     {
@@ -78,6 +113,10 @@ public sealed class SharedRouterCredentialTests
             static f => f.Contains(SharedUsername, StringComparison.Ordinal) && f.Contains('='));
     }
 
+    /// <summary>
+    /// Enabled=false with empty username/password.
+    /// Expects validation success.
+    /// </summary>
     [Fact]
     public void Validator_AllowsMissingCredentials_WhenDisabled()
     {
@@ -96,6 +135,10 @@ public sealed class SharedRouterCredentialTests
         Assert.False(result.Failed);
     }
 
+    /// <summary>
+    /// Scheduler execution host with MikroTik Enabled=false.
+    /// Expects import completes with zero connection factory calls.
+    /// </summary>
     [Fact]
     public async Task DisabledIntegration_PreventsConnectionAttempts()
     {
@@ -121,6 +164,11 @@ public sealed class SharedRouterCredentialTests
         Assert.Equal(0, host.Scheduler.PendingCount);
     }
 
+    /// <summary>
+    /// Enabled host with shared credentials and options Port=8730.
+    /// Expects CreateAsync receives job host + shared user/password; connection Port null
+    /// (global port comes from options).
+    /// </summary>
     [Fact]
     public async Task Executor_PassesSharedHostPortUsernamePassword()
     {
@@ -150,6 +198,10 @@ public sealed class SharedRouterCredentialTests
         Assert.Equal(8730, host.MikroTik.Port);
     }
 
+    /// <summary>
+    /// Throwing factory with MaximumUnsuccessfulAttempts=0.
+    /// Expects import untracked and Completed CSV present (terminal failure path).
+    /// </summary>
     [Fact]
     public async Task ConnectionFailure_ProducesFailedTerminalOutcome_AndCompletesImport()
     {
@@ -177,6 +229,10 @@ public sealed class SharedRouterCredentialTests
             TimeSpan.FromSeconds(5));
     }
 
+    /// <summary>
+    /// ResolveAsync with an already-cancelled token.
+    /// Expects OperationCanceledException.
+    /// </summary>
     [Fact]
     public async Task CredentialResolver_PropagatesCancellation()
     {
@@ -188,6 +244,10 @@ public sealed class SharedRouterCredentialTests
             () => resolver.ResolveAsync(CreateJob("10.0.0.1"), cts.Token).AsTask());
     }
 
+    /// <summary>
+    /// Recording logger on RouterJobExecutor during a successful connect path.
+    /// Expects success messages without the shared password or Password= fragments.
+    /// </summary>
     [Fact]
     public async Task Executor_NeverLogsCredentials()
     {
@@ -226,6 +286,10 @@ public sealed class SharedRouterCredentialTests
             static m => m.Contains("Password=", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Resolver with empty username and password.
+    /// Expects null credentials (caller must treat as unresolved).
+    /// </summary>
     [Fact]
     public async Task AppSettingsResolver_ReturnsNull_WhenCredentialsBlank()
     {
@@ -236,6 +300,10 @@ public sealed class SharedRouterCredentialTests
         Assert.Null(credentials);
     }
 
+    /// <summary>
+    /// Host build with Enabled=true and missing username.
+    /// Expects startup/options validation failure.
+    /// </summary>
     [Fact]
     public void Startup_RejectsEnabledWithoutUsername()
     {
@@ -262,6 +330,10 @@ public sealed class SharedRouterCredentialTests
         }
     }
 
+    /// <summary>
+    /// Host build with Enabled=true and missing password.
+    /// Expects startup/options validation failure.
+    /// </summary>
     [Fact]
     public void Startup_RejectsEnabledWithoutPassword()
     {
@@ -288,6 +360,11 @@ public sealed class SharedRouterCredentialTests
         }
     }
 
+    /// <summary>
+    /// Production DI registration.
+    /// Expects IRouterCredentialResolver resolves to AppSettingsRouterCredentialResolver
+    /// with placeholder username/password and Enabled=false.
+    /// </summary>
     [Fact]
     public void ProductionRegistration_ResolvesAppSettingsCredentialResolver()
     {
@@ -312,6 +389,9 @@ public sealed class SharedRouterCredentialTests
         }
     }
 
+    /// <summary>
+    /// AppSettingsRouterCredentialResolver over Enabled MikroTikOptions with the given user/password.
+    /// </summary>
     private static AppSettingsRouterCredentialResolver CreateResolver(string username, string password) =>
         new(Options.Create(new MikroTikOptions
         {
@@ -320,6 +400,9 @@ public sealed class SharedRouterCredentialTests
             Password = password,
         }));
 
+    /// <summary>
+    /// Minimal MikrotikScheduledJob for resolver unit tests (due window, given IP).
+    /// </summary>
     private static MikrotikScheduledJob CreateJob(string ip) =>
         new()
         {
@@ -332,6 +415,9 @@ public sealed class SharedRouterCredentialTests
             DateStopUtc = DateTime.UtcNow.AddHours(1),
         };
 
+    /// <summary>
+    /// Due job bound to an import id and FakeTimeProvider clock for execution-host tests.
+    /// </summary>
     private static MikrotikScheduledJob CreateScheduledJob(Guid importId, FakeTimeProvider time, string ip) =>
         new()
         {
@@ -344,6 +430,9 @@ public sealed class SharedRouterCredentialTests
             DateStopUtc = time.GetUtcNow().UtcDateTime.AddHours(1),
         };
 
+    /// <summary>
+    /// Polls a condition until timeout or success.
+    /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
@@ -360,10 +449,24 @@ public sealed class SharedRouterCredentialTests
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
+    /// <summary>
+    /// Records CreateAsync connection options and returns a populated fake connection.
+    /// </summary>
     private sealed class RecordingConnectionFactory : IMikrotikConnectionFactory
     {
+        /// <summary>
+        /// Connection options passed to each connect attempt, collected in a thread-safe bag because execution
+        /// workers call the factory concurrently. Tests inspect it to confirm which host, port and shared credentials
+        /// every attempt used.
+        /// </summary>
         public ConcurrentBag<MikrotikConnectionOptions> Connections { get; } = [];
 
+        /// <summary>
+        /// Records the connection options and returns a fully populated fake connection.
+        /// </summary>
+        /// <param name="connection">Connection options for the attempted router.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
+        /// <returns>A completed task containing the fake connection.</returns>
         public Task<ITikConnection> CreateAsync(
             MikrotikConnectionOptions connection,
             CancellationToken cancellationToken)
@@ -373,14 +476,46 @@ public sealed class SharedRouterCredentialTests
         }
     }
 
+    /// <summary>
+    /// Scheduler + execution workers with injectable MikroTik options/credentials and connection factory.
+    /// </summary>
     private sealed class ExecutionHost : IAsyncDisposable
     {
+        /// <summary>
+        /// Cancels the scheduler run loop during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _schedulerCts = new();
+
+        /// <summary>
+        /// Cancels the router execution workers during disposal.
+        /// </summary>
         private readonly CancellationTokenSource _executionCts;
+
+        /// <summary>
+        /// Task running the scheduler loop.
+        /// </summary>
         private readonly Task _schedulerTask;
+
+        /// <summary>
+        /// Task running the router execution workers.
+        /// </summary>
         private readonly Task _executionTask;
+
+        /// <summary>
+        /// Temporary ScheduledJobs root deleted on disposal.
+        /// </summary>
         private readonly string _root;
 
+        /// <summary>
+        /// Initializes the host state and starts the scheduler run loop.
+        /// </summary>
+        /// <param name="scheduler">Scheduler under test.</param>
+        /// <param name="mikroTik">MikroTik options used by the executor.</param>
+        /// <param name="acceptedCsv">Path of the placeholder Accepted CSV.</param>
+        /// <param name="completedDir">Completed folder path.</param>
+        /// <param name="root">Temporary ScheduledJobs root to delete on disposal.</param>
+        /// <param name="executionTask">Task running the execution workers.</param>
+        /// <param name="executionCts">Cancellation source that stops the execution workers.</param>
         private ExecutionHost(
             InMemoryJobScheduler scheduler,
             MikroTikOptions mikroTik,
@@ -400,14 +535,40 @@ public sealed class SharedRouterCredentialTests
             _schedulerTask = scheduler.RunAsync(_schedulerCts.Token);
         }
 
+        /// <summary>
+        /// In-memory scheduler under test; jobs are enqueued through it and executed by the workers this host starts.
+        /// </summary>
         public InMemoryJobScheduler Scheduler { get; }
 
+        /// <summary>
+        /// MikroTik options (shared username and password, API port and enabled flag) supplied to the executor, so
+        /// tests can compare the configured values with the options each connection attempt received.
+        /// </summary>
         public MikroTikOptions MikroTik { get; }
 
+        /// <summary>
+        /// Path of the placeholder Accepted CSV that the scheduled jobs are registered against.
+        /// </summary>
         public string AcceptedCsv { get; }
 
+        /// <summary>
+        /// Completed folder inside the temporary ScheduledJobs tree; finished CSVs are archived here, so tests can
+        /// tell whether an import finished.
+        /// </summary>
         public string CompletedDir { get; }
 
+        /// <summary>
+        /// Creates the temp ScheduledJobs tree and starts the scheduler loop plus execution workers with the given MikroTik settings.
+        /// </summary>
+        /// <param name="time">Fake clock driving scheduling.</param>
+        /// <param name="connectionFactory">Connection factory used by the router job executor.</param>
+        /// <param name="enabled">Whether MikroTik integration is enabled.</param>
+        /// <param name="username">Shared router username.</param>
+        /// <param name="password">Shared router password.</param>
+        /// <param name="port">MikroTik API port set in the global options.</param>
+        /// <param name="executorLogger">Optional logger for <see cref="RouterJobExecutor"/>; a no-op logger is used when <see langword="null"/>.</param>
+        /// <param name="jobRetryOptions">Optional retry delays and limits.</param>
+        /// <returns>A started host; dispose it to stop loops and clean up.</returns>
         public static Task<ExecutionHost> CreateAsync(
             FakeTimeProvider time,
             IMikrotikConnectionFactory connectionFactory,
@@ -467,6 +628,10 @@ public sealed class SharedRouterCredentialTests
                 executionCts));
         }
 
+        /// <summary>
+        /// Stops the scheduler and execution workers and deletes the temporary directory.
+        /// </summary>
+        /// <returns>A task that completes when disposal has finished.</returns>
         public async ValueTask DisposeAsync()
         {
             _schedulerCts.Cancel();
@@ -499,13 +664,37 @@ public sealed class SharedRouterCredentialTests
             }
         }
 
+        /// <summary>
+        /// Adapts a non-generic <see cref="ILogger"/> to <c>ILogger&lt;RouterJobExecutor&gt;</c> for credential-log assertions.
+        /// </summary>
+        /// <param name="inner">Logger that receives all forwarded calls.</param>
         private sealed class LoggerAdapter(ILogger inner) : ILogger<RouterJobExecutor>
         {
+            /// <summary>
+            /// Begins a logical scope on the inner logger.
+            /// </summary>
+            /// <typeparam name="TState">Type of the scope state.</typeparam>
+            /// <param name="state">Scope state to push.</param>
+            /// <returns>A disposable that ends the scope, or <see langword="null"/> if the inner logger returns none.</returns>
             public IDisposable? BeginScope<TState>(TState state) where TState : notnull =>
                 inner.BeginScope(state);
 
+            /// <summary>
+            /// Checks whether the inner logger is enabled for a level.
+            /// </summary>
+            /// <param name="logLevel">Level to check.</param>
+            /// <returns><see langword="true"/> when the inner logger would emit at that level.</returns>
             public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
 
+            /// <summary>
+            /// Forwards a log entry to the inner logger.
+            /// </summary>
+            /// <typeparam name="TState">Type of the log state.</typeparam>
+            /// <param name="logLevel">Entry severity.</param>
+            /// <param name="eventId">Event identifier.</param>
+            /// <param name="state">Log state object.</param>
+            /// <param name="exception">Associated exception, if any.</param>
+            /// <param name="formatter">Formats the state and exception into message text.</param>
             public void Log<TState>(
                 LogLevel logLevel,
                 EventId eventId,

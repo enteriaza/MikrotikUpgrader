@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: TommyOspfRecoveryPreparationHarness.cs
+//
+// Description:
+// Read-only OSPF-only recovery preparation for Tommy. Captures live inventory,
+// builds the production plan, resolves identities, and emits the exact
+// operation inventory. Does not mutate, backup, or apply.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
@@ -19,10 +29,17 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class TommyOspfRecoveryPreparationHarness
 {
+    /// <summary>Environment variable naming the directory where recovery-preparation evidence is written.</summary>
     public const string EvidenceRootEnv = "TOMMY_OSPF_RECOVERY_PREP_DIR";
 
+    /// <summary>Indented JSON options used for evidence files.</summary>
     private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
 
+    /// <summary>
+    /// Scenario: live, read-only run against the Tommy lab router: read the v7 inventory, addresses and neighbours, rebuild the OSPF plan from the pre-upgrade .rsc reference and resolve live object identities, without changing the router.
+    /// Expected: FirmwareUpgrade stays disabled; the router is BR01.POP011.016.Tommy on 7.25.1 mipsbe with a Full neighbour 198.18.255.253 and a default-v2 instance with router-id 10.16.0.11; the backbone and site areas live on default-v2; the recovery plan is valid with MGMT 10.16.11.0/24, the 100.99.76.16/28 and 172.26.197.4/30 ranges and the v2 target instance and site-area names; the preparation report is written.
+    /// Invariant: the reconciliation plan is prepared entirely from read-only data and never mutates the router.
+    /// </summary>
     [Fact]
     [Trait("Category", "Live")]
     public async Task Prepare_Tommy_OspfOnly_Reconciliation_Plan_ReadOnly()
@@ -318,6 +335,9 @@ public sealed class TommyOspfRecoveryPreparationHarness
         Assert.Equal(OspfFleetNaming.Ros7SiteAreaName(expectedIdentity), plan.TargetSiteAreaName);
     }
 
+    /// <summary>
+    /// Proposed KnownLegacy deletions (executed only after ensure; reported here for approval).
+    /// </summary>
     private static List<object> BuildOperationInventory(
         OspfMigrationPlan livePlan,
         OspfV7Inventory inventory,
@@ -581,6 +601,10 @@ public sealed class TommyOspfRecoveryPreparationHarness
         return ops;
     }
 
+    /// <summary>
+    /// Builds a review object listing live templates that would be deleted as known legacy and those blocked as
+    /// unknown, skipping templates the plan protects; nothing is deleted.
+    /// </summary>
     private static object BuildDeletionReview(OspfMigrationPlan livePlan, OspfV7Inventory inventory)
     {
         List<object> proposed = [];
@@ -653,6 +677,9 @@ public sealed class TommyOspfRecoveryPreparationHarness
         };
     }
 
+    /// <summary>Converts a live interface template into an inventory row tagged with its area instance.</summary>
+    /// <param name="t">Live template row.</param>
+    /// <param name="areaInstance">Instance the template's area belongs to.</param>
     private static OspfTemplateInventoryRow ToInventoryRow(OspfInterfaceTemplateRow t, string areaInstance) =>
         new()
         {
@@ -680,6 +707,16 @@ public sealed class TommyOspfRecoveryPreparationHarness
             Comment = t.Comment,
         };
 
+    /// <summary>Creates an evidence record describing one proposed recovery operation.</summary>
+    /// <param name="kind">Operation kind.</param>
+    /// <param name="destructive">Whether the operation removes or overwrites router state.</param>
+    /// <param name="menu">RouterOS menu the operation targets.</param>
+    /// <param name="logical">Logical identity of the template.</param>
+    /// <param name="liveId">Live item id, if any.</param>
+    /// <param name="current">Current value.</param>
+    /// <param name="intended">Intended value.</param>
+    /// <param name="reason">Why the operation is proposed.</param>
+    /// <param name="verification">Condition that verifies the operation.</param>
     private static object Op(
         string kind,
         bool destructive,
@@ -703,15 +740,28 @@ public sealed class TommyOspfRecoveryPreparationHarness
             verificationCondition = verification,
         };
 
+    /// <summary>Reads a public property from an anonymous evidence record by reflection.</summary>
+    /// <param name="o">Record to inspect.</param>
+    /// <param name="name">Property name.</param>
+    /// <returns>The property value as text, or null.</returns>
     private static string? Prop(object o, string name) =>
         o.GetType().GetProperty(name)?.GetValue(o)?.ToString();
 
+    /// <summary>Normalises a CIDR string to canonical form, or trims it when it does not parse.</summary>
+    /// <param name="cidr">CIDR text.</param>
     private static string Normalize(string? cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p) ? p.ToCidrString() : cidr?.Trim() ?? string.Empty;
 
+    /// <summary>
+    /// Returns the value for the key in the dictionary, or null when the dictionary is null or lacks the key.
+    /// </summary>
     private static string? Get(Dictionary<string, string>? d, string key) =>
         d is not null && d.TryGetValue(key, out string? v) ? v : null;
 
+    /// <summary>
+    /// Registers the options, validators, device log writer, Tik4net connection factory, API client and OSPF
+    /// operations that the harness needs.
+    /// </summary>
     private static void ConfigureServices(IServiceCollection services, IConfiguration configuration)
     {
         services.AddOptions<MikroTikOptions>()
@@ -740,9 +790,16 @@ public sealed class TommyOspfRecoveryPreparationHarness
         services.AddSingleton<IOspfMikrotikOperations, OspfMikrotikOperations>();
     }
 
+    /// <summary>Writes <paramref name="value"/> as indented JSON to <paramref name="name"/> in <paramref name="dir"/>.</summary>
+    /// <param name="dir">Evidence directory.</param>
+    /// <param name="name">File name.</param>
+    /// <param name="value">Object to serialise.</param>
     private static async Task WriteJson(string dir, string name, object value) =>
         await File.WriteAllTextAsync(Path.Combine(dir, name), JsonSerializer.Serialize(value, Indented));
 
+    /// <summary>
+    /// Executes a read-only print command on the connection and returns each reply row as a dictionary.
+    /// </summary>
     private static async Task<List<Dictionary<string, string>>> PrintAsync(
         ITikConnection connection,
         string command,

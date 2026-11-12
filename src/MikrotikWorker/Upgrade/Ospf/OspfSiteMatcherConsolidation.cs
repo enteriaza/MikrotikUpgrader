@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfSiteMatcherConsolidation.cs
+//
+// Description:
+// Consolidates site/customer OSPF matchers into one passive interfaces=all
+// template per site area, folding legacy per-VLAN statements into
+// fleet-approved aggregates.
+//
+// -----------------------------------------------------------------------------
+
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
@@ -6,6 +16,9 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// </summary>
 internal static class OspfSiteMatcherConsolidation
 {
+    /// <summary>
+    /// Canonical interfaces=all matcher token.
+    /// </summary>
     public const string AllInterfaces = "all";
 
     /// <summary>Shared CGNAT / 100.64/10 aggregate used for PPPoE and ACS matchers.</summary>
@@ -14,12 +27,23 @@ internal static class OspfSiteMatcherConsolidation
     /// <summary>RFC1918 172.16/12 aggregate used for inactive PPPoE-style matchers.</summary>
     public static readonly OspfIpPrefix Private172Aggregate = ParseRequired("172.16.0.0/12");
 
+    /// <summary>
+    /// Consolidates site matchers into planned aggregates for the capture snapshot.
+    /// </summary>
     public static List<OspfPlanSiteNetworkTemplate> Consolidate(
         IReadOnlyList<OspfPlanSiteNetworkTemplate> rawSites,
         IReadOnlyList<OspfPlanAreaRange> areaRanges,
         List<string> notes) =>
         ConsolidateWithProvenance(rawSites, areaRanges, notes).Consolidated.ToList();
 
+    /// <summary>
+    /// Consolidates site matchers into one passive <c>interfaces=all</c> template per area, and records the original matchers that are replaced so they can be cleaned up later.
+    /// </summary>
+    /// <param name="rawSites">Site matchers classified from the capture.</param>
+    /// <param name="areaRanges">Planned area ranges used as fold targets.</param>
+    /// <param name="notes">Receives normalisation notes.</param>
+    /// <returns>The consolidated templates and the superseded template identities.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when an argument is null.</exception>
     public static OspfSiteConsolidationResult ConsolidateWithProvenance(
         IReadOnlyList<OspfPlanSiteNetworkTemplate> rawSites,
         IReadOnlyList<OspfPlanAreaRange> areaRanges,
@@ -113,9 +137,18 @@ internal static class OspfSiteMatcherConsolidation
         return new OspfSiteConsolidationResult(consolidated, superseded);
     }
 
+    /// <summary>
+    /// True when the interfaces matcher is the all-interfaces token.
+    /// </summary>
     public static bool IsAllInterfaces(string? interfaces) =>
         string.Equals(interfaces?.Trim(), AllInterfaces, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Compares two interface matchers by their canonical form.
+    /// </summary>
+    /// <param name="left">First interface matcher.</param>
+    /// <param name="right">Second interface matcher.</param>
+    /// <returns><see langword="true"/> when the canonical forms are equal.</returns>
     public static bool InterfacesEqual(string? left, string? right) =>
         string.Equals(
             OspfTemplateSemanticIdentity.CanonicalInterfaces(left),
@@ -137,6 +170,16 @@ internal static class OspfSiteMatcherConsolidation
         && InterfacesEqual(interfaces, planned.Interfaces)
         && OspfNetworkList.SetsEqual(networks, planned.NetworkCidr);
 
+    /// <summary>
+    /// Matches a live template against a planned site template that uses the all-interfaces matcher.
+    /// </summary>
+    /// <param name="area">Live area name.</param>
+    /// <param name="interfaces">Live interfaces matcher.</param>
+    /// <param name="networks">Live networks value.</param>
+    /// <param name="passive">Whether the live template is passive.</param>
+    /// <param name="disabled">Whether the live template is disabled.</param>
+    /// <param name="planned">Planned site template.</param>
+    /// <returns><see langword="true"/> when it matches a planned <c>interfaces=all</c> site template.</returns>
     public static bool MatchesConsolidatedSite(
         string? area,
         string? interfaces,
@@ -147,6 +190,12 @@ internal static class OspfSiteMatcherConsolidation
         MatchesPlannedSite(area, interfaces, networks, passive, disabled, planned)
         && IsAllInterfaces(planned.Interfaces);
 
+    /// <summary>
+    /// Determines whether a live template row is one of the legacy templates recorded as superseded.
+    /// </summary>
+    /// <param name="row">Live interface-template row.</param>
+    /// <param name="identity">Recorded superseded identity.</param>
+    /// <returns><see langword="true"/> when the row matches the identity.</returns>
     public static bool MatchesSupersededIdentity(
         OspfTemplateInventoryRow row,
         OspfSupersededTemplateIdentity identity) =>
@@ -290,16 +339,33 @@ internal static class OspfSiteMatcherConsolidation
             + "Refusing silent first-match selection.");
     }
 
+    /// <summary>
+    /// Parses a compile-time constant aggregate prefix, failing fast if it is invalid.
+    /// </summary>
+    /// <param name="cidr">CIDR text to parse.</param>
+    /// <returns>The parsed prefix.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when <paramref name="cidr"/> cannot be parsed.</exception>
     private static OspfIpPrefix ParseRequired(string cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix prefix)
             ? prefix
             : throw new InvalidOperationException($"Invalid fleet aggregate prefix '{cidr}'.");
 }
 
+/// <summary>
+/// Result of consolidating site/customer OSPF matchers into aggregates.
+/// </summary>
 internal sealed class OspfSiteConsolidationResult(
     IReadOnlyList<OspfPlanSiteNetworkTemplate> consolidated,
     IReadOnlyList<OspfSupersededTemplateIdentity> superseded)
 {
+    /// <summary>
+    /// Planned replacement site templates after consolidation: one passive <c>interfaces=all</c> template
+    /// per site area, carrying the folded aggregate networks.
+    /// </summary>
     public IReadOnlyList<OspfPlanSiteNetworkTemplate> Consolidated { get; } = consolidated;
+    /// <summary>
+    /// Provenance of the original per-VLAN / per-network matchers that <see cref="Consolidated"/> templates
+    /// replace; later cleanup uses these identities to remove only the templates that were folded away.
+    /// </summary>
     public IReadOnlyList<OspfSupersededTemplateIdentity> Superseded { get; } = superseded;
 }

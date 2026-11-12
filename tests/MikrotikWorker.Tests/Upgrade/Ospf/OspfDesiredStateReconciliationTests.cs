@@ -1,3 +1,13 @@
+// -----------------------------------------------------------------------------
+// File: OspfDesiredStateReconciliationTests.cs
+//
+// Description:
+// Desired-state OSPF reconciliation: live templates are removed only when an
+// explicit replacement relationship to the planned consolidated configuration
+// is established. Fixtures are generic — no device-specific harnesses.
+//
+// -----------------------------------------------------------------------------
+
 using MikrotikWorker.Upgrade.Ospf;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
@@ -8,6 +18,7 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfDesiredStateReconciliationTests
 {
+    /// <summary>Five management subdivisions of one /24 with their interfaces, as seen on a live router.</summary>
     private static readonly (string Networks, string Interfaces)[] FiveMgmtSubdivisions =
     [
         ("10.16.11.0/27", "Bridge-VLAN-99_MGMT"),
@@ -17,6 +28,11 @@ public sealed class OspfDesiredStateReconciliationTests
         ("10.16.11.192/26", "Bridge-VLAN-99_MGMT"),
     ];
 
+    /// <summary>
+    /// Scenario: the plan has no recorded superseded templates, and live inventory holds the three planned rows plus five management /27-/26 subdivisions of 10.16.11.0/24 in the site area.
+    /// Expected: classification succeeds with all five subdivisions as known legacy (reason mentions <c>Consolidated-prefix replacement</c>) and nothing unknown.
+    /// Invariant: desired-state containment alone is enough to establish replacement; capture provenance is not required.
+    /// </summary>
     [Fact]
     public void DesiredState_FiveMgmtSubdivisions_AreKnownLegacy_WithoutCaptureProvenance()
     {
@@ -38,6 +54,11 @@ public sealed class OspfDesiredStateReconciliationTests
             item => Assert.Contains("Consolidated-prefix replacement", item.Reason, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: a live 10.16.11.0/27 template is ptp, cost 1, with the RouterOS 7 default priority of 1.
+    /// Expected: it is classified as a single known legacy template and nothing is unknown.
+    /// Invariant: RouterOS 7 default attribute values do not stop a contained subdivision from being treated as superseded.
+    /// </summary>
     [Fact]
     public void DesiredState_Ros7DefaultPriority1_IsCompatibleWithConsolidation()
     {
@@ -58,6 +79,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: two live subdivisions (10.16.11.0/27 on Bridge-VLAN-99_MGMT and 10.16.11.32/27 on Bridge-VLAN-197_MGMT) sit under the consolidated <c>interfaces=all</c> template.
+    /// Expected: both are known legacy and nothing is unknown.
+    /// Invariant: per-interface templates fold into the consolidated all-interfaces template, regardless of their interface names.
+    /// </summary>
     [Fact]
     public void DesiredState_MultipleSpecificInterfaces_FoldIntoInterfacesAll()
     {
@@ -73,6 +99,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: a retry where the consolidated template exists and only two of the five subdivisions remain; then the remaining two are deleted.
+    /// Expected: the partial inventory classifies two known legacy rows; the final inventory has no legacy, no unknown, and a single site matcher.
+    /// Invariant: cleanup is resumable after a partial deletion.
+    /// </summary>
     [Fact]
     public void DesiredState_Retry_WhenConsolidatedAlreadyPresent_AndSomeSubdivisionsGone()
     {
@@ -94,6 +125,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Single(final.SiteMatchers);
     }
 
+    /// <summary>
+    /// Scenario: live inventory contains exactly the three planned templates (backhaul, loopback, consolidated site network).
+    /// Expected: no known legacy, no unknown, and a planned-protected count of 3.
+    /// Invariant: classifying an already-reconciled router finds nothing to delete.
+    /// </summary>
     [Fact]
     public void DesiredState_AlreadyReconciled_IsIdempotent()
     {
@@ -105,6 +141,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Equal(3, report.PlannedProtectedCount);
     }
 
+    /// <summary>
+    /// Scenario: a plan with no superseded list is enriched from a live inventory holding five management subdivisions, then the enriched plan is classified against that inventory.
+    /// Expected: enrichment records five superseded templates; classification reports five known legacy and no unknown.
+    /// Invariant: the enrich-then-classify pipeline agrees with desired-state classification for the same live rows.
+    /// </summary>
     [Fact]
     public void DesiredState_EnrichThenClassify_FiveSubdivisions_Succeeds()
     {
@@ -133,6 +174,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Empty(report.Unknown);
     }
 
+    /// <summary>
+    /// Scenario: a live candidate that is not covered by the consolidated prefix: a different area, a network outside the management /24, an unrelated 192.0.2.0/24, or a /16 larger than the consolidated prefix.
+    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "unknown/unrelated" and "No deletion was attempted".
+    /// Invariant: only templates contained in the consolidated prefix and area can be treated as obsolete; anything else blocks cleanup.
+    /// </summary>
     [Theory]
     [InlineData("different_area")]
     [InlineData("outside_mgmt_24")]
@@ -157,6 +203,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: a contained 10.16.11.0/27 template differs from the consolidated one by cost, authentication, type, passive flag, or has a blank interfaces value.
+    /// Expected: it is still classified as a single known legacy row with a <c>Consolidated-prefix replacement</c> reason, and nothing is unknown.
+    /// Invariant: containment in the consolidated prefix, not attribute equality, decides that a subdivision is obsolete.
+    /// </summary>
     [Theory]
     [InlineData("different_cost")]
     [InlineData("different_auth")]
@@ -195,6 +246,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Contains("Consolidated-prefix replacement", report.KnownLegacy[0].Reason, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: five valid management subdivisions plus one unrelated template (192.0.2.0/24 on Bridge-OTHER).
+    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "No deletion was attempted" and 192.0.2.0/24.
+    /// Invariant: a single unknown template aborts cleanup entirely, even when other rows are valid legacy.
+    /// </summary>
     [Fact]
     public void Safety_OneUnknownPreventsAllDeletion()
     {
@@ -211,6 +267,11 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Contains("192.0.2.0/24", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Scenario: the plan has an empty superseded list (so no recorded fingerprint can match), but the live 10.16.11.0/27 row is compatible with the consolidated prefix.
+    /// Expected: <c>TryExplainLiveSupersession</c> still returns true.
+    /// Invariant: a changed or missing provenance fingerprint does not stop desired-state supersession of a compatible live row.
+    /// </summary>
     [Fact]
     public void Safety_ChangedFingerprint_NoLongerMatchesRecordedProvenance_StillDesiredStateIfCompatible()
     {
@@ -227,6 +288,11 @@ public sealed class OspfDesiredStateReconciliationTests
             OspfLiveSupersededProvenance.TryExplainLiveSupersession(live, plan, out _));
     }
 
+    /// <summary>
+    /// Scenario: the post-cleanup inventory contains only the planned templates.
+    /// Expected: no legacy or unknown rows; the consolidated site network is present and none of the five subdivision networks remain.
+    /// Invariant: the end state has the consolidated template and no more-specific management subdivisions.
+    /// </summary>
     [Fact]
     public void Safety_FinalInventory_HasConsolidated_AndNoSubdivisions()
     {
@@ -244,6 +310,11 @@ public sealed class OspfDesiredStateReconciliationTests
             r => FiveMgmtSubdivisions.Any(s => OspfNetworkList.SetsEqual(r.Networks, s.Networks)));
     }
 
+    /// <summary>
+    /// Scenario: management-summarisation postconditions are checked first against an inventory still holding five subdivisions, then against a clean inventory.
+    /// Expected: the dirty inventory yields an error mentioning "obsolete more-specific management"; the clean one yields no errors.
+    /// Invariant: verification fails until every obsolete management subdivision has been removed.
+    /// </summary>
     [Fact]
     public void Verification_FailsWhileSubdivisionsRemain_SucceedsWhenGone()
     {
@@ -270,6 +341,10 @@ public sealed class OspfDesiredStateReconciliationTests
         Assert.Empty(OspfV7MigrationVerifier.VerifyManagementSummarisationPostconditions(plan, clean));
     }
 
+    /// <summary>
+    /// Builds a fully populated Tommy-style migration plan with target names, loopback, areas, templates and the
+    /// supplied superseded identities and site networks.
+    /// </summary>
     private static OspfMigrationPlan DesiredPlan(
         IReadOnlyList<OspfSupersededTemplateIdentity>? superseded,
         string siteNetworks = "10.16.11.0/24,100.64.0.0/10,172.16.0.0/12") =>
@@ -356,6 +431,8 @@ public sealed class OspfDesiredStateReconciliationTests
             ContentHash = "test",
         };
 
+    /// <summary>Builds inventory rows that mirror the templates a migration plan intends to create.</summary>
+    /// <param name="plan">Plan to mirror.</param>
     private static IEnumerable<OspfTemplateInventoryRow> PlannedRows(OspfMigrationPlan plan) =>
     [
         new OspfTemplateInventoryRow
@@ -392,6 +469,8 @@ public sealed class OspfDesiredStateReconciliationTests
         },
     ];
 
+    /// <summary>Builds interface-template rows that mirror the templates a migration plan intends to create.</summary>
+    /// <param name="plan">Plan to mirror.</param>
     private static IEnumerable<OspfInterfaceTemplateRow> PlannedTemplateRows(OspfMigrationPlan plan) =>
     [
         new OspfInterfaceTemplateRow
@@ -422,6 +501,19 @@ public sealed class OspfDesiredStateReconciliationTests
         },
     ];
 
+    /// <summary>Creates a site-network template inventory row with overridable attributes.</summary>
+    /// <param name="id">Template identifier.</param>
+    /// <param name="area">Area name.</param>
+    /// <param name="interfaces">Interface list.</param>
+    /// <param name="networks">Network list.</param>
+    /// <param name="passive">Whether the template is passive.</param>
+    /// <param name="type">Network type.</param>
+    /// <param name="cost">Interface cost.</param>
+    /// <param name="priority">Router priority.</param>
+    /// <param name="auth">Authentication type, or null for none.</param>
+    /// <param name="authKeyPresent">Whether an authentication key is configured (a fingerprint is derived when true).</param>
+    /// <param name="hello">Hello interval, or null for the default.</param>
+    /// <param name="areaInstance">OSPF instance the area belongs to.</param>
     private static OspfTemplateInventoryRow SiteRow(
         string id,
         string area,
@@ -454,6 +546,8 @@ public sealed class OspfDesiredStateReconciliationTests
             AreaInstanceName = areaInstance,
         };
 
+    /// <summary>Builds a RouterOS 7 OSPF inventory (instance, areas) holding the supplied templates.</summary>
+    /// <param name="templates">Interface templates to include.</param>
     private static OspfV7Inventory InventoryWith(IEnumerable<OspfInterfaceTemplateRow> templates) =>
         new()
         {
@@ -491,6 +585,8 @@ public sealed class OspfDesiredStateReconciliationTests
             Templates = templates.ToList(),
         };
 
+    /// <summary>Converts an inventory's templates to provenance-aware inventory rows.</summary>
+    /// <param name="inventory">Inventory whose templates are converted.</param>
     private static List<OspfTemplateInventoryRow> ToRows(OspfV7Inventory inventory)
     {
         Dictionary<string, string> map = OspfLiveSupersededProvenance.BuildAreaInstanceMap(inventory.Areas);

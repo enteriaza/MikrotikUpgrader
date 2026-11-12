@@ -1,3 +1,11 @@
+// -----------------------------------------------------------------------------
+// File: LiveMikrotikInventoryAndBackupTests.cs
+//
+// Description:
+// Live category tests for inventory and backup operations against lab routers.
+//
+// -----------------------------------------------------------------------------
+
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -21,13 +29,23 @@ namespace MikrotikWorker.Tests.Upgrade.Live;
 [Trait("Category", "Live")]
 public sealed class LiveMikrotikInventoryAndBackupTests
 {
+    /// <summary>Lab router address targeted by these opt-in live tests.</summary>
     private const string LiveHost = "198.18.0.83";
+    /// <summary>Upper bound for each live router operation.</summary>
     private static readonly TimeSpan OpTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>Temp file where the captured inventory JSON is written for review.</summary>
     private static readonly string InventoryPath =
         Path.Combine(Path.GetTempPath(), "mikrotik-live-inventory.json");
+    /// <summary>Temp file where the backup result JSON is written for review.</summary>
     private static readonly string BackupSummaryPath =
         Path.Combine(Path.GetTempPath(), "mikrotik-live-backup-result.json");
 
+    /// <summary>
+    /// Current post-upgrade baseline after authorised 6.49.19 → 6.49.23 live run.
+    /// Arms the live gate, checks TCP reachability, then inventory/resolution
+    /// against the lab router without mutating configuration.
+    /// Invariant: secrets must never appear in log or validation failure text.
+    /// </summary>
     [Fact]
     public async Task LiveRouter_PackageInventory_ResolvesAgainstFirmwareFiles()
     {
@@ -147,6 +165,12 @@ public sealed class LiveMikrotikInventoryAndBackupTests
         Assert.DoesNotContain(password, await File.ReadAllTextAsync(InventoryPath), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Read-only SFTP backup against the lab router into a temp Backups-LiveReadOnly root.
+    /// Arms the live gate, checks API and SSH reachability, then asserts backup
+    /// success, SHA-256 match, and remote cleanup.
+    /// Invariant: secrets must never appear in log or validation failure text.
+    /// </summary>
     [Fact]
     public async Task LiveRouter_SftpBackup_ExportAndBinary_StoredCentrally()
     {
@@ -266,6 +290,8 @@ public sealed class LiveMikrotikInventoryAndBackupTests
                 new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    /// <summary>Loads enabled MikroTik credentials from the local, untracked development settings file.</summary>
+    /// <returns>The bound options and the password.</returns>
     private static (MikroTikOptions Options, string Password) LoadCredentials()
     {
         string? localConfigPath = FindLocalConfigPath();
@@ -281,6 +307,10 @@ public sealed class LiveMikrotikInventoryAndBackupTests
         return (mikrotik, mikrotik.Password);
     }
 
+    /// <summary>
+    /// Locates the <c>FirmwareFiles</c> directory by probing the test output folder, the repository root and the
+    /// current directory, returning the first that exists.
+    /// </summary>
     private static string FindFirmwareFilesRoot()
     {
         string[] candidates =
@@ -292,6 +322,10 @@ public sealed class LiveMikrotikInventoryAndBackupTests
         return candidates.First(Directory.Exists);
     }
 
+    /// <summary>
+    /// Looks for <c>appsettings.Development.local.json</c> in the worker project folder, the test output folder and
+    /// the current directory, returning the first existing path or null.
+    /// </summary>
     private static string? FindLocalConfigPath()
     {
         string[] candidates =
@@ -303,12 +337,20 @@ public sealed class LiveMikrotikInventoryAndBackupTests
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    /// <summary>
+    /// Streams the file at the given path through SHA-256 and returns the digest as lowercase hex.
+    /// </summary>
     private static string ComputeSha256Hex(string path)
     {
         using FileStream stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
+    /// <summary>Probes whether a TCP connection to <paramref name="host"/>:<paramref name="port"/> succeeds within <paramref name="timeout"/>.</summary>
+    /// <param name="host">Host name or IP address.</param>
+    /// <param name="port">TCP port.</param>
+    /// <param name="timeout">Maximum time to wait for the connection.</param>
+    /// <returns><see langword="true"/> when connected; <see langword="false"/> on any failure or timeout.</returns>
     private static async Task<bool> IsTcpReachableAsync(string host, int port, TimeSpan timeout)
     {
         try

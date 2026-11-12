@@ -1,9 +1,25 @@
+// -----------------------------------------------------------------------------
+// File: FirmwareUpgradeOptionsValidatorTests.cs
+//
+// Description:
+// Unit tests for FirmwareUpgradeOptionsValidator covering timeouts, SCP port,
+// backup directory, and AdvertisedBaseUrl rules when FirmwareUpgrade:Enabled is true.
+//
+// -----------------------------------------------------------------------------
+
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 
 namespace MikrotikWorker.Tests.Configuration;
+/// <summary>
+/// Validates FirmwareUpgradeOptionsValidator rules and Enabled-gated URL checks.
+/// </summary>
 public sealed class FirmwareUpgradeOptionsValidatorTests
 {
+    /// <summary>
+    /// Fresh FirmwareUpgradeOptions.
+    /// Expects RebootTimeout exactly five minutes.
+    /// </summary>
     [Fact]
     public void DefaultRebootTimeout_IsExactlyFiveMinutes()
     {
@@ -11,6 +27,10 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
         Assert.Equal(TimeSpan.FromMinutes(5), options.RebootTimeout);
     }
 
+    /// <summary>
+    /// RebootTimeout of 0 or negative seconds on otherwise valid disabled options.
+    /// Expects failure citing RebootTimeout.
+    /// </summary>
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
@@ -28,6 +48,10 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
             static f => f.Contains("RebootTimeout", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// PostUpgradeVerifyTimeout longer than RebootTimeout.
+    /// Expects failure mentioning both timeout properties.
+    /// </summary>
     [Fact]
     public void Validator_RejectsPostUpgradeVerifyTimeoutExceedingRebootTimeout()
     {
@@ -44,6 +68,10 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
                 && f.Contains("RebootTimeout", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Equal five-minute reboot and verify timeouts.
+    /// Expects validation success.
+    /// </summary>
     [Fact]
     public void Validator_AcceptsEqualRebootAndPostUpgradeVerifyTimeouts()
     {
@@ -56,6 +84,10 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
         Assert.False(result.Failed);
     }
 
+    /// <summary>
+    /// Enabled=true with empty AdvertisedBaseUrl.
+    /// Expects failure citing AdvertisedBaseUrl.
+    /// </summary>
     [Fact]
     public void Validator_WhenEnabled_RejectsMissingAdvertisedBaseUrl()
     {
@@ -71,6 +103,10 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
             static f => f.Contains("AdvertisedBaseUrl", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Enabled=true with a non-URI AdvertisedBaseUrl.
+    /// Expects failure citing AdvertisedBaseUrl.
+    /// </summary>
     [Fact]
     public void Validator_WhenEnabled_RejectsInvalidAdvertisedBaseUrl()
     {
@@ -86,6 +122,10 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
             static f => f.Contains("AdvertisedBaseUrl", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Enabled=true with a valid http AdvertisedBaseUrl override.
+    /// Expects validation success.
+    /// </summary>
     [Fact]
     public void Validator_WhenEnabled_AcceptsDeploymentOverrideUrl()
     {
@@ -98,6 +138,11 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
         Assert.False(result.Failed);
     }
 
+    /// <summary>
+    /// Reads src/MikrotikWorker/appsettings.json from the repo.
+    /// Expects no lab IP 198.18.0.66, empty AdvertisedBaseUrl, RedistributeSummaryviaStatics true,
+    /// and Mikrotik Enabled false — prevents shipping lab endpoints.
+    /// </summary>
     [Fact]
     public void ShippedAppsettings_DoesNotContainLabFirmwareEndpoint()
     {
@@ -119,6 +164,9 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
         Assert.Contains("\"Enabled\": false", json, StringComparison.Ordinal); // Mikrotik
     }
 
+    /// <summary>
+    /// Baseline FirmwareUpgradeOptions with Enabled=false and valid positive timeouts/SCP settings.
+    /// </summary>
     private static FirmwareUpgradeOptions ValidDisabledOptions() =>
         new()
         {
