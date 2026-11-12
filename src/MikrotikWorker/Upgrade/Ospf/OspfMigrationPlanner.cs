@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using MikrotikWorker.Serialization;
 
 namespace MikrotikWorker.Upgrade.Ospf;
 
@@ -13,12 +14,6 @@ internal static class OspfMigrationPlanner
 {
     public const int FleetBackhaulCost = 10;
     public const string BackboneAreaId = "0.0.0.0";
-
-    private static readonly JsonSerializerOptions HashJsonOptions = new()
-    {
-        WriteIndented = false,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-    };
 
     public static OspfPlanValidationResult Build(OspfCaptureSnapshot snapshot)
     {
@@ -1011,31 +1006,33 @@ internal static class OspfMigrationPlanner
     internal static string ComputeContentHash(OspfMigrationPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        var forHash = new
+        OspfMigrationPlanHashPayload forHash = new()
         {
-            plan.ImportId,
-            plan.JobId,
-            plan.RouterIp,
-            plan.Identity,
-            plan.InstanceName,
-            plan.RouterId,
-            plan.TargetInstanceName,
-            plan.TargetBackboneAreaName,
-            plan.TargetSiteAreaName,
-            plan.LoopbackInterfaceName,
-            plan.LoopbackCidr,
-            plan.ObservedInScopeLoopbackAddresses,
-            plan.IgnoredOutsideRangeLoopbackAddresses,
-            plan.DerivedManagementCidr,
-            plan.Areas,
-            plan.AreaRanges,
-            plan.ActiveBackhauls,
-            plan.PassiveLoopbacks,
-            plan.PassiveSiteNetworks,
-            plan.SupersededTemplates,
-            plan.OspfV3ToRemove,
+            ImportId = plan.ImportId,
+            JobId = plan.JobId,
+            RouterIp = plan.RouterIp,
+            Identity = plan.Identity,
+            InstanceName = plan.InstanceName,
+            RouterId = plan.RouterId,
+            TargetInstanceName = plan.TargetInstanceName,
+            TargetBackboneAreaName = plan.TargetBackboneAreaName,
+            TargetSiteAreaName = plan.TargetSiteAreaName,
+            LoopbackInterfaceName = plan.LoopbackInterfaceName,
+            LoopbackCidr = plan.LoopbackCidr,
+            ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
+            IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
+            DerivedManagementCidr = plan.DerivedManagementCidr,
+            Areas = plan.Areas,
+            AreaRanges = plan.AreaRanges,
+            ActiveBackhauls = plan.ActiveBackhauls,
+            PassiveLoopbacks = plan.PassiveLoopbacks,
+            PassiveSiteNetworks = plan.PassiveSiteNetworks,
+            SupersededTemplates = plan.SupersededTemplates,
+            OspfV3ToRemove = plan.OspfV3ToRemove,
         };
-        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(forHash, HashJsonOptions);
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(
+            forHash,
+            OspfPlanHashJsonContext.Default.OspfMigrationPlanHashPayload);
         byte[] hash = SHA256.HashData(payload);
         return Convert.ToHexString(hash);
     }

@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Scheduling;
+using MikrotikWorker.Serialization;
 
 namespace MikrotikWorker.Upgrade.Ospf;
 
@@ -28,12 +29,6 @@ internal sealed class OspfMigrationPlanStore(
     IOptions<FirmwareUpgradeOptions> upgradeOptions,
     ILogger<OspfMigrationPlanStore> logger) : IOspfMigrationPlanStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-    };
-
     // job-{sanitized}_import-{32 hex}_ip-{16 hex}.json
     private static readonly Regex OwnedPlanFileName = new(
         @"^job-[A-Za-z0-9\-]+_import-[0-9a-fA-F]{32}_ip-[0-9a-fA-F]{16}\.json$",
@@ -52,7 +47,9 @@ internal sealed class OspfMigrationPlanStore(
         _activePaths[path] = 0;
         try
         {
-            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(plan, JsonOptions);
+            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(
+                plan,
+                OspfMigrationPlanJsonContext.Default.OspfMigrationPlan);
             await File.WriteAllBytesAsync(temp, bytes, cancellationToken).ConfigureAwait(false);
             File.Move(temp, path, overwrite: true);
             logger.LogInformation("OSPF migration plan persisted ({File})", Path.GetFileName(path));
@@ -83,7 +80,7 @@ internal sealed class OspfMigrationPlanStore(
         {
             await using FileStream stream = File.OpenRead(path);
             plan = await JsonSerializer
-                .DeserializeAsync<OspfMigrationPlan>(stream, JsonOptions, cancellationToken)
+                .DeserializeAsync(stream, OspfMigrationPlanJsonContext.Default.OspfMigrationPlan, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (JsonException ex)
@@ -226,7 +223,9 @@ internal sealed class OspfMigrationPlanStore(
         try
         {
             using FileStream stream = File.OpenRead(path);
-            OspfMigrationPlan? plan = JsonSerializer.Deserialize<OspfMigrationPlan>(stream, JsonOptions);
+            OspfMigrationPlan? plan = JsonSerializer.Deserialize(
+                stream,
+                OspfMigrationPlanJsonContext.Default.OspfMigrationPlan);
             if (plan is null)
             {
                 logger.LogWarning(

@@ -343,3 +343,32 @@ internal sealed class OspfPlanValidationResult
     public required OspfMigrationPlan Plan { get; init; }
     public bool Succeeded => Plan.IsValid;
 }
+
+/// <summary>
+/// Canonical content-hash payload. Property names/types must remain stable so
+/// <see cref="OspfMigrationPlanner.ComputeContentHash"/> stays compatible with existing plans.
+/// </summary>
+internal sealed class OspfMigrationPlanHashPayload
+{
+    public required Guid ImportId { get; init; }
+    public required string JobId { get; init; }
+    public required string RouterIp { get; init; }
+    public required string Identity { get; init; }
+    public required string InstanceName { get; init; }
+    public required string RouterId { get; init; }
+    public required string TargetInstanceName { get; init; }
+    public required string TargetBackboneAreaName { get; init; }
+    public required string TargetSiteAreaName { get; init; }
+    public string? LoopbackInterfaceName { get; init; }
+    public string? LoopbackCidr { get; init; }
+    public required IReadOnlyList<string> ObservedInScopeLoopbackAddresses { get; init; }
+    public required IReadOnlyList<string> IgnoredOutsideRangeLoopbackAddresses { get; init; }
+    public string? DerivedManagementCidr { get; init; }
+    public required IReadOnlyList<OspfPlanArea> Areas { get; init; }
+    public required IReadOnlyList<OspfPlanAreaRange> AreaRanges { get; init; }
+    public required IReadOnlyList<OspfPlanBackhaulTemplate> ActiveBackhauls { get; init; }
+    public required IReadOnlyList<OspfPlanLoopbackTemplate> PassiveLoopbacks { get; init; }
+    public required IReadOnlyList<OspfPlanSiteNetworkTemplate> PassiveSiteNetworks { get; init; }
+    public required IReadOnlyList<OspfSupersededTemplateIdentity> SupersededTemplates { get; init; }
+    public required IReadOnlyList<OspfV3ObjectRef> OspfV3ToRemove { get; init; }
+}

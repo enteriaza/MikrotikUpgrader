@@ -65,3 +65,6 @@ Backups-*/
 **/Logs-Live*/
 **/Logs/Devices/
 Reports/
+
+## Generated Native AOT release packages (Tools/Publish-Release.ps1)
+/release/

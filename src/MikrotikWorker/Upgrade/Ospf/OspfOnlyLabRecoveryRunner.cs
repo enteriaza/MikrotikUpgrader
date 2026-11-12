@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
@@ -1000,6 +1001,17 @@ internal static class OspfOnlyLabRecoveryRunner
             || value == "" // ROS7 often uses empty flag presence for passive
             || value == "1");
 
+    /// <summary>
+    /// Lab-recovery evidence JSON uses anonymous projections; not on the Native AOT upgrade hot path.
+    /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2026",
+        Justification = "OSPF lab recovery evidence writers are diagnostic tooling; anonymous JSON projections are not trimmed for AOT.")]
+    [UnconditionalSuppressMessage(
+        "AOT",
+        "IL3050",
+        Justification = "OSPF lab recovery evidence writers are diagnostic tooling; anonymous JSON projections are not trimmed for AOT.")]
     private static Task WriteJsonAsync(string path, object value, CancellationToken cancellationToken) =>
         File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, JsonOptions), cancellationToken);
 

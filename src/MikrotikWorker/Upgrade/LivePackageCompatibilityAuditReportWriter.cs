@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -29,12 +30,26 @@ internal static class LivePackageCompatibilityAuditReportWriter
         await File.WriteAllTextAsync(csvPath, FormatCsv(report), cancellationToken).ConfigureAwait(false);
         await File.WriteAllTextAsync(
                 jsonPath,
-                JsonSerializer.Serialize(ToJsonPayload(report), JsonOptions),
+                SerializeReport(report),
                 cancellationToken)
             .ConfigureAwait(false);
 
         return (csvPath, jsonPath);
     }
+
+    /// <summary>
+    /// Live fleet audit JSON uses anonymous projections; not on the Native AOT upgrade hot path.
+    /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2026",
+        Justification = "Live fleet audit reports are diagnostic tooling; anonymous JSON projections are not trimmed for AOT.")]
+    [UnconditionalSuppressMessage(
+        "AOT",
+        "IL3050",
+        Justification = "Live fleet audit reports are diagnostic tooling; anonymous JSON projections are not trimmed for AOT.")]
+    private static string SerializeReport(LiveFleetAuditReport report) =>
+        JsonSerializer.Serialize(ToJsonPayload(report), JsonOptions);
 
     public static string FormatCsv(LiveFleetAuditReport report)
     {

@@ -5,6 +5,7 @@ using MikrotikWorker.Configuration;
 using MikrotikWorker.Logging;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
+using MikrotikWorker.Serialization;
 using tik4net;
 
 namespace MikrotikWorker.Backup;
@@ -28,7 +29,6 @@ internal sealed class DeviceBackupService(
     ILogger<DeviceBackupService> logger) : IDeviceBackupService
 {
     private const int MaxAllocationAttempts = 8;
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     public async Task<DeviceBackupResult> CreatePreUpgradeBackupAsync(
         ITikConnection connection,
@@ -345,7 +345,7 @@ internal sealed class DeviceBackupService(
             {
                 await File.WriteAllTextAsync(
                         manifestPath,
-                        JsonSerializer.Serialize(finalManifest, JsonOptions),
+                        JsonSerializer.Serialize(finalManifest, BackupManifestJsonContext.Default.BackupManifest),
                         manifestCts.Token)
                     .ConfigureAwait(false);
             }
@@ -595,7 +595,9 @@ internal sealed class DeviceBackupService(
             FileMode.CreateNew,
             FileAccess.Write,
             FileShare.None);
-        await JsonSerializer.SerializeAsync(stream, manifest, JsonOptions, cancellationToken).ConfigureAwait(false);
+        await JsonSerializer
+            .SerializeAsync(stream, manifest, BackupManifestJsonContext.Default.BackupManifest, cancellationToken)
+            .ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 

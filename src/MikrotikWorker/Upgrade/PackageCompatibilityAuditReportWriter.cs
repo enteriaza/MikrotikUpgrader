@@ -1,13 +1,15 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MikrotikWorker.Serialization;
 
 namespace MikrotikWorker.Upgrade;
 
 internal static class PackageCompatibilityAuditReportWriter
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    private static readonly JsonSerializerOptions DiagnosticJsonOptions = new()
     {
         WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -28,12 +30,36 @@ internal static class PackageCompatibilityAuditReportWriter
 
         await File.WriteAllTextAsync(
                 coverageJson,
-                JsonSerializer.Serialize(coverage, JsonOptions),
+                JsonSerializer.Serialize(
+                    coverage,
+                    CatalogueCoverageJsonContext.Default.IReadOnlyListCatalogueCoverageArchitectureRow),
                 cancellationToken)
             .ConfigureAwait(false);
         await File.WriteAllTextAsync(coverageCsv, FormatCoverageCsv(coverage), cancellationToken)
             .ConfigureAwait(false);
 
+        await File.WriteAllTextAsync(
+                devicesJson,
+                SerializeDevicePayload(deviceReports),
+                cancellationToken)
+            .ConfigureAwait(false);
+        await File.WriteAllTextAsync(devicesCsv, FormatDevicesCsv(deviceReports), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Diagnostic audit JSON uses anonymous projections; not on the Native AOT upgrade hot path.
+    /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2026",
+        Justification = "Package compatibility audit reports are diagnostic tooling; anonymous JSON projections are not trimmed for AOT.")]
+    [UnconditionalSuppressMessage(
+        "AOT",
+        "IL3050",
+        Justification = "Package compatibility audit reports are diagnostic tooling; anonymous JSON projections are not trimmed for AOT.")]
+    private static string SerializeDevicePayload(IReadOnlyList<PackageCompatibilityDeviceReport> deviceReports)
+    {
         var devicePayload = deviceReports.Select(static r => new
         {
             inventorySource = r.Device.InventorySource,
@@ -58,13 +84,7 @@ internal static class PackageCompatibilityAuditReportWriter
             }),
         });
 
-        await File.WriteAllTextAsync(
-                devicesJson,
-                JsonSerializer.Serialize(devicePayload, JsonOptions),
-                cancellationToken)
-            .ConfigureAwait(false);
-        await File.WriteAllTextAsync(devicesCsv, FormatDevicesCsv(deviceReports), cancellationToken)
-            .ConfigureAwait(false);
+        return JsonSerializer.Serialize(devicePayload, DiagnosticJsonOptions);
     }
 
     public static string FormatCoverageCsv(IReadOnlyList<CatalogueCoverageArchitectureRow> rows)
