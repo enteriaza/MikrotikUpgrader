@@ -255,7 +255,10 @@ public static class MikrotikWorkerHost
         FirmwareFilesOptions firmwareOptions = app.Services.GetRequiredService<IOptions<FirmwareFilesOptions>>().Value;
         string absolutePath = firmwareOptions.GetAbsolutePath();
 
+        // Serve only RouterOS firmware packages. Clearing default MIME mappings prevents
+        // accidental exposure of non-.npk files that may be placed under FirmwareFiles.
         FileExtensionContentTypeProvider contentTypes = new();
+        contentTypes.Mappings.Clear();
         contentTypes.Mappings[".npk"] = "application/octet-stream";
 
         app.UseStaticFiles(new StaticFileOptions
@@ -263,6 +266,17 @@ public static class MikrotikWorkerHost
             FileProvider = new PhysicalFileProvider(absolutePath),
             RequestPath = FirmwareFilesOptions.RequestPath,
             ContentTypeProvider = contentTypes,
+            ServeUnknownFileTypes = false,
+            OnPrepareResponse = static ctx =>
+            {
+                // Defence in depth: never stream non-.npk content even if a provider mapping changes.
+                if (!ctx.File.Name.EndsWith(".npk", StringComparison.OrdinalIgnoreCase))
+                {
+                    ctx.Context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    ctx.Context.Response.ContentLength = 0;
+                    ctx.Context.Response.Body = Stream.Null;
+                }
+            },
         });
 
         return app;

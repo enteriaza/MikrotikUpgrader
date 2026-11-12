@@ -278,6 +278,78 @@ public sealed class FirmwareServerTests
     }
 
     [Fact]
+    public async Task NonNpkFiles_AreNotServed()
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(
+            (Path.Combine("mikrotik", "sample.npk"), SampleFirmware),
+            ("readme.txt", "secret"u8.ToArray()),
+            ("backup.backup", "backup"u8.ToArray()),
+            ("plan.json", "{}"u8.ToArray()),
+            ("appsettings.json", "{}"u8.ToArray()),
+            ("device.log", "log"u8.ToArray()));
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(firmwareRoot, port);
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                using HttpClient client = CreateClient(app);
+                Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/firmware_files/mikrotik/sample.npk")).StatusCode);
+                Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/firmware_files/readme.txt")).StatusCode);
+                Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/firmware_files/backup.backup")).StatusCode);
+                Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/firmware_files/plan.json")).StatusCode);
+                Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/firmware_files/appsettings.json")).StatusCode);
+                Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/firmware_files/device.log")).StatusCode);
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("/firmware_files/../appsettings.json")]
+    [InlineData("/firmware_files/%2e%2e/appsettings.json")]
+    [InlineData("/firmware_files/mikrotik/../../appsettings.json")]
+    public async Task PathTraversal_IsRejected(string requestPath)
+    {
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(
+            (Path.Combine("mikrotik", "sample.npk"), SampleFirmware));
+        int port = TestHostFactory.GetFreeTcpPort();
+
+        try
+        {
+            await using WebApplication app = TestHostFactory.CreateApplication(firmwareRoot, port);
+            await app.StartAsync().WaitAsync(TestTimeout);
+
+            try
+            {
+                using HttpClient client = CreateClient(app);
+                using HttpResponseMessage response = await client.GetAsync(requestPath);
+                Assert.True(
+                    response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.BadRequest,
+                    $"Unexpected status {response.StatusCode} for {requestPath}");
+            }
+            finally
+            {
+                await app.StopAsync().WaitAsync(TestTimeout);
+            }
+        }
+        finally
+        {
+            Directory.Delete(firmwareRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task HostShutdown_StopsWorkerAndKestrel()
     {
         string firmwareRoot = TestHostFactory.CreateFirmwareRoot(

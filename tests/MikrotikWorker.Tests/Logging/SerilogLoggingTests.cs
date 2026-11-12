@@ -64,7 +64,7 @@ public sealed class SerilogLoggingTests
     [Fact]
     public async Task Host_CreatesApplicationLogFile_AndCapturesRequestLogging()
     {
-        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(("probe.txt", "ok"u8.ToArray()));
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(("probe.npk", "ok"u8.ToArray()));
         string logDirectory = Path.Combine(Path.GetTempPath(), "mikrotik-serilog-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(logDirectory);
 
@@ -87,7 +87,7 @@ public sealed class SerilogLoggingTests
             {
                 Uri baseAddress = TestHostFactory.GetListeningAddress(app);
                 using HttpClient client = new() { BaseAddress = baseAddress };
-                using HttpResponseMessage ok = await client.GetAsync("/firmware_files/probe.txt");
+                using HttpResponseMessage ok = await client.GetAsync("/firmware_files/probe.npk");
                 Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
                 using HttpResponseMessage missing = await client.GetAsync("/firmware_files/missing.bin");
                 Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
@@ -102,10 +102,10 @@ public sealed class SerilogLoggingTests
             string contents = await WaitForLogContentsAsync(
                 logDirectory,
                 static text => text.Contains("HTTP", StringComparison.OrdinalIgnoreCase)
-                               && text.Contains("/firmware_files/probe.txt", StringComparison.OrdinalIgnoreCase),
+                               && text.Contains("/firmware_files/probe.npk", StringComparison.OrdinalIgnoreCase),
                 TimeSpan.FromSeconds(5));
             Assert.Contains("HTTP", contents, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("/firmware_files/probe.txt", contents, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("/firmware_files/probe.npk", contents, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

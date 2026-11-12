@@ -282,8 +282,18 @@ internal class DisposeTrackingConnection(ITikConnection inner) : ITikConnection
         TikCommandParameterFormat parameterFormat) =>
         inner.CreateParameter(name, value, parameterFormat);
 
+    /// <summary>
+    /// When true, a second <see cref="Dispose"/> throws <see cref="ObjectDisposedException"/>.
+    /// </summary>
+    public bool FailOnDoubleDispose { get; init; }
+
     public virtual void Dispose()
     {
+        if (FailOnDoubleDispose && DisposeCount > 0)
+        {
+            throw new ObjectDisposedException(nameof(DisposeTrackingConnection));
+        }
+
         DisposeCount++;
         inner.Dispose();
     }

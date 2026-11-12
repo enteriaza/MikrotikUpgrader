@@ -331,7 +331,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 DeviceBackupResult alreadyV7Backup = await backupService
                     .CreatePreUpgradeBackupAsync(live, job, alreadyV7Device, username, password, cancellationToken)
                     .ConfigureAwait(false);
-                if (!alreadyV7Backup.Succeeded)
+                if (!IsCentralBackupVerified(alreadyV7Backup))
                 {
                     ospfMigrationService.DeletePlan(job);
                     deleteOspfPlanInFinally = false;
@@ -345,6 +345,15 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         CompletedStage = UpgradeCompletedStages.None,
                     };
                 }
+
+                // Caller cancellation must stop the workflow before any OSPF mutation, even when
+                // central backup verification (and optional remote cleanup failure) would otherwise continue.
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Device is already on the ROS7 target and central backup of that state is verified.
+                // There is no separate backup stage value; routeros7 is the last completed stage
+                // until OSPF (or a later stage) succeeds — matching Path B post-backup reporting.
+                string alreadyV7CompletedStage = UpgradeCompletedStages.RouterOs7;
 
                 OspfApplyGateResult alreadyV7Ospf = await ospfMigrationService
                     .ApplyAndVerifyAsync(
@@ -367,7 +376,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         PostUpgradeVersion = alreadyV7Device.Version,
                         PostUpgradeArchitecture = alreadyV7Device.ArchitectureName,
                         RebootInitiated = rebootInitiated,
-                        CompletedStage = UpgradeCompletedStages.None,
+                        CompletedStage = alreadyV7CompletedStage,
                     };
                 }
 
@@ -475,16 +484,12 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     installedOverride: workingPackages)
                 .ConfigureAwait(false);
 
+            // Ownership: ExecuteStageAsync never disposes its input. After stage1, `live` is Conn₁
+            // owned here via disposeLive — dispose it now that stage2 has finished using it
+            // (whether or not stage2 rebooted; the peer session is superseded either way).
             if (disposeLive)
             {
-                try
-                {
-                    live.Dispose();
-                }
-                catch
-                {
-                }
-
+                TryDisposeOwnedConnection(live);
                 disposeLive = false;
                 live = null;
             }
@@ -515,7 +520,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 };
             }
 
-            // Post-v7: OSPF reconcile → backup → RouterBOARD.
+            // Post-v7: verified ROS7 central backup → OSPF reconcile → optional summary → RouterBOARD.
             ITikConnection? postV7 = stage2.LiveConnection;
             bool disposePostV7 = postV7 is not null;
             try
@@ -539,6 +544,30 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     ?? await routerOperations
                         .ReadDeviceInfoAsync(postV7, job.RouterIp.ToString(), cancellationToken)
                         .ConfigureAwait(false);
+
+                // Verified central backup of the post-upgrade RouterOS 7 state before any OSPF mutation.
+                logger.LogInformation(
+                    "Post-RouterOS-7 backup before OSPF migration starting");
+                DeviceBackupResult postV7Backup = await backupService
+                    .CreatePreUpgradeBackupAsync(postV7, job, postV7Device, username, password, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!IsCentralBackupVerified(postV7Backup))
+                {
+                    deleteOspfPlanInFinally = false;
+                    return new UpgradeExecutionResult
+                    {
+                        Outcome = UpgradeOutcome.BackupFailed,
+                        Detail = postV7Backup.FailureReason
+                                 ?? "Post-RouterOS-7 backup before OSPF migration failed.",
+                        PostUpgradeVersion = postV7Device.Version,
+                        PostUpgradeArchitecture = postV7Device.ArchitectureName,
+                        RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
+                        CompletedStage = UpgradeCompletedStages.RouterOs7,
+                    };
+                }
+
+                // Explicit gate: verified backup must not authorise OSPF after caller cancellation.
+                cancellationToken.ThrowIfCancellationRequested();
 
                 OspfApplyGateResult ospfApply = await ospfMigrationService
                     .ApplyAndVerifyAsync(
@@ -564,28 +593,6 @@ internal sealed class RouterOsV6UpgradeExecutor(
                         PostUpgradeArchitecture = postV7Device.ArchitectureName,
                         RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
                         CompletedStage = UpgradeCompletedStages.RouterOs7,
-                    };
-                }
-
-                // Backup after OSPF verify and before summary mutations so a failed summary
-                // still has a retained post-ROS7 evidence backup.
-                logger.LogInformation(
-                    "Post-RouterOS-7 / post-OSPF backup before optional static-summary redistribution starting");
-                DeviceBackupResult postV7Backup = await backupService
-                    .CreatePreUpgradeBackupAsync(postV7, job, postV7Device, username, password, cancellationToken)
-                    .ConfigureAwait(false);
-                if (!postV7Backup.Succeeded)
-                {
-                    deleteOspfPlanInFinally = false;
-                    return new UpgradeExecutionResult
-                    {
-                        Outcome = UpgradeOutcome.BackupFailed,
-                        Detail = postV7Backup.FailureReason
-                                 ?? "Post-RouterOS-7 backup before static-summary redistribution failed.",
-                        PostUpgradeVersion = postV7Device.Version,
-                        PostUpgradeArchitecture = postV7Device.ArchitectureName,
-                        RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
-                        CompletedStage = UpgradeCompletedStages.OspfMigration,
                     };
                 }
 
@@ -656,15 +663,10 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 }
             }
 
+            // Never dispose `connection` (Conn₀) — owned by RouterJobExecutor.
             if (disposeLive && live is not null && !ReferenceEquals(live, connection))
             {
-                try
-                {
-                    live.Dispose();
-                }
-                catch
-                {
-                }
+                TryDisposeOwnedConnection(live);
             }
         }
     }
@@ -963,6 +965,10 @@ internal sealed class RouterOsV6UpgradeExecutor(
         logger.LogInformation("Initiating {Stage} reboot for package installation", stageLabel);
         await routerOperations.RebootAsync(connection, cancellationToken).ConfigureAwait(false);
         bool rebootInitiated = true;
+        // Ownership: `connection` (stage input) remains owned by the caller. After reboot it is
+        // unusable but must not be disposed here — that would race with RouterJobExecutor's
+        // ownership of Conn₀ and with disposeLive ownership of intermediate LiveConnections.
+        // This method owns only `reconnected` until transferred via LiveConnection or disposed.
         DateTimeOffset rebootInitiatedAt = timeProvider.GetUtcNow();
         DateTimeOffset rebootDeadline = rebootInitiatedAt + options.RebootTimeout;
         logger.LogInformation(
@@ -1311,6 +1317,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             reconnected?.Dispose();
+            reconnected = null;
             return StageExecutionResult.Failed(new UpgradeExecutionResult
             {
                 Outcome = UpgradeOutcome.UpgradeInterrupted,
@@ -1320,7 +1327,27 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
         finally
         {
+            // Only dispose a reconnect that was not transferred to LiveConnection (reconnected set null).
             reconnected?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Disposes a connection this executor owns. Never throws — must not mask upgrade outcomes.
+    /// </summary>
+    private static void TryDisposeOwnedConnection(ITikConnection? connection)
+    {
+        if (connection is null)
+        {
+            return;
+        }
+
+        try
+        {
+            connection.Dispose();
+        }
+        catch
+        {
         }
     }
 
@@ -1377,6 +1404,13 @@ internal sealed class RouterOsV6UpgradeExecutor(
             RebootInitiated = rebootInitiated,
         };
     }
+
+    /// <summary>
+    /// True when central backup artefacts were verified. Remote cleanup failure after verification
+    /// still qualifies — cleanup status must not block OSPF when central copies are good.
+    /// </summary>
+    internal static bool IsCentralBackupVerified(DeviceBackupResult backup) =>
+        backup.Succeeded || backup.RemoteCleanupFailed;
 
     private static bool IsStageSuccess(UpgradeOutcome outcome) =>
         outcome is UpgradeOutcome.UpgradeSucceeded or UpgradeOutcome.SkippedAlreadyAtTarget;

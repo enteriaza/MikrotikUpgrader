@@ -75,6 +75,56 @@ public sealed class DeviceBackupServiceTests
         Assert.False(result.Succeeded);
         Assert.Empty(ops.RemovedFiles);
         Assert.True(ops.Files.Count >= 1);
+        Assert.Contains(result.RemainingRemoteFiles, static f => f.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase));
+        Assert.False(result.RemoteCleanupFailed);
+    }
+
+    [Fact]
+    public async Task FailedBinaryDownload_RetainsRemoteBackup()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-bin-dl-fail-").FullName;
+        RecordingRouterOps ops = new();
+        InMemoryFileTransfer transfer = new() { FailOnRemoteSuffix = ".backup" };
+        DeviceBackupService service = CreateService(backupRoot, ops, transfer);
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(ops.RemovedFiles);
+        Assert.Contains(result.RemainingRemoteFiles, static f => f.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.RemainingRemoteFiles, static f => f.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(2, result.RemainingRemoteFiles.Count);
+        Assert.Contains(ops.Files.Keys, static k => k.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task FailedExportDownload_RetainsRemoteExport()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-exp-dl-fail-").FullName;
+        RecordingRouterOps ops = new();
+        InMemoryFileTransfer transfer = new() { FailOnRemoteSuffix = ".rsc" };
+        DeviceBackupService service = CreateService(backupRoot, ops, transfer);
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(ops.RemovedFiles);
+        Assert.Single(result.RemainingRemoteFiles);
+        Assert.EndsWith(".rsc", result.RemainingRemoteFiles[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(ops.Files.Keys, static k => k.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(ops.Files.Keys, static k => k.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -98,6 +148,30 @@ public sealed class DeviceBackupServiceTests
         Assert.True(File.Exists(result.BinaryLocalPath));
         Assert.True(File.Exists(result.ManifestLocalPath));
         Assert.NotEmpty(result.RemainingRemoteFiles);
+        Assert.Contains("Remote cleanup failed", result.FailureReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RouterDisconnectDuringCleanup_ReportsCleanupFailureWithoutMaskingCentralBackup()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-cleanup-disconnect-").FullName;
+        RecordingRouterOps ops = new() { RemoveExceptionFactory = static () => new IOException("router disconnected") };
+        DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.RemoteCleanupFailed);
+        Assert.Contains("router disconnected", result.FailureReason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(result.ExportLocalPath));
+        Assert.True(File.Exists(result.BinaryLocalPath));
+        Assert.Equal(2, result.RemainingRemoteFiles.Count);
     }
 
     [Fact]
@@ -169,8 +243,8 @@ public sealed class DeviceBackupServiceTests
     {
         string backupRoot = Directory.CreateTempSubdirectory("bk-unrelated-").FullName;
         RecordingRouterOps ops = new();
-        ops.Files["unrelated-config.rsc"] = 99;
-        ops.Files["other.backup"] = 88;
+        ops.SeedFile("unrelated-config.rsc", 99);
+        ops.SeedFile("other.backup", 88);
         DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
 
         DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
@@ -190,12 +264,16 @@ public sealed class DeviceBackupServiceTests
     }
 
     [Fact]
-    public async Task CancellationDuringCleanup_PreservesCentralBackups()
+    public async Task CancellationAfterVerification_StillAttemptsBoundedCleanup()
     {
         string backupRoot = Directory.CreateTempSubdirectory("bk-cancel-cleanup-").FullName;
-        RecordingRouterOps ops = new() { RemoveDelay = TimeSpan.FromSeconds(5) };
+        RecordingRouterOps ops = new() { RemoveDelay = TimeSpan.FromMilliseconds(80) };
         using CancellationTokenSource cts = new();
-        DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
+        DeviceBackupService service = CreateService(
+            backupRoot,
+            ops,
+            new InMemoryFileTransfer(),
+            scpTimeout: TimeSpan.FromSeconds(30));
 
         Task<DeviceBackupResult> task = service.CreatePreUpgradeBackupAsync(
             new TikFakeConnection(),
@@ -217,6 +295,175 @@ public sealed class DeviceBackupServiceTests
         Assert.Contains(localFiles, static p => p.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(localFiles, static p => p.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(localFiles, static p => p.EndsWith(".json", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(2, ops.RemovedFiles.Count);
+        Assert.DoesNotContain(ops.Files.Keys, static k =>
+            k.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase)
+            || k.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task CancellationDuringDownload_RetainsRemoteArtefacts()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-cancel-dl-").FullName;
+        RecordingRouterOps ops = new();
+        using CancellationTokenSource cts = new();
+        InMemoryFileTransfer transfer = new()
+        {
+            DownloadDelay = TimeSpan.FromSeconds(5),
+            OnDownloadStarted = _ => cts.Cancel(),
+        };
+        DeviceBackupService service = CreateService(backupRoot, ops, transfer);
+
+        Task<DeviceBackupResult> task = service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            cts.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await task);
+        Assert.Empty(ops.RemovedFiles);
+        Assert.Contains(ops.Files.Keys, static k => k.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task BoundedCleanupTimeout_ReportsCleanupFailure()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-cleanup-timeout-").FullName;
+        RecordingRouterOps ops = new() { RemoveDelay = TimeSpan.FromSeconds(2) };
+        DeviceBackupService service = CreateService(
+            backupRoot,
+            ops,
+            new InMemoryFileTransfer(),
+            scpTimeout: TimeSpan.FromMilliseconds(50));
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.RemoteCleanupFailed);
+        Assert.Contains("timed out", result.FailureReason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(result.ExportLocalPath));
+        Assert.True(File.Exists(result.BinaryLocalPath));
+        Assert.NotEmpty(result.RemainingRemoteFiles);
+    }
+
+    [Fact]
+    public async Task ConcurrentBackupsOnSameRouter_DoNotDeleteEachOthersArtefacts()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-concurrent-").FullName;
+        SharedRouterFileStore store = new();
+        store.Set("unrelated.rsc", 10);
+        RecordingRouterOps opsA = new(store);
+        RecordingRouterOps opsB = new(store);
+        DateTimeOffset stamp = new(2026, 11, 10, 19, 0, 0, 100, TimeSpan.Zero);
+        DeviceBackupService serviceA = CreateService(backupRoot, opsA, new InMemoryFileTransfer(), fixedTime: stamp);
+        DeviceBackupService serviceB = CreateService(
+            backupRoot,
+            opsB,
+            new InMemoryFileTransfer(),
+            fixedTime: stamp.AddMilliseconds(1));
+
+        MikrotikScheduledJob job = CreateJob();
+        MikrotikDeviceInfo device = CreateDevice();
+        Task<DeviceBackupResult> taskA = serviceA.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(), job, device, "admin", "secret", CancellationToken.None);
+        Task<DeviceBackupResult> taskB = serviceB.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(), job, device, "admin", "secret", CancellationToken.None);
+        DeviceBackupResult[] results = await Task.WhenAll(taskA, taskB);
+
+        Assert.All(results, static r => Assert.True(r.Succeeded, r.FailureReason));
+        Assert.Equal(2, opsA.RemovedFiles.Count);
+        Assert.Equal(2, opsB.RemovedFiles.Count);
+        Assert.Empty(opsA.RemovedFiles.Intersect(opsB.RemovedFiles, StringComparer.OrdinalIgnoreCase));
+        Assert.DoesNotContain("unrelated.rsc", opsA.RemovedFiles);
+        Assert.DoesNotContain("unrelated.rsc", opsB.RemovedFiles);
+    }
+
+    [Fact]
+    public async Task PartialBinaryCreationFailure_RetainsOwnedExportOnly()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-partial-bin-").FullName;
+        RecordingRouterOps ops = new() { BinarySize = 0 };
+        DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
+
+        DeviceBackupResult result = await service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Empty(ops.RemovedFiles);
+        Assert.Single(result.RemainingRemoteFiles);
+        Assert.EndsWith(".rsc", result.RemainingRemoteFiles[0], StringComparison.OrdinalIgnoreCase);
+        Assert.False(result.RemoteCleanupFailed);
+    }
+
+    [Fact]
+    public async Task ApplicationShutdown_DoesNotLeaveUnboundedCleanupTask()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-shutdown-cleanup-").FullName;
+        RecordingRouterOps ops = new() { RemoveDelay = TimeSpan.FromSeconds(5) };
+        DeviceBackupService service = CreateService(
+            backupRoot,
+            ops,
+            new InMemoryFileTransfer(),
+            scpTimeout: TimeSpan.FromMilliseconds(100));
+        using CancellationTokenSource shutdown = new();
+
+        Task<DeviceBackupResult> task = service.CreatePreUpgradeBackupAsync(
+            new TikFakeConnection(),
+            CreateJob(),
+            CreateDevice(),
+            "admin",
+            "secret",
+            shutdown.Token);
+
+        while (ops.RemovedFiles.Count == 0 && !task.IsCompleted)
+        {
+            await Task.Delay(10);
+        }
+
+        shutdown.Cancel();
+        // Bounded cleanup runs, then caller cancellation is rethrown (not returned as BackupFailed).
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await task.WaitAsync(TimeSpan.FromSeconds(3)));
+    }
+
+    [Fact]
+    public async Task CancellationAfterVerification_WithCleanupFailure_PropagatesCancellation()
+    {
+        string backupRoot = Directory.CreateTempSubdirectory("bk-cancel-cleanup-fail-").FullName;
+        using CancellationTokenSource cts = new();
+        RecordingRouterOps ops = new()
+        {
+            RemoveThrows = true,
+            OnRemove = () => cts.Cancel(),
+        };
+        DeviceBackupService service = CreateService(backupRoot, ops, new InMemoryFileTransfer());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await service.CreatePreUpgradeBackupAsync(
+                new TikFakeConnection(),
+                CreateJob(),
+                CreateDevice(),
+                "admin",
+                "secret",
+                cts.Token));
+
+        string[] localFiles = Directory.GetFiles(backupRoot, "*", SearchOption.AllDirectories);
+        Assert.Contains(localFiles, static p => p.EndsWith(".rsc", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(localFiles, static p => p.EndsWith(".backup", StringComparison.OrdinalIgnoreCase));
+        Assert.NotEmpty(ops.RemovedFiles);
     }
 
     [Fact]
@@ -298,7 +545,7 @@ public sealed class DeviceBackupServiceTests
     {
         string backupRoot = Directory.CreateTempSubdirectory("bk-identity-").FullName;
         RecordingRouterOps ops = new();
-        ops.Files["unrelated.rsc"] = 10;
+        ops.SeedFile("unrelated.rsc", 10);
         DeviceBackupService service = CreateService(
             backupRoot,
             ops,
@@ -403,7 +650,8 @@ public sealed class DeviceBackupServiceTests
         string backupRoot,
         RecordingRouterOps ops,
         IMikrotikFileTransferClient transfer,
-        DateTimeOffset? fixedTime = null) =>
+        DateTimeOffset? fixedTime = null,
+        TimeSpan? scpTimeout = null) =>
         new(
             ops,
             transfer,
@@ -412,7 +660,7 @@ public sealed class DeviceBackupServiceTests
                 BackupDirectory = backupRoot,
                 BackupFileReadyTimeout = TimeSpan.FromSeconds(2),
                 BackupFileReadyPollInterval = TimeSpan.FromMilliseconds(10),
-                ScpTimeout = TimeSpan.FromSeconds(5),
+                ScpTimeout = scpTimeout ?? TimeSpan.FromSeconds(5),
             }),
             fixedTime is null ? TimeProvider.System : new FakeTimeProvider(fixedTime.Value),
             NullLogger<DeviceBackupService>.Instance);
@@ -439,11 +687,63 @@ public sealed class DeviceBackupServiceTests
             RouterboardModel = "960PGS",
         };
 
+    private sealed class SharedRouterFileStore
+    {
+        private readonly Dictionary<string, long> _files = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _gate = new();
+
+        public Dictionary<string, long> Snapshot
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return new Dictionary<string, long>(_files, StringComparer.OrdinalIgnoreCase);
+                }
+            }
+        }
+
+        public void Set(string name, long size)
+        {
+            lock (_gate)
+            {
+                _files[name] = size;
+            }
+        }
+
+        public bool TryGet(string name, out long size)
+        {
+            lock (_gate)
+            {
+                return _files.TryGetValue(name, out size);
+            }
+        }
+
+        public void Remove(string name)
+        {
+            lock (_gate)
+            {
+                _files.Remove(name);
+            }
+        }
+    }
+
     private sealed class RecordingRouterOps : IMikrotikRouterOperations
     {
+        private readonly SharedRouterFileStore _store;
+
+        public RecordingRouterOps(SharedRouterFileStore? store = null)
+        {
+            _store = store ?? new SharedRouterFileStore();
+        }
+
         public bool ExportThrows { get; init; }
 
         public bool RemoveThrows { get; init; }
+
+        public Func<Exception>? RemoveExceptionFactory { get; init; }
+
+        public Action? OnRemove { get; init; }
 
         public long BinarySize { get; init; } = 12;
 
@@ -455,11 +755,11 @@ public sealed class DeviceBackupServiceTests
 
         public bool RebootCalled { get; private set; }
 
-        public Dictionary<string, long> Files => _files;
+        public Dictionary<string, long> Files => _store.Snapshot;
 
         public List<string> RemovedFiles { get; } = [];
 
-        private readonly Dictionary<string, long> _files = new(StringComparer.OrdinalIgnoreCase);
+        public void SeedFile(string name, long size) => _store.Set(name, size);
 
         public Task<MikrotikDeviceInfo> ReadDeviceInfoAsync(
             ITikConnection connection,
@@ -487,7 +787,7 @@ public sealed class DeviceBackupServiceTests
                 throw new InvalidOperationException("export failed");
             }
 
-            _files[fileNameWithoutExtension + ".rsc"] = Encoding.UTF8.GetByteCount("export-body");
+            _store.Set(fileNameWithoutExtension + ".rsc", Encoding.UTF8.GetByteCount("export-body"));
         }
 
         public Task SaveSystemBackupAsync(
@@ -496,7 +796,7 @@ public sealed class DeviceBackupServiceTests
             string? backupPassword,
             CancellationToken cancellationToken = default)
         {
-            _files[fileNameWithoutExtension + ".backup"] = BinarySize;
+            _store.Set(fileNameWithoutExtension + ".backup", BinarySize);
             return Task.CompletedTask;
         }
 
@@ -505,7 +805,8 @@ public sealed class DeviceBackupServiceTests
             string fileName,
             CancellationToken cancellationToken = default)
         {
-            if (_files.TryGetValue(fileName, out long size))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_store.TryGet(fileName, out long size))
             {
                 return Task.FromResult<RouterFileInfo?>(new RouterFileInfo(fileName, size, "*1"));
             }
@@ -533,9 +834,15 @@ public sealed class DeviceBackupServiceTests
             CancellationToken cancellationToken = default)
         {
             RemovedFiles.Add(fileName);
+            OnRemove?.Invoke();
             if (RemoveDelay > TimeSpan.Zero)
             {
                 await Task.Delay(RemoveDelay, cancellationToken);
+            }
+
+            if (RemoveExceptionFactory is not null)
+            {
+                throw RemoveExceptionFactory();
             }
 
             if (RemoveThrows)
@@ -543,7 +850,7 @@ public sealed class DeviceBackupServiceTests
                 throw new IOException("remove failed");
             }
 
-            _files.Remove(fileName);
+            _store.Remove(fileName);
         }
 
         public Task FetchUrlToFileAsync(
@@ -568,11 +875,17 @@ public sealed class DeviceBackupServiceTests
     {
         public bool FailOnDownload { get; init; }
 
+        public string? FailOnRemoteSuffix { get; init; }
+
         public bool CorruptLocalSize { get; init; }
+
+        public TimeSpan DownloadDelay { get; init; }
+
+        public Action<string>? OnDownloadStarted { get; init; }
 
         public List<string> Downloads { get; } = [];
 
-        public Task DownloadFileAsync(
+        public async Task DownloadFileAsync(
             string host,
             int port,
             string username,
@@ -582,7 +895,18 @@ public sealed class DeviceBackupServiceTests
             TimeSpan timeout,
             CancellationToken cancellationToken = default)
         {
-            if (FailOnDownload)
+            OnDownloadStarted?.Invoke(remoteFileName);
+
+            if (DownloadDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(DownloadDelay, cancellationToken);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (FailOnDownload
+                || (FailOnRemoteSuffix is not null
+                    && remoteFileName.EndsWith(FailOnRemoteSuffix, StringComparison.OrdinalIgnoreCase)))
             {
                 throw new IOException("sftp authentication failed");
             }
@@ -593,10 +917,9 @@ public sealed class DeviceBackupServiceTests
                 ? Encoding.UTF8.GetBytes(CorruptLocalSize ? "x" : "export-body")
                 : Enumerable.Repeat((byte)7, CorruptLocalSize ? 1 : 12).ToArray();
             // Match production SFTP: never overwrite an existing local artefact.
-            using FileStream output = new(localFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            output.Write(payload);
-            output.Flush();
-            return Task.CompletedTask;
+            await using FileStream output = new(localFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            await output.WriteAsync(payload, cancellationToken);
+            await output.FlushAsync(cancellationToken);
         }
     }
 

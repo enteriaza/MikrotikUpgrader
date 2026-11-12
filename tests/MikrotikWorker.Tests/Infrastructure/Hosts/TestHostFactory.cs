@@ -75,6 +75,8 @@ internal static class TestHostFactory
             [$"{MikroTikOptions.SectionName}:Username"] = "your-router-username",
             [$"{MikroTikOptions.SectionName}:Password"] = "your-router-password",
             [$"{MikroTikOptions.SectionName}:Port"] = "8728",
+            // Deployment-supplied firmware URL (not the removed lab default). Required when Enabled=true.
+            ["FirmwareUpgrade:AdvertisedBaseUrl"] = "http://198.18.0.1:8080/firmware_files",
             ["Logging:Serilog:LogDirectory"] = testLogDirectory,
             ["Logging:Serilog:FileName"] = "application-.log",
             ["Logging:Serilog:MinimumLevel"] = "Information",

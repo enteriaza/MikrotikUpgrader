@@ -314,11 +314,14 @@ internal sealed class RouterJobExecutor(
                         upgradeResult.Outcome);
                 }
 
-                if (!upgradeResult.RebootInitiated)
+                // Ownership: RouterJobExecutor always owns Conn₀ from CreateAsync until this point.
+                // Upgrade stages must not dispose Conn₀ (including after reboot). Dispose whether or
+                // not a reboot occurred — after reboot the peer session is dead but the handle remains ours.
+                Exception? disconnectError = Disconnect(connection, job);
+                connection = null;
+                if (disconnectError is not null)
                 {
-                    Exception? disconnectError = Disconnect(connection, job);
-                    connection = null;
-                    if (disconnectError is not null)
+                    if (!upgradeResult.RebootInitiated)
                     {
                         stopwatch.Stop();
                         logger.LogError(disconnectError, "Disconnection failure");
@@ -344,11 +347,14 @@ internal sealed class RouterJobExecutor(
                         return;
                     }
 
-                    logger.LogInformation("Connection disconnected successfully");
+                    // After reboot, dispose failures are expected more often; do not override upgrade outcome.
+                    logger.LogDebug(
+                        disconnectError,
+                        "Dispose of Conn₀ after RebootInitiated reported an error; upgrade outcome is unchanged");
                 }
-                else
+                else if (!upgradeResult.RebootInitiated)
                 {
-                    connection = null;
+                    logger.LogInformation("Connection disconnected successfully");
                 }
 
                 stopwatch.Stop();

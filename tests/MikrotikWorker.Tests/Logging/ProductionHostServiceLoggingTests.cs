@@ -21,7 +21,7 @@ public sealed class ProductionHostServiceLoggingTests
     [Fact]
     public async Task ProductionHost_EmitsServiceLifecycle_AndIsolatesDeviceLogs()
     {
-        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(("probe.txt", "ok"u8.ToArray()));
+        string firmwareRoot = TestHostFactory.CreateFirmwareRoot(("probe.npk", "ok"u8.ToArray()));
         string jobsRoot = TestHostFactory.CreateScheduledJobsRoot();
         string logRoot = Directory.CreateTempSubdirectory("svc-log-").FullName;
         string deviceLogRoot = Path.Combine(logRoot, "Devices");
@@ -78,7 +78,7 @@ public sealed class ProductionHostServiceLoggingTests
             Uri baseAddress = TestHostFactory.GetListeningAddress(app);
             using (HttpClient client = new() { BaseAddress = baseAddress })
             {
-                using HttpResponseMessage response = await client.GetAsync("/firmware_files/probe.txt");
+                using HttpResponseMessage response = await client.GetAsync("/firmware_files/probe.npk");
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             }
 
@@ -151,7 +151,7 @@ public sealed class ProductionHostServiceLoggingTests
             AssertLogContains(applicationLog, "Application ready");
             AssertLogContains(applicationLog, "Now listening on:");
             Assert.Contains($":{port}", applicationLog, StringComparison.Ordinal);
-            AssertLogContains(applicationLog, "HTTP GET /firmware_files/probe.txt responded 200");
+            AssertLogContains(applicationLog, "HTTP GET /firmware_files/probe.npk responded 200");
             AssertLogContains(applicationLog, "RemoteIp=");
 
             // CSV watcher / import
@@ -312,7 +312,7 @@ public sealed class ProductionHostServiceLoggingTests
 
         StringBuilder sb = new();
         sb.AppendLine("1. Startup/Kestrel: " + Snip(appLog, "Now listening on:"));
-        sb.AppendLine("2. HTTP: " + Snip(appLog, "HTTP GET /firmware_files/probe.txt"));
+        sb.AppendLine("2. HTTP: " + Snip(appLog, "HTTP GET /firmware_files/probe.npk"));
         sb.AppendLine("3. CSV: " + Snip(appLog, "CSV accepted for scheduling"));
         sb.AppendLine("4. Enqueue: " + Snip(appLog, "Job accepted into scheduler"));
         sb.AppendLine("5. Dequeue: " + Snip(appLog, "Job dequeued for execution"));

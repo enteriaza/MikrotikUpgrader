@@ -111,6 +111,7 @@ public sealed class OspfMigrationExecutorGateTests
 
         Assert.Equal(UpgradeOutcome.OspfMigrationApplyFailed, result.Outcome);
         Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterOs7, result.CompletedStage);
         Assert.False(ops.FetchCalled);
     }
 
@@ -138,6 +139,7 @@ public sealed class OspfMigrationExecutorGateTests
 
         Assert.Equal(UpgradeOutcome.OspfMigrationApplyFailed, result.Outcome);
         Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterOs7, result.CompletedStage);
         Assert.False(ops.FetchCalled);
     }
 

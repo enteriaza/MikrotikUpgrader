@@ -13,10 +13,15 @@ using tik4net;
 using tik4net.Testing;
 
 namespace MikrotikWorker.Tests.Upgrade;
+
 /// <summary>
 /// Exercises the production DeviceLogWriter + Serilog device sink across a synthetic
 /// backup → fetch → reboot → reconnect upgrade lifecycle (no live router).
 /// </summary>
+/// <remarks>
+/// Serialized with other tests that mutate the process-wide <c>Log.Logger</c>.
+/// </remarks>
+[Collection("Serilog")]
 public sealed class UpgradeLifecycleDeviceLogTests
 {
     [Fact]

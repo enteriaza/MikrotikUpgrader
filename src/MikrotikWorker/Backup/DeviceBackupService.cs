@@ -54,6 +54,8 @@ internal sealed class DeviceBackupService(
         string? exportLocal = null;
         string? binaryLocal = null;
         string? manifestPath = null;
+        List<string> ownedRemoteFiles = [];
+        bool centralVerified = false;
 
         try
         {
@@ -125,9 +127,22 @@ internal sealed class DeviceBackupService(
                 .ConfigureAwait(false))!;
             if (exportRemoteInfo.SizeBytes <= 0)
             {
-                return Fail("Export file on router was empty.", exportLocal, binaryLocal, manifestPath);
+                return FailRetain(
+                    "Export file on router was empty.",
+                    job,
+                    exportLocal,
+                    binaryLocal,
+                    manifestPath,
+                    ownedRemoteFiles);
             }
 
+            ownedRemoteFiles.Add(exportRemote);
+            logger.LogInformation(
+                "Remote backup creation completed for export ({RemoteFile}, {SizeBytes} bytes)",
+                exportRemote,
+                exportRemoteInfo.SizeBytes);
+
+            logger.LogInformation("Central download started ({RemoteFile})", exportRemote);
             await fileTransferClient
                 .DownloadFileAsync(
                     job.RouterIp.ToString(),
@@ -143,16 +158,24 @@ internal sealed class DeviceBackupService(
             FileInfo exportInfo = new(exportLocal);
             if (!exportInfo.Exists || exportInfo.Length <= 0)
             {
-                return Fail("Central export file missing or empty after transfer.", exportLocal, binaryLocal, manifestPath);
+                return FailRetain(
+                    "Central export file missing or empty after transfer.",
+                    job,
+                    exportLocal,
+                    binaryLocal,
+                    manifestPath,
+                    ownedRemoteFiles);
             }
 
             if (exportInfo.Length != exportRemoteInfo.SizeBytes)
             {
-                return Fail(
+                return FailRetain(
                     $"Export size mismatch (router={exportRemoteInfo.SizeBytes}, local={exportInfo.Length}).",
+                    job,
                     exportLocal,
                     binaryLocal,
-                    manifestPath);
+                    manifestPath,
+                    ownedRemoteFiles);
             }
 
             string exportSha = ComputeSha256Hex(exportLocal);
@@ -182,9 +205,22 @@ internal sealed class DeviceBackupService(
                 .ConfigureAwait(false))!;
             if (binaryRemoteInfo.SizeBytes <= 0)
             {
-                return Fail("Binary backup on router was empty.", exportLocal, binaryLocal, manifestPath);
+                return FailRetain(
+                    "Binary backup on router was empty.",
+                    job,
+                    exportLocal,
+                    binaryLocal,
+                    manifestPath,
+                    ownedRemoteFiles);
             }
 
+            ownedRemoteFiles.Add(binaryRemote);
+            logger.LogInformation(
+                "Remote backup creation completed for binary ({RemoteFile}, {SizeBytes} bytes)",
+                binaryRemote,
+                binaryRemoteInfo.SizeBytes);
+
+            logger.LogInformation("Central download started ({RemoteFile})", binaryRemote);
             await fileTransferClient
                 .DownloadFileAsync(
                     job.RouterIp.ToString(),
@@ -200,16 +236,24 @@ internal sealed class DeviceBackupService(
             FileInfo binaryInfo = new(binaryLocal);
             if (!binaryInfo.Exists || binaryInfo.Length <= 0)
             {
-                return Fail("Central binary backup missing or empty after transfer.", exportLocal, binaryLocal, manifestPath);
+                return FailRetain(
+                    "Central binary backup missing or empty after transfer.",
+                    job,
+                    exportLocal,
+                    binaryLocal,
+                    manifestPath,
+                    ownedRemoteFiles);
             }
 
             if (binaryInfo.Length != binaryRemoteInfo.SizeBytes)
             {
-                return Fail(
+                return FailRetain(
                     $"Binary backup size mismatch (router={binaryRemoteInfo.SizeBytes}, local={binaryInfo.Length}).",
+                    job,
                     exportLocal,
                     binaryLocal,
-                    manifestPath);
+                    manifestPath,
+                    ownedRemoteFiles);
             }
 
             string binarySha = ComputeSha256Hex(binaryLocal);
@@ -247,85 +291,82 @@ internal sealed class DeviceBackupService(
 
             if (!File.Exists(manifestPath) || new FileInfo(manifestPath).Length <= 0)
             {
-                return Fail("Manifest write failed or produced an empty file.", exportLocal, binaryLocal, manifestPath);
+                return FailRetain(
+                    "Manifest write failed or produced an empty file.",
+                    job,
+                    exportLocal,
+                    binaryLocal,
+                    manifestPath,
+                    ownedRemoteFiles);
             }
 
+            centralVerified = true;
             logger.LogInformation("Backup manifest created ({ManifestFile})", Path.GetFileName(manifestPath));
+            logger.LogInformation("Central verification succeeded");
 
-            // --- Remote cleanup only after central verification ---
-            logger.LogInformation("Remote backup cleanup started");
-
-            try
-            {
-                await routerOperations.RemoveFileAsync(connection, exportRemote, cancellationToken)
-                    .ConfigureAwait(false);
-                await routerOperations.RemoveFileAsync(connection, binaryRemote, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                logger.LogWarning(
-                    "Backup cancelled during remote cleanup; central backups retained. Remaining: {RemainingRemoteFiles}",
-                    $"{exportRemote}, {binaryRemote}");
-                throw;
-            }
-            catch (Exception cleanupEx)
-            {
-                logger.LogError(
-                    cleanupEx,
-                    "Remote backup cleanup failed. Remaining: {RemainingRemoteFiles}",
-                    $"{exportRemote}, {binaryRemote}");
-                return Fail(
-                    $"Remote cleanup failed after central verification: {cleanupEx.Message}. Remaining remote files: {exportRemote}, {binaryRemote}",
+            // Remote cleanup only after central verification. Caller cancellation must not
+            // prevent a bounded cleanup attempt once the central copies are verified.
+            DeviceBackupResult? cleanupFailure = await TryCleanupOwnedRemoteArtefactsAsync(
+                    connection,
+                    job,
                     exportLocal,
                     binaryLocal,
                     manifestPath,
-                    remoteCleanupFailed: true,
-                    remainingRemoteFiles: [exportRemote, binaryRemote]);
-            }
-
-            RouterFileInfo? exportStillThere = await routerOperations
-                .FindFileAsync(connection, exportRemote, cancellationToken)
+                    ownedRemoteFiles,
+                    options.ScpTimeout)
                 .ConfigureAwait(false);
-            RouterFileInfo? binaryStillThere = await routerOperations
-                .FindFileAsync(connection, binaryRemote, cancellationToken)
-                .ConfigureAwait(false);
-            if (exportStillThere is not null || binaryStillThere is not null)
+            if (cleanupFailure is not null)
             {
-                List<string> remaining = [];
-                if (exportStillThere is not null)
+                // Cleanup outcome was logged and captured on the failure result. Caller cancellation
+                // still wins: do not return a continuable backup result that could advance OSPF.
+                if (cancellationToken.IsCancellationRequested)
                 {
-                    remaining.Add(exportRemote);
+                    using (DeviceLogging.BeginServiceOnly())
+                    {
+                        logger.LogWarning(
+                            "Caller cancelled after central verification; remote cleanup failed. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RemainingRemoteFiles={RemainingRemoteFiles}",
+                            job.ImportId,
+                            job.JobId,
+                            job.RouterIp,
+                            string.Join(", ", cleanupFailure.RemainingRemoteFiles));
+                    }
+
+                    throw new OperationCanceledException(cancellationToken);
                 }
 
-                if (binaryStillThere is not null)
-                {
-                    remaining.Add(binaryRemote);
-                }
-
-                logger.LogError(
-                    "Remote cleanup verification failed; still present: {RemainingRemoteFiles}",
-                    string.Join(", ", remaining));
-                return Fail(
-                    $"Remote cleanup verification failed; still present: {string.Join(", ", remaining)}",
-                    exportLocal,
-                    binaryLocal,
-                    manifestPath,
-                    remoteCleanupFailed: true,
-                    remainingRemoteFiles: remaining);
+                return cleanupFailure;
             }
-
-            logger.LogInformation("Remote backup cleanup succeeded");
 
             BackupManifest finalManifest = manifest with { BackupCompletionStatus = "SucceededWithRemoteCleanup" };
-            await File.WriteAllTextAsync(
-                    manifestPath,
-                    JsonSerializer.Serialize(finalManifest, JsonOptions),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            // Final manifest update is part of the post-verify cleanup window; use a bounded token
+            // so caller cancellation after verification cannot leave status stuck at CentralVerified
+            // when remotes were already removed.
+            using (CancellationTokenSource manifestCts = new(options.ScpTimeout))
+            {
+                await File.WriteAllTextAsync(
+                        manifestPath,
+                        JsonSerializer.Serialize(finalManifest, JsonOptions),
+                        manifestCts.Token)
+                    .ConfigureAwait(false);
+            }
 
             active.Complete();
             reservation = null;
+            ownedRemoteFiles.Clear();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                using (DeviceLogging.BeginServiceOnly())
+                {
+                    logger.LogWarning(
+                        "Caller cancelled after central verification; remote cleanup completed. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterIp);
+                }
+
+                throw new OperationCanceledException(cancellationToken);
+            }
 
             return new DeviceBackupResult
             {
@@ -339,6 +380,13 @@ internal sealed class DeviceBackupService(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            if (!centralVerified && ownedRemoteFiles.Count > 0)
+            {
+                logger.LogWarning(
+                    "Remote artefact intentionally retained because central verification was not completed before cancellation. RemainingRemoteFiles={RemainingRemoteFiles}",
+                    string.Join(", ", ownedRemoteFiles));
+            }
+
             using (DeviceLogging.BeginServiceOnly())
             {
                 logger.LogWarning(
@@ -353,6 +401,14 @@ internal sealed class DeviceBackupService(
         }
         catch (Exception ex)
         {
+            if (ownedRemoteFiles.Count > 0 && !centralVerified)
+            {
+                logger.LogWarning(
+                    "Remote artefact intentionally retained because central verification failed. RemainingRemoteFiles={RemainingRemoteFiles}, Reason={Reason}",
+                    string.Join(", ", ownedRemoteFiles),
+                    ex.Message);
+            }
+
             using (DeviceLogging.BeginServiceOnly())
             {
                 logger.LogError(
@@ -364,12 +420,164 @@ internal sealed class DeviceBackupService(
             }
 
             logger.LogError(ex, "Backup failed");
-            return Fail(ex.Message, exportLocal, binaryLocal, manifestPath);
+            return Fail(
+                ex.Message,
+                exportLocal,
+                binaryLocal,
+                manifestPath,
+                remainingRemoteFiles: ownedRemoteFiles.Count > 0 ? [.. ownedRemoteFiles] : null);
         }
         finally
         {
             reservation?.Dispose();
         }
+    }
+
+    private async Task<DeviceBackupResult?> TryCleanupOwnedRemoteArtefactsAsync(
+        ITikConnection connection,
+        MikrotikScheduledJob job,
+        string? exportLocal,
+        string? binaryLocal,
+        string? manifestPath,
+        List<string> ownedRemoteFiles,
+        TimeSpan cleanupTimeout)
+    {
+        logger.LogInformation(
+            "Remote backup cleanup started ({RemoteFiles})",
+            string.Join(", ", ownedRemoteFiles));
+
+        using CancellationTokenSource cleanupCts = new(cleanupTimeout);
+        CancellationToken cleanupToken = cleanupCts.Token;
+
+        try
+        {
+            foreach (string remoteFile in ownedRemoteFiles)
+            {
+                await routerOperations.RemoveFileAsync(connection, remoteFile, cleanupToken)
+                    .ConfigureAwait(false);
+            }
+
+            List<string> remaining = [];
+            foreach (string remoteFile in ownedRemoteFiles)
+            {
+                RouterFileInfo? stillThere = await routerOperations
+                    .FindFileAsync(connection, remoteFile, cleanupToken)
+                    .ConfigureAwait(false);
+                if (stillThere is not null)
+                {
+                    remaining.Add(remoteFile);
+                }
+            }
+
+            if (remaining.Count > 0)
+            {
+                logger.LogError(
+                    "Remote cleanup verification failed; still present: {RemainingRemoteFiles}",
+                    string.Join(", ", remaining));
+                using (DeviceLogging.BeginServiceOnly())
+                {
+                    logger.LogError(
+                        "Remote cleanup verification failed. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RemainingRemoteFiles={RemainingRemoteFiles}",
+                        job.ImportId,
+                        job.JobId,
+                        job.RouterIp,
+                        string.Join(", ", remaining));
+                }
+
+                return Fail(
+                    $"Remote cleanup verification failed; still present: {string.Join(", ", remaining)}",
+                    exportLocal,
+                    binaryLocal,
+                    manifestPath,
+                    remoteCleanupFailed: true,
+                    remainingRemoteFiles: remaining);
+            }
+        }
+        catch (OperationCanceledException) when (cleanupCts.IsCancellationRequested)
+        {
+            logger.LogError(
+                "Remote cleanup failed (bounded cleanup cancelled or timed out). RemainingRemoteFiles={RemainingRemoteFiles}",
+                string.Join(", ", ownedRemoteFiles));
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogError(
+                    "Remote cleanup timed out. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RemainingRemoteFiles={RemainingRemoteFiles}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterIp,
+                    string.Join(", ", ownedRemoteFiles));
+            }
+
+            return Fail(
+                $"Remote cleanup failed after central verification: cleanup timed out after {cleanupTimeout}. Remaining remote files: {string.Join(", ", ownedRemoteFiles)}",
+                exportLocal,
+                binaryLocal,
+                manifestPath,
+                remoteCleanupFailed: true,
+                remainingRemoteFiles: [.. ownedRemoteFiles]);
+        }
+        catch (Exception cleanupEx)
+        {
+            logger.LogError(
+                cleanupEx,
+                "Remote cleanup failed. RemainingRemoteFiles={RemainingRemoteFiles}",
+                string.Join(", ", ownedRemoteFiles));
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogError(
+                    cleanupEx,
+                    "Remote cleanup failed. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RemainingRemoteFiles={RemainingRemoteFiles}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterIp,
+                    string.Join(", ", ownedRemoteFiles));
+            }
+
+            return Fail(
+                $"Remote cleanup failed after central verification: {cleanupEx.Message}. Remaining remote files: {string.Join(", ", ownedRemoteFiles)}",
+                exportLocal,
+                binaryLocal,
+                manifestPath,
+                remoteCleanupFailed: true,
+                remainingRemoteFiles: [.. ownedRemoteFiles]);
+        }
+
+        logger.LogInformation("Remote backup cleanup succeeded");
+        return null;
+    }
+
+    private DeviceBackupResult FailRetain(
+        string reason,
+        MikrotikScheduledJob job,
+        string? exportLocal,
+        string? binaryLocal,
+        string? manifestPath,
+        IReadOnlyList<string> ownedRemoteFiles)
+    {
+        if (ownedRemoteFiles.Count > 0)
+        {
+            logger.LogWarning(
+                "Remote artefact intentionally retained because central verification failed. RemainingRemoteFiles={RemainingRemoteFiles}, Reason={Reason}",
+                string.Join(", ", ownedRemoteFiles),
+                reason);
+            using (DeviceLogging.BeginServiceOnly())
+            {
+                logger.LogWarning(
+                    "Remote artefact retained. ImportId={ImportId}, JobId={JobId}, RouterIp={RouterIp}, RemainingRemoteFiles={RemainingRemoteFiles}, Reason={Reason}",
+                    job.ImportId,
+                    job.JobId,
+                    job.RouterIp,
+                    string.Join(", ", ownedRemoteFiles),
+                    reason);
+            }
+        }
+
+        return Fail(
+            reason,
+            exportLocal,
+            binaryLocal,
+            manifestPath,
+            remainingRemoteFiles: ownedRemoteFiles.Count > 0 ? ownedRemoteFiles : null);
     }
 
     private static bool LocalArtefactPathsAreFree(BackupStemReservation reservation) =>

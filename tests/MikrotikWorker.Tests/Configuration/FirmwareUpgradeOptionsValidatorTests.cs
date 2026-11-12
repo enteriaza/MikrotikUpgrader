@@ -56,6 +56,69 @@ public sealed class FirmwareUpgradeOptionsValidatorTests
         Assert.False(result.Failed);
     }
 
+    [Fact]
+    public void Validator_WhenEnabled_RejectsMissingAdvertisedBaseUrl()
+    {
+        FirmwareUpgradeOptions options = ValidDisabledOptions();
+        options.Enabled = true;
+        options.AdvertisedBaseUrl = "";
+
+        ValidateOptionsResult result = new FirmwareUpgradeOptionsValidator().Validate(null, options);
+
+        Assert.True(result.Failed);
+        Assert.Contains(
+            result.Failures,
+            static f => f.Contains("AdvertisedBaseUrl", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validator_WhenEnabled_RejectsInvalidAdvertisedBaseUrl()
+    {
+        FirmwareUpgradeOptions options = ValidDisabledOptions();
+        options.Enabled = true;
+        options.AdvertisedBaseUrl = "not-a-url";
+
+        ValidateOptionsResult result = new FirmwareUpgradeOptionsValidator().Validate(null, options);
+
+        Assert.True(result.Failed);
+        Assert.Contains(
+            result.Failures,
+            static f => f.Contains("AdvertisedBaseUrl", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validator_WhenEnabled_AcceptsDeploymentOverrideUrl()
+    {
+        FirmwareUpgradeOptions options = ValidDisabledOptions();
+        options.Enabled = true;
+        options.AdvertisedBaseUrl = "http://10.0.0.10:8080/firmware_files";
+
+        ValidateOptionsResult result = new FirmwareUpgradeOptionsValidator().Validate(null, options);
+
+        Assert.False(result.Failed);
+    }
+
+    [Fact]
+    public void ShippedAppsettings_DoesNotContainLabFirmwareEndpoint()
+    {
+        string path = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MikrotikWorker",
+            "appsettings.json"));
+        Assert.True(File.Exists(path), $"Expected shipped settings at {path}");
+        string json = File.ReadAllText(path);
+        Assert.DoesNotContain("198.18.0.66", json, StringComparison.Ordinal);
+        Assert.Contains("\"AdvertisedBaseUrl\": \"\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"RedistributeSummaryviaStatics\": true", json, StringComparison.Ordinal);
+        Assert.Contains("\"Enabled\": false", json, StringComparison.Ordinal); // Mikrotik
+    }
+
     private static FirmwareUpgradeOptions ValidDisabledOptions() =>
         new()
         {
