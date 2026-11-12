@@ -19,6 +19,7 @@ public sealed class OspfPreApplyIsolationTests
             [
                 new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
+                new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
                 // Drift after simulated reboot: peer /30 host now also present on vlan10.
                 new OspfIpAddressRow { Address = "10.0.0.2/30", Network = "10.0.0.0", Interface = "vlan10" },
             ],
@@ -78,6 +79,7 @@ public sealed class OspfPreApplyIsolationTests
             [
                 new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
+                new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
             ],
             Inventory = HappyInventory(),
         };
@@ -118,7 +120,7 @@ public sealed class OspfPreApplyIsolationTests
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                new OspfAreaRow { Name = "site", AreaId = "10.0.0.1", Type = "stub" },
+                new OspfAreaRow { Name = "site", AreaId = "10.255.0.1", Type = "stub" },
             ],
             AreaRanges = [new OspfAreaRangeRow { Area = "site", Range = "10.10.0.0/16" }],
             InterfaceTemplates =
@@ -158,6 +160,12 @@ public sealed class OspfPreApplyIsolationTests
                     Network = "10.0.0.0",
                     Interface = "ether1",
                 },
+                new OspfIpAddressRow
+                {
+                    Address = "10.10.1.1/24",
+                    Network = "10.10.1.0",
+                    Interface = "bridge-local",
+                },
             ],
         };
 
@@ -166,30 +174,34 @@ public sealed class OspfPreApplyIsolationTests
         return built.Plan;
     }
 
-    private static OspfV7Inventory HappyInventory() =>
-        new()
+    private static OspfV7Inventory HappyInventory()
+    {
+        OspfMigrationPlan plan = BuildPlan();
+        OspfV7Inventory inv = OspfTestBaselines.InventoryMatchingPlan(plan);
+        return new OspfV7Inventory
         {
-            Instances = [new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.255.0.1", Version = "2" }],
-            Areas =
+            Instances = inv.Instances,
+            Areas = inv.Areas.Select(a => new OspfAreaRow
+            {
+                Id = a.Id,
+                Name = a.Name,
+                AreaId = a.AreaId,
+                Type = a.Type,
+                Instance = a.Instance,
+                DefaultCost = a.DefaultCost,
+                NoSummaries = false,
+            }).ToList(),
+            AreaRanges =
             [
-                new OspfAreaRow { Id = "*a0", Name = "backbone", AreaId = "0.0.0.0", Type = "default", Instance = "default-v2" },
-                new OspfAreaRow
-                {
-                    Id = "*a1",
-                    Name = "site",
-                    AreaId = "10.0.0.1",
-                    Type = "stub",
-                    Instance = "default-v2",
-                    NoSummaries = false,
-                },
+                new OspfAreaRangeRow { Id = "*r", Area = plan.TargetSiteAreaName, Range = "10.10.0.0/16" },
+                new OspfAreaRangeRow { Id = "*rm", Area = plan.TargetSiteAreaName, Range = "10.10.1.0/24", Comment = "MGMT" },
             ],
-            AreaRanges = [new OspfAreaRangeRow { Id = "*r", Area = "site", Range = "10.10.0.0/16" }],
             Templates =
             [
                 new OspfInterfaceTemplateRow
                 {
                     Id = "*b",
-                    Area = "backbone",
+                    Area = plan.TargetBackboneAreaName,
                     Interfaces = "ether1",
                     Networks = "10.0.0.0/30",
                     Type = "ptp",
@@ -198,20 +210,21 @@ public sealed class OspfPreApplyIsolationTests
                 new OspfInterfaceTemplateRow
                 {
                     Id = "*l",
-                    Area = "backbone",
+                    Area = plan.TargetBackboneAreaName,
                     Networks = "10.255.0.1/32",
                     Passive = true,
                 },
                 new OspfInterfaceTemplateRow
                 {
                     Id = "*s",
-                    Area = "site",
+                    Area = plan.TargetSiteAreaName,
                     Interfaces = "all",
                     Networks = "10.10.0.0/16",
                     Passive = true,
                 },
             ],
         };
+    }
 
     private static MikrotikScheduledJob CreateJob() => new()
     {
@@ -271,7 +284,7 @@ public sealed class OspfPreApplyIsolationTests
         public Task ClearOspfRedistributionAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
-        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
+        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
         public Task SetInstanceRouterIdAsync(ITikConnection connection, string instanceName, string routerId, CancellationToken cancellationToken = default) =>
@@ -290,6 +303,9 @@ public sealed class OspfPreApplyIsolationTests
             Task.CompletedTask;
 
         public Task EnsureSiteNetworkTemplateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+
+        public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(ITikConnection connection, OspfMigrationPlan plan, string managementHost, CancellationToken cancellationToken = default) =>
             Task.FromResult(OspfTestBaselines.Minimal(managementHost));

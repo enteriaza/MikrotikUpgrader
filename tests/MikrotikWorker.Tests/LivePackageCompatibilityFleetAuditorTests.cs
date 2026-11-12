@@ -193,12 +193,12 @@ public sealed class LivePackageCompatibilityFleetAuditorTests
 
         LiveFleetAuditReport report = await auditor.AuditAsync(LiveAuditRouterCsvParser.Parse(reader));
 
-        Assert.Equal(2, report.Summary.AceOrBrExcludedFromV7);
+        Assert.Equal(0, report.Summary.AceOrBrExcludedFromV7);
         Assert.True(report.Summary.UnknownOrUnavailableIdentity >= 2);
 
         LiveFleetRouterAuditRecord ace = report.Routers.Single(static r => r.Input.RouterIpText == "10.0.0.10");
         Assert.Equal(
-            CatalogueCompatibilityStatus.NotApplicable,
+            CatalogueCompatibilityStatus.Compatible,
             ace.Compatibility!.Stages.Single(static s => s.Stage == PackageCompatibilityUpgradeStage.RouterOs7).Status);
 
         LiveFleetRouterAuditRecord ap = report.Routers.Single(static r => r.Input.RouterIpText == "10.0.0.12");

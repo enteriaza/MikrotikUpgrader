@@ -280,4 +280,9 @@ internal sealed class OspfBackboneMutationGuardException : InvalidOperationExcep
         : base(message)
     {
     }
+
+    public OspfBackboneMutationGuardException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
 }

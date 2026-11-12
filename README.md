@@ -75,7 +75,7 @@ datestart,datestop,routername,routerip
 
 #### Execution mode (`executionmode`)
 
-Per-job stage cap, independent of device-identity ACE/BR policy:
+Per-job stage cap, independent of device-identity classification:
 
 | Value | Behaviour |
 |---|---|
@@ -265,7 +265,7 @@ Before enabling fleet upgrades, operators can evaluate whether the on-disk catal
 dotnet run --project src/MikrotikWorker -- --audit-package-compatibility --output Reports/PackageCompatibility
 ```
 
-Reports (CSV + JSON): catalogue coverage per architecture for fixed **6.49.23** and the dynamic v7 target, plus per-fixture stage results. Fixtures are labelled `SyntheticFixture` and are not live router observations. ACE/BR report RouterOS 7 as `NotApplicable`. The audit reuses the production package resolver (`bundle` remains authoritative for bundled vs independent packages).
+Reports (CSV + JSON): catalogue coverage per architecture for fixed **6.49.23** and the dynamic v7 target, plus per-fixture stage results. Fixtures are labelled `SyntheticFixture` and are not live router observations. ACE/BR/AP/DCL/Unknown are all assessed for RouterOS 7 package compatibility. The audit reuses the production package resolver (`bundle` remains authoritative for bundled vs independent packages).
 
 #### Live read-only fleet package compatibility audit
 
@@ -305,8 +305,8 @@ High-level sequence for an eligible device older than 6.49.23 (`FullUpgrade`):
 1. Inventory installed packages (`/system/package/print`, including `bundle`)
 2. **Mandatory pre-upgrade backup** for the v6 stepping stage (blocking)
 3. Resolve/fetch/stage **6.49.23** packages only; reboot; verify exact 6.49.23
-4. Classify identity; stop with `UpgradeSucceededV6Only` for ACE/BR
-5. For eligible devices: backup again (captures verified 6.49.23 or current newer-v6 / older-v7 state), resolve packages for the **job’s immutable v7 snapshot**, fetch/stage, reboot, verify exact target + package inventory
+4. Classify identity (informational; ACE/BR/AP/DCL/Unknown are all eligible for RouterOS 7)
+5. Capture/validate OSPF migration plan (fail-closed); backup again; resolve packages for the **job’s immutable v7 snapshot**; fetch/stage; reboot; verify exact target + package inventory; apply and verify OSPF; RouterBOARD stage per policy
 
 For `V6SteppingOnly`, steps 1–3 run when v6 stepping is required; after successful v6 verification the executor logs `UpgradeStageCapReached: V6SteppingOnly` and returns `UpgradeSucceededV6Only` with `CompletedStage=v6-stepping`. If the device is already at/above 6.49.23, the same outcome is returned with `CompletedStage=none` (no upgrade performed). Never starts second-stage backup, v7 snapshot/resolution, fetch, or reboot. A RouterOS 7 device in this mode is a deliberate no-op (`SkippedStageNotApplicable`, `CompletedStage=none`).
 
@@ -319,7 +319,7 @@ Backup failure, remote cleanup failure, missing packages, fetch failures, or ver
 1. Preserve central `Backups/` artefacts and `Logs/Devices/` for the router.
 2. Determine whether the device rebooted and which RouterOS version is running.
 3. If packages remain staged but the version is unchanged, decide manually whether to reboot once.
-4. If the upgrade failed mid-fetch, free disk space / remove partial `.npk` files before retrying.
+4. If the upgrade failed mid-fetch, remove any partial/stale `.npk` files left on the router before retrying.
 5. Re-import the CSV only after the operator accepts possible repeat work.
 
 Backups may contain secrets. They are stored under `Backups/` (not under `FirmwareFiles`, not served by Kestrel, not published). Protect the directory with filesystem ACLs. Successful job backups are never auto-deleted from central storage.
@@ -437,10 +437,8 @@ Console output goes to the service journal when running under systemd. Prefer th
 - Proven on one live `mipsbe` test router; other architectures/boards remain unit/fake-covered unless separately exercised
 - No durable job store / crash recovery
 - No automatic rollback
-- RouterBOARD firmware upgrade is intentionally deferred
-- RouterOS v7 migration is intentionally deferred
-- Small flash devices need enough free space for the full `.npk` before fetch
 - Windows hosts must explicitly allow inbound firmware HTTP from routers
+- Firmware packages are fetched with `/tool/fetch` to a bare `dst-path` filename (RouterOS temporary/RAM-disk semantics). The worker does **not** preflight-reject upgrades by comparing NPK size to free flash; genuine fetch/install failures are reported by RouterOS and the existing upload verification path.
 
 ## Configuration excerpt
 

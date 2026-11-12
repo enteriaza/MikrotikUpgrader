@@ -73,7 +73,7 @@ public sealed class PackageCompatibilityWorkflowGuardTests
     }
 
     [Fact]
-    public void Ace_DoesNotResolveV7InAudit()
+    public void Ace_ResolvesV7InAudit()
     {
         string root = Directory.CreateTempSubdirectory("compat-wf-ace-").FullName;
         File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1]);
@@ -91,8 +91,9 @@ public sealed class PackageCompatibilityWorkflowGuardTests
             CatalogueCompatibilityStatus.Compatible,
             report.Stages.Single(static s => s.Stage == PackageCompatibilityUpgradeStage.V6Stepping).Status);
         Assert.Equal(
-            CatalogueCompatibilityStatus.NotApplicable,
+            CatalogueCompatibilityStatus.Compatible,
             report.Stages.Single(static s => s.Stage == PackageCompatibilityUpgradeStage.RouterOs7).Status);
+        Assert.True(report.Classification.ShouldUpgradeToV7);
     }
 
     [Fact]

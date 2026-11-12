@@ -60,27 +60,59 @@ public sealed class OspfMigrationExecutorGateTests
         Assert.False(ops.FetchCalled);
     }
 
-    [Fact]
-    public async Task AceExcludedFromV7_StillValidatesOspfThenDeletesPlan()
+    [Theory]
+    [InlineData("ACE01.POP001.001.core")]
+    [InlineData("BR12.POP123.456.edge")]
+    public async Task AceOrBr_OspfValidationFailure_BlocksV7(string identity)
     {
-        TrackingOps ops = new() { Identity = "ACE01.POP001.001.core" };
-        RecordingOspfMigrationService ospf = new();
-        RouterOsV6UpgradeExecutor executor = CreateExecutor(ops, ospf);
+        TrackingOps ops = new() { Identity = identity };
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new FailingOspfMigrationService(validation: true));
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
-            FakeMikrotikConnections.CreateFullyPopulated(identity: "ACE01.POP001.001.core", version: "6.49.23"),
+            FakeMikrotikConnections.CreateFullyPopulated(identity: identity, version: "6.49.23"),
             CreateJob(),
-            CreateDevice("6.49.23", identity: "ACE01.POP001.001.core"),
+            CreateDevice("6.49.23", identity: identity),
             CreateAssessment(),
             "admin",
             "secret",
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.True(ospf.CaptureCalled);
-        Assert.False(ospf.ApplyCalled);
-        Assert.True(ospf.DeleteCalled);
+        Assert.Equal(UpgradeOutcome.OspfPlanValidationFailed, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.False(ops.FetchCalled);
+        Assert.False(ops.RebootCalled);
+    }
+
+    [Theory]
+    [InlineData("ACE01.POP001.001.core")]
+    [InlineData("BR12.POP123.456.edge")]
+    public async Task AceOrBr_AlreadyV7_ApplyFailure_BlocksSuccess(string identity)
+    {
+        TrackingOps ops = new()
+        {
+            Identity = identity,
+            PostUpgradeVersion = "7.23.8",
+        };
+        RouterOsV6UpgradeExecutor executor = CreateExecutor(
+            ops,
+            new FailingOspfMigrationService(apply: true));
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: identity, version: "7.23.8"),
+            CreateJob(),
+            CreateDevice("7.23.8", identity: identity),
+            CreateAssessment(DeviceAssessmentStatus.AlreadyAtTarget),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.OspfMigrationApplyFailed, result.Outcome);
+        Assert.NotEqual(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
         Assert.False(ops.FetchCalled);
     }
 
@@ -226,7 +258,8 @@ public sealed class OspfMigrationExecutorGateTests
             MikrotikScheduledJob job,
             string identity,
             OspfMigrationPlan? inMemoryPlan,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? managementHost = null)
         {
             if (apply)
             {
@@ -271,7 +304,8 @@ public sealed class OspfMigrationExecutorGateTests
             MikrotikScheduledJob job,
             string identity,
             OspfMigrationPlan? inMemoryPlan,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? managementHost = null)
         {
             ApplyCalled = true;
             return Task.FromResult(OspfApplyGateResult.Ok(

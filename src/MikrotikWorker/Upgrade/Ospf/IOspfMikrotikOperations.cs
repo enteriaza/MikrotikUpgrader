@@ -22,11 +22,12 @@ internal interface IOspfMikrotikOperations
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Unsets <c>in-filter</c> and <c>out-filter</c> on every OSPFv2 instance.
-    /// Must not mutate OSPFv3 instances (version=3).
+    /// Unsets filter-chain properties on the named OSPFv2 instance (resolved live name).
+    /// Must not mutate OSPFv3 instances (version=3) or unrelated OSPFv2 instances.
     /// </summary>
     Task ClearOspfInstanceFilterReferencesAsync(
         ITikConnection connection,
+        string instanceName,
         CancellationToken cancellationToken = default);
 
     Task EnsureOspfAreaAsync(
@@ -59,6 +60,15 @@ internal interface IOspfMikrotikOperations
         ITikConnection connection,
         OspfPlanSiteNetworkTemplate template,
         IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Independently re-reads live interface-templates and verifies the planned site matcher.
+    /// Must succeed before <see cref="RemoveObsoleteTemplatesAsync"/>.
+    /// </summary>
+    Task AssertSiteNetworkTemplateStateAsync(
+        ITikConnection connection,
+        OspfPlanSiteNetworkTemplate template,
         CancellationToken cancellationToken = default);
 
     /// <summary>

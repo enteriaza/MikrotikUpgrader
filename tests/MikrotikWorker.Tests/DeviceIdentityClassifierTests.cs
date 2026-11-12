@@ -25,9 +25,7 @@ public sealed class DeviceIdentityClassifierTests
         Assert.Equal(expected, result.DeviceType);
         Assert.True(result.MatchedStandardFormat);
         Assert.Equal(identity, result.Identity);
-        Assert.Equal(
-            expected is not DeviceType.Ace and not DeviceType.Br,
-            result.ShouldUpgradeToV7);
+        Assert.True(result.ShouldUpgradeToV7);
     }
 
     [Theory]
@@ -49,7 +47,7 @@ public sealed class DeviceIdentityClassifierTests
 
         Assert.Equal(DeviceType.Unknown, result.DeviceType);
         Assert.True(result.ShouldUpgradeToV7);
-        Assert.Contains("not positively identified as ACE or BR", result.PolicyReason, StringComparison.Ordinal);
+        Assert.Contains("unknown or non-standard", result.PolicyReason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -58,7 +56,7 @@ public sealed class DeviceIdentityClassifierTests
         DeviceIdentityClassification result = DeviceIdentityClassifier.Classify("  ACE01.POP001.001.core  ");
 
         Assert.Equal(DeviceType.Ace, result.DeviceType);
-        Assert.False(result.ShouldUpgradeToV7);
+        Assert.True(result.ShouldUpgradeToV7);
     }
 
     [Theory]
@@ -75,10 +73,10 @@ public sealed class DeviceIdentityClassifierTests
     }
 
     [Fact]
-    public void AceAndBr_AreOnlyExclusions()
+    public void AllDeviceTypes_AreEligibleForRouterOs7()
     {
-        Assert.False(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Ace));
-        Assert.False(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Br));
+        Assert.True(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Ace));
+        Assert.True(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Br));
         Assert.True(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Ap));
         Assert.True(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Dcl));
         Assert.True(DeviceIdentityClassifier.ShouldUpgradeToV7(DeviceType.Unknown));

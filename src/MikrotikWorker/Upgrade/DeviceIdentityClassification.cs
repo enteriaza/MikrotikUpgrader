@@ -33,18 +33,18 @@ public sealed class DeviceIdentityClassification
     public bool MatchedStandardFormat { get; init; }
 
     /// <summary>
-    /// Exclusion-based second-stage decision: every type except ACE and BR proceeds.
+    /// Second-stage (RouterOS 7) eligibility. All device types — including ACE and BR — are eligible;
+    /// OSPF capture/plan validation remains the fail-closed gate before the v7 stage.
     /// </summary>
-    public bool ShouldUpgradeToV7 =>
-        DeviceType is not DeviceType.Ace and not DeviceType.Br;
+    public bool ShouldUpgradeToV7 => true;
 
     public string PolicyReason => DeviceType switch
     {
-        DeviceType.Ace => "RouterOS 7 upgrade deferred for device type ACE",
-        DeviceType.Br => "RouterOS 7 upgrade deferred for device type BR",
-        DeviceType.Ap => "Device type AP is eligible for RouterOS 7 under the exclusion-based policy",
-        DeviceType.Dcl => "Device type DCL is eligible for RouterOS 7 under the exclusion-based policy",
-        _ => "Identity is not positively identified as ACE or BR; device remains eligible for RouterOS 7",
+        DeviceType.Ace => "Device type ACE is eligible for RouterOS 7",
+        DeviceType.Br => "Device type BR is eligible for RouterOS 7",
+        DeviceType.Ap => "Device type AP is eligible for RouterOS 7",
+        DeviceType.Dcl => "Device type DCL is eligible for RouterOS 7",
+        _ => "Identity is unknown or non-standard; device remains eligible for RouterOS 7",
     };
 }
 
@@ -124,6 +124,9 @@ public static partial class DeviceIdentityClassifier
     /// Test/helper seam mirroring the governing policy expression.
     /// </summary>
     [ExcludeFromCodeCoverage]
-    public static bool ShouldUpgradeToV7(DeviceType deviceType) =>
-        deviceType is not DeviceType.Ace and not DeviceType.Br;
+    public static bool ShouldUpgradeToV7(DeviceType deviceType)
+    {
+        _ = deviceType;
+        return true;
+    }
 }

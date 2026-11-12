@@ -36,11 +36,41 @@ internal sealed class OspfV7Reconciler(
                 plan.AreaRanges.Count);
         }
 
+        // Resolve logical plan identities onto the live ROS7 inventory before any mutation.
+        // Loopback /32 is the authoritative Router ID — read IP addresses independently of OSPF menus.
+        OspfV7Inventory liveInventory = await ops.ReadV7InventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+        IReadOnlyList<OspfIpAddressRow> ipAddresses = await ops
+            .ReadIpAddressInventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+        OspfLiveIdentityResolutionResult identity = OspfLiveIdentityResolver.Resolve(
+            plan,
+            liveInventory,
+            ipAddresses);
+        if (!identity.Succeeded || identity.Binding is null)
+        {
+            throw new InvalidOperationException(
+                "OSPF live identity resolution failed before mutation: "
+                + (identity.Detail ?? "unspecified identity error."));
+        }
+
+        OspfMigrationPlan livePlan = OspfLiveIdentityResolver.RemapPlan(plan, identity.Binding);
+        logger.LogInformation(
+            "OSPF live identity resolved. LogicalInstance={LogicalInstance}, LiveInstance={LiveInstance}, LiveInstanceId={LiveInstanceId}, LoopbackRid={LoopbackRid}, LoopbackIf={LoopbackIf}, AreaMaps={AreaMaps}",
+            identity.Binding.LogicalInstanceName,
+            identity.Binding.LiveInstanceName,
+            identity.Binding.LiveInstanceId ?? "<none>",
+            identity.Binding.DerivedLoopbackRouterId,
+            identity.Binding.LoopbackInterfaceName ?? "<none>",
+            string.Join(
+                ", ",
+                identity.Binding.Areas.Values.Select(static a => $"{a.LogicalName}->{a.LiveName}")));
+
         OspfManagementPlaneBaseline baseline = await ops
             .CaptureManagementPlaneBaselineAsync(
                 connection,
-                plan,
-                managementHost ?? plan.RouterIp,
+                livePlan,
+                managementHost ?? livePlan.RouterIp,
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -64,16 +94,16 @@ internal sealed class OspfV7Reconciler(
             baseline.EndToEndManagementConnectivityVerified);
 
         await ops.RemoveAllRoutingFiltersAsync(connection, cancellationToken).ConfigureAwait(false);
-        await ops.ClearOspfInstanceFilterReferencesAsync(connection, cancellationToken)
+        await ops.ClearOspfInstanceFilterReferencesAsync(connection, livePlan.InstanceName, cancellationToken)
             .ConfigureAwait(false);
-        await ops.ClearOspfRedistributionAsync(connection, plan.InstanceName, cancellationToken)
+        await ops.ClearOspfRedistributionAsync(connection, livePlan.InstanceName, cancellationToken)
             .ConfigureAwait(false);
-        await ops.SetInstanceRouterIdAsync(connection, plan.InstanceName, plan.RouterId, cancellationToken)
+        await ops.SetInstanceRouterIdAsync(connection, livePlan.InstanceName, livePlan.RouterId, cancellationToken)
             .ConfigureAwait(false);
 
-        foreach (OspfPlanArea area in plan.Areas)
+        foreach (OspfPlanArea area in livePlan.Areas)
         {
-            await ops.EnsureOspfAreaAsync(connection, plan.InstanceName, area, cancellationToken)
+            await ops.EnsureOspfAreaAsync(connection, livePlan.InstanceName, area, cancellationToken)
                 .ConfigureAwait(false);
             logger.LogInformation(
                 "OSPF area ensured name={Name} area-id={AreaId} type={Type} default-cost={DefaultCost} source-default-cost={SourceDefaultCost}",
@@ -84,44 +114,59 @@ internal sealed class OspfV7Reconciler(
                 area.SourceDefaultCost ?? "<unset>");
         }
 
-        foreach (OspfPlanAreaRange range in plan.AreaRanges)
+        foreach (OspfPlanAreaRange range in livePlan.AreaRanges)
         {
             await ops.EnsureOspfAreaRangeAsync(connection, range, cancellationToken).ConfigureAwait(false);
         }
 
         // Active backhauls first — never allow later passive operations to touch them.
-        foreach (OspfPlanBackhaulTemplate backhaul in plan.ActiveBackhauls)
+        foreach (OspfPlanBackhaulTemplate backhaul in livePlan.ActiveBackhauls)
         {
             await ops.EnsureBackhaulTemplateAsync(connection, backhaul, cancellationToken)
                 .ConfigureAwait(false);
-            await ops.AssertBackboneStillActiveAsync(connection, plan, baseline, cancellationToken)
+            await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        foreach (OspfPlanLoopbackTemplate loopback in plan.PassiveLoopbacks)
+        foreach (OspfPlanLoopbackTemplate loopback in livePlan.PassiveLoopbacks)
         {
-            await ops.EnsureLoopbackTemplateAsync(connection, loopback, plan.ActiveBackhauls, cancellationToken)
+            await ops.EnsureLoopbackTemplateAsync(connection, loopback, livePlan.ActiveBackhauls, cancellationToken)
                 .ConfigureAwait(false);
-            await ops.AssertBackboneStillActiveAsync(connection, plan, baseline, cancellationToken)
+            await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        foreach (OspfPlanSiteNetworkTemplate site in plan.PassiveSiteNetworks)
+        foreach (OspfPlanSiteNetworkTemplate site in livePlan.PassiveSiteNetworks)
         {
-            await ops.EnsureSiteNetworkTemplateAsync(connection, site, plan.ActiveBackhauls, cancellationToken)
+            await ops.EnsureSiteNetworkTemplateAsync(connection, site, livePlan.ActiveBackhauls, cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        await ops.AssertBackboneStillActiveAsync(connection, plan, baseline, cancellationToken)
+        // Mandatory explicit site readback before any KnownLegacy deletion. Ensure* also asserts,
+        // but cleanup must not start unless this gate succeeds independently.
+        foreach (OspfPlanSiteNetworkTemplate site in livePlan.PassiveSiteNetworks)
+        {
+            await ops.AssertSiteNetworkTemplateStateAsync(connection, site, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
             .ConfigureAwait(false);
 
-        await ops.RemoveObsoleteTemplatesAsync(connection, plan, cancellationToken)
-            .ConfigureAwait(false);
-        await ops.AssertBackboneStillActiveAsync(connection, plan, baseline, cancellationToken)
+        await ops.RemoveObsoleteTemplatesAsync(connection, livePlan, cancellationToken)
             .ConfigureAwait(false);
 
-        await ops.RemoveOspfV3Async(connection, plan, cancellationToken).ConfigureAwait(false);
-        await ops.AssertBackboneStillActiveAsync(connection, plan, baseline, cancellationToken)
+        foreach (OspfPlanSiteNetworkTemplate site in livePlan.PassiveSiteNetworks)
+        {
+            await ops.AssertSiteNetworkTemplateStateAsync(connection, site, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
+            .ConfigureAwait(false);
+
+        await ops.RemoveOspfV3Async(connection, livePlan, cancellationToken).ConfigureAwait(false);
+        await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
             .ConfigureAwait(false);
 
         using (DeviceLogging.BeginServiceSummary())
@@ -148,6 +193,46 @@ internal sealed class OspfV7MigrationVerifier(
         List<string> errors = [];
         OspfV7Inventory inventory = await ops.ReadV7InventoryAsync(connection, cancellationToken)
             .ConfigureAwait(false);
+        IReadOnlyList<OspfIpAddressRow> ipAddresses = await ops
+            .ReadIpAddressInventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Re-resolve against the fresh inventory + Loopback /32 — never reuse apply-time .id values.
+        OspfLiveIdentityResolutionResult identity = OspfLiveIdentityResolver.Resolve(
+            plan,
+            inventory,
+            ipAddresses);
+        if (!identity.Succeeded || identity.Binding is null)
+        {
+            return new OspfVerificationResult
+            {
+                Succeeded = false,
+                Errors =
+                [
+                    "OSPF live identity resolution failed during verification: "
+                    + (identity.Detail ?? "unspecified identity error."),
+                ],
+            };
+        }
+
+        if (!OspfLoopbackRouterId.EqualsRouterId(plan.RouterId, identity.Binding.DerivedLoopbackRouterId)
+            || !OspfLoopbackRouterId.EqualsRouterId(
+                identity.Binding.LiveRouterId,
+                identity.Binding.DerivedLoopbackRouterId))
+        {
+            return new OspfVerificationResult
+            {
+                Succeeded = false,
+                Errors =
+                [
+                    "Loopback /32 Router ID changed or diverged during migration verification "
+                    + $"(plan='{plan.RouterId}', live='{identity.Binding.LiveRouterId}', "
+                    + $"loopback='{identity.Binding.DerivedLoopbackRouterId}').",
+                ],
+            };
+        }
+
+        OspfMigrationPlan livePlan = OspfLiveIdentityResolver.RemapPlan(plan, identity.Binding);
 
         int filters = await ops.CountRoutingFiltersAsync(connection, cancellationToken)
             .ConfigureAwait(false);
@@ -207,7 +292,7 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
-        foreach (OspfPlanArea planned in plan.Areas)
+        foreach (OspfPlanArea planned in livePlan.Areas)
         {
             OspfAreaRow? live = inventory.Areas.FirstOrDefault(a =>
                 string.Equals(a.Name, planned.Name, StringComparison.OrdinalIgnoreCase)
@@ -253,7 +338,7 @@ internal sealed class OspfV7MigrationVerifier(
                 !liveNoSummaries);
         }
 
-        foreach (OspfPlanAreaRange range in plan.AreaRanges)
+        foreach (OspfPlanAreaRange range in livePlan.AreaRanges)
         {
             bool found = inventory.AreaRanges.Any(r =>
                 string.Equals(r.Area, range.AreaName, StringComparison.OrdinalIgnoreCase)
@@ -268,7 +353,7 @@ internal sealed class OspfV7MigrationVerifier(
         IReadOnlyList<OspfInterfaceTemplateRow> allTemplates = inventory.Templates;
         List<OspfInterfaceTemplateRow> enabled = allTemplates.Where(static t => !t.Disabled).ToList();
 
-        foreach (OspfPlanBackhaulTemplate bh in plan.ActiveBackhauls)
+        foreach (OspfPlanBackhaulTemplate bh in livePlan.ActiveBackhauls)
         {
             List<OspfInterfaceTemplateRow> matches = enabled
                 .Where(t =>
@@ -311,7 +396,7 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
-        foreach (OspfPlanLoopbackTemplate loop in plan.PassiveLoopbacks)
+        foreach (OspfPlanLoopbackTemplate loop in livePlan.PassiveLoopbacks)
         {
             List<OspfInterfaceTemplateRow> matches = enabled
                 .Where(t =>
@@ -348,7 +433,7 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
-        foreach (OspfPlanSiteNetworkTemplate site in plan.PassiveSiteNetworks)
+        foreach (OspfPlanSiteNetworkTemplate site in livePlan.PassiveSiteNetworks)
         {
             List<OspfInterfaceTemplateRow> matches = enabled
                 .Where(t =>
@@ -391,19 +476,19 @@ internal sealed class OspfV7MigrationVerifier(
 
         foreach (OspfInterfaceTemplateRow template in allTemplates)
         {
-            bool plannedBackhaul = plan.ActiveBackhauls.Any(b =>
+            bool plannedBackhaul = livePlan.ActiveBackhauls.Any(b =>
                 !template.Disabled
                 && !template.Passive
                 && string.Equals(b.Interface, template.Interfaces, StringComparison.Ordinal)
                 && string.Equals(Normalize(template.Networks), b.NetworkCidr, StringComparison.Ordinal));
-            bool plannedLoopback = plan.PassiveLoopbacks.Any(l =>
+            bool plannedLoopback = livePlan.PassiveLoopbacks.Any(l =>
                 !template.Disabled
                 && template.Passive
                 && string.Equals(Normalize(template.Networks), l.NetworkCidr, StringComparison.Ordinal)
                 && (string.IsNullOrWhiteSpace(l.Interface)
                     || string.IsNullOrWhiteSpace(template.Interfaces)
                     || string.Equals(template.Interfaces, l.Interface, StringComparison.Ordinal)));
-            bool plannedSite = plan.PassiveSiteNetworks.Any(s =>
+            bool plannedSite = livePlan.PassiveSiteNetworks.Any(s =>
                 OspfSiteMatcherConsolidation.MatchesPlannedSite(
                     template.Area,
                     template.Interfaces,
@@ -434,9 +519,9 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
-        int expectedTemplateCount = plan.ActiveBackhauls.Count
-            + plan.PassiveLoopbacks.Count
-            + plan.PassiveSiteNetworks.Count;
+        int expectedTemplateCount = livePlan.ActiveBackhauls.Count
+            + livePlan.PassiveLoopbacks.Count
+            + livePlan.PassiveSiteNetworks.Count;
         if (allTemplates.Count != expectedTemplateCount)
         {
             errors.Add(

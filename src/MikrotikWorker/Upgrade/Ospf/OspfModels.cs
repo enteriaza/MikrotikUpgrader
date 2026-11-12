@@ -150,8 +150,36 @@ internal sealed class OspfMigrationPlan
     public required OspfCaptureSourceKind SourceKind { get; init; }
     public string ContentHash { get; set; } = string.Empty;
 
+    /// <summary>Logical/source OSPF instance name (ROS6 <c>default</c> or ROS7 <c>default-v2</c>).</summary>
     public required string InstanceName { get; init; }
+
     public required string RouterId { get; init; }
+
+    /// <summary>Deterministic ROS7 target instance name (<c>default-v2</c>).</summary>
+    public string TargetInstanceName { get; init; } = OspfFleetNaming.Ros7InstanceName;
+
+    /// <summary>Deterministic ROS7 backbone area name (<c>backbone-v2</c>).</summary>
+    public string TargetBackboneAreaName { get; init; } = OspfFleetNaming.Ros7BackboneAreaName;
+
+    /// <summary>Deterministic ROS7 site area name (<c>{Identity}-v2</c>).</summary>
+    public string TargetSiteAreaName { get; init; } = string.Empty;
+
+    public string? LoopbackInterfaceName { get; init; }
+
+    public string? LoopbackCidr { get; init; }
+
+    /// <summary>
+    /// Distinct in-scope (<c>10.0.0.0/8</c>) Loopback hosts observed during Router ID selection.
+    /// </summary>
+    public IReadOnlyList<string> ObservedInScopeLoopbackAddresses { get; init; } = [];
+
+    /// <summary>
+    /// Outside-range Loopback hosts ignored for migration identity (configuration is preserved).
+    /// </summary>
+    public IReadOnlyList<string> IgnoredOutsideRangeLoopbackAddresses { get; init; } = [];
+
+    /// <summary>Mandatory site management summary <c>/24</c> derived from interface addresses.</summary>
+    public string? DerivedManagementCidr { get; init; }
 
     public IReadOnlyList<OspfPlanArea> Areas { get; init; } = [];
     public IReadOnlyList<OspfPlanAreaRange> AreaRanges { get; init; } = [];

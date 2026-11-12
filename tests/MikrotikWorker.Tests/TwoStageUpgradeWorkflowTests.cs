@@ -14,17 +14,18 @@ namespace MikrotikWorker.Tests;
 public sealed class TwoStageUpgradeWorkflowTests
 {
     [Theory]
-    [InlineData("ACE01.POP001.001.core", "ACE")]
-    [InlineData("BR12.POP123.456.edge", "BR")]
-    public async Task AceOrBr_CompletesV6Only_WithoutSecondStageOps(string identity, string typeToken)
+    [InlineData("ACE01.POP001.001.core", DeviceType.Ace)]
+    [InlineData("BR12.POP123.456.edge", DeviceType.Br)]
+    public async Task AceOrBr_RunsFullUpgradeThroughV7AndRouterboard(string identity, DeviceType expectedType)
     {
         StageTrackingOps ops = new(identity)
         {
-            VersionsAfterReboot = ["6.49.23"],
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
         };
         CountingBackup backup = new();
         string root = CreateFirmwareRootWithV6AndV7();
-        ScriptedMikrotikConnectionFactory reconnect = new(_ => FakeMikrotikConnections.CreateFullyPopulated(identity: identity));
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: identity, version: "6.49.23"));
         RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect);
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
@@ -37,13 +38,15 @@ public sealed class TwoStageUpgradeWorkflowTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Contains(typeToken, result.Detail, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(1, backup.CallCount);
-        Assert.Equal(1, ops.RebootCount);
-        Assert.All(ops.FetchedFiles, f => Assert.Contains("6.49.23", f, StringComparison.Ordinal));
-        Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
-        Assert.DoesNotContain(ops.FetchedUrls, u => u.Contains("7.23.8", StringComparison.Ordinal));
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(3, backup.CallCount);
+        Assert.Equal(2, ops.RebootCount);
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
+        Assert.Equal(expectedType, DeviceIdentityClassifier.Classify(identity).DeviceType);
+        Assert.True(DeviceIdentityClassifier.Classify(identity).ShouldUpgradeToV7);
     }
 
     [Theory]
@@ -126,11 +129,11 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task IdentityRereadFailure_KeepsVerifiedAceAndSkipsV7()
+    public async Task IdentityRereadFailure_KeepsVerifiedAceAndStillProceedsToV7()
     {
         StageTrackingOps ops = new("ACE01.POP001.001.core")
         {
-            VersionsAfterReboot = ["6.49.23"],
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
             // First post-reboot read is stage-1 verify; second is classification re-read.
             FailOnPostRebootDeviceInfoReadNumber = 2,
         };
@@ -150,10 +153,13 @@ public sealed class TwoStageUpgradeWorkflowTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Equal(1, backup.CallCount);
-        Assert.Equal(1, ops.RebootCount);
-        Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
+        // Classification falls back to the pre-reread ACE identity; ACE remains v7-eligible.
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(3, backup.CallCount);
+        Assert.Equal(2, ops.RebootCount);
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -361,15 +367,18 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task AceOnNewerThanStepping_SkipsSteppingAndSkipsV7()
+    public async Task AceOnNewerThanStepping_SkipsSteppingAndRunsV7()
     {
         StageTrackingOps ops = new("ACE01.POP001.001.core")
         {
             InitialVersion = "6.49.24",
+            VersionsAfterReboot = ["7.23.8"],
         };
         CountingBackup backup = new();
         string root = CreateFirmwareRootWithV6AndV7();
-        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root);
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "ACE01.POP001.001.core", version: "6.49.24"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(ops, backup, root, reconnect);
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "ACE01.POP001.001.core", version: "6.49.24"),
@@ -381,18 +390,21 @@ public sealed class TwoStageUpgradeWorkflowTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Equal(0, backup.CallCount);
-        Assert.Equal(0, ops.RebootCount);
-        Assert.Empty(ops.FetchedFiles);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(2, backup.CallCount);
+        Assert.Equal(1, ops.RebootCount);
+        Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task AceOnOlderV6_StepsTo64923_ThenSkipsV7()
+    public async Task AceOnOlderV6_StepsTo64923_ThenRunsV7()
     {
         StageTrackingOps ops = new("ACE01.POP001.001.core")
         {
-            VersionsAfterReboot = ["6.49.23"],
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
             InitialVersion = "6.49.20",
         };
         CountingBackup backup = new();
@@ -412,12 +424,14 @@ public sealed class TwoStageUpgradeWorkflowTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Equal(1, backup.CallCount);
-        Assert.Equal(1, ops.RebootCount);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(3, backup.CallCount);
+        Assert.Equal(2, ops.RebootCount);
         Assert.Contains(ops.FetchedFiles, f => f.Contains("6.49.23", StringComparison.Ordinal));
         Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("6.49.19", StringComparison.Ordinal));
-        Assert.DoesNotContain(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -726,11 +740,11 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     [Fact]
-    public async Task AceOrBr_DoesNotRunFleetOrRouterboardPhases()
+    public async Task Br_RunsRouterboardPhaseAfterSuccessfulOspf()
     {
         StageTrackingOps ops = new("BR12.POP123.456.edge")
         {
-            VersionsAfterReboot = ["6.49.23"],
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
         };
         CountingBackup backup = new();
         string root = CreateFirmwareRootWithV6AndV7();
@@ -748,13 +762,15 @@ public sealed class TwoStageUpgradeWorkflowTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
-        Assert.Equal(0, ops.RouterboardUpgradeCount);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal(0, ops.RouterboardUpgradeCount); // current == upgrade firmware in fixture
         Assert.True(ops.SchedulerCountCalls > 0);
         Assert.True(ops.ScriptCountCalls > 0);
         Assert.DoesNotContain(
             ops.FetchedFiles,
             f => f.Equals("FleetUpgradeInstall.rsc", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
     }
 
     private static string CreateFirmwareRootWithV6AndV7()

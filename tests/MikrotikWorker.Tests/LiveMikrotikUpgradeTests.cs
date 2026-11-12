@@ -37,9 +37,7 @@ public sealed class LiveMikrotikUpgradeTests
     public async Task LiveRouter_Backup_Fetch_Reboot_Verify_6_49_23()
     {
         // Extra opt-in gate so Category=LiveUpgrade cannot run accidentally without explicit env.
-        Assert.True(
-            string.Equals(Environment.GetEnvironmentVariable("ALLOW_LIVE_UPGRADE"), "1", StringComparison.Ordinal),
-            "Set ALLOW_LIVE_UPGRADE=1 to run the destructive live upgrade test.");
+        LiveMikrotikTestGate.RequireArmed(LiveMikrotikTestGate.AllowLiveUpgradeEnv, "LiveUpgrade");
 
         string? localConfigPath = FindLocalConfigPath();
         Assert.True(localConfigPath is not null, "Missing appsettings.Development.local.json");

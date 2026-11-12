@@ -32,6 +32,8 @@ public sealed class LiveMikrotikInventoryAndBackupTests
     [Fact]
     public async Task LiveRouter_PackageInventory_ResolvesAgainstFirmwareFiles()
     {
+        LiveMikrotikTestGate.RequireArmed(LiveMikrotikTestGate.AllowLiveMikrotikEnv, "Live");
+
         (MikroTikOptions mikrotik, string password) = LoadCredentials();
         Assert.True(await IsTcpReachableAsync(LiveHost, mikrotik.Port, TimeSpan.FromSeconds(3)));
 
@@ -149,6 +151,8 @@ public sealed class LiveMikrotikInventoryAndBackupTests
     [Fact]
     public async Task LiveRouter_SftpBackup_ExportAndBinary_StoredCentrally()
     {
+        LiveMikrotikTestGate.RequireArmed(LiveMikrotikTestGate.AllowLiveMikrotikEnv, "Live");
+
         (MikroTikOptions mikrotik, string password) = LoadCredentials();
         Assert.True(await IsTcpReachableAsync(LiveHost, mikrotik.Port, TimeSpan.FromSeconds(3)));
         Assert.True(await IsTcpReachableAsync(LiveHost, 22, TimeSpan.FromSeconds(3)), "SSH/SFTP port 22 unreachable");

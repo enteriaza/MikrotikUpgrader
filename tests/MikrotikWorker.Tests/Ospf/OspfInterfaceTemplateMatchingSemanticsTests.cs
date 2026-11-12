@@ -107,6 +107,7 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             [
                 Addr("10.255.0.1/32", "10.255.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
+                Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ]);
 
         OspfPlanValidationResult result = OspfMigrationPlanner.Build(snapshot);
@@ -130,6 +131,7 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             [
                 Addr("10.255.0.1/32", "10.255.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
+                Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ]);
 
         OspfPlanValidationResult result = OspfMigrationPlanner.Build(snapshot);
@@ -158,7 +160,7 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                new OspfAreaRow { Name = "site", AreaId = "10.0.0.1", Type = "stub" },
+                new OspfAreaRow { Name = "site", AreaId = "10.255.0.1", Type = "stub" },
             ],
             InterfaceTemplates = templates,
             IpAddresses = addresses,

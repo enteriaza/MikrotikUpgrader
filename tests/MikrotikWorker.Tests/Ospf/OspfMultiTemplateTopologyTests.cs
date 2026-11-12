@@ -25,7 +25,7 @@ public sealed class OspfMultiTemplateTopologyTests
         Assert.Empty(capturing.RemovedIds);
         Assert.Equal(plan.ActiveBackhauls.Count + plan.PassiveLoopbacks.Count + plan.PassiveSiteNetworks.Count, store.Templates.Count);
 
-        RecordingOps recording = new(ops);
+        RecordingOps recording = new(ops) { PlanForInventory = plan };
         OspfV7Reconciler reconciler = new(recording, NullLogger<OspfV7Reconciler>.Instance);
         await reconciler.ApplyAsync(capturing, plan, "10.0.0.1", CancellationToken.None);
         int sets = capturing.SetCount;
@@ -205,11 +205,11 @@ public sealed class OspfMultiTemplateTopologyTests
             RouterOsVersion = "6.49.23",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV6,
-            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.0.0.1", Version = "2" }],
+            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.0.0.11", Version = "2" }],
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                new OspfAreaRow { Name = "site", AreaId = "10.0.0.1", Type = "stub", DefaultCost = "1" },
+                new OspfAreaRow { Name = "site", AreaId = "10.0.0.11", Type = "stub", DefaultCost = "1" },
             ],
             Networks =
             [
@@ -226,6 +226,7 @@ public sealed class OspfMultiTemplateTopologyTests
             [
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
                 new OspfIpAddressRow { Address = "10.0.0.11/32", Network = "10.0.0.11", Interface = "Loopback" },
+                new OspfIpAddressRow { Address = "10.16.11.30/27", Network = "10.16.11.0", Interface = "Bridge-VLAN-99" },
             ],
             AreaRanges =
             [
@@ -312,6 +313,12 @@ public sealed class OspfMultiTemplateTopologyTests
             SourceKind = OspfCaptureSourceKind.RouterOsV7,
             InstanceName = "default-v2",
             RouterId = "10.16.0.11",
+            TargetInstanceName = OspfFleetNaming.Ros7InstanceName,
+            TargetBackboneAreaName = OspfFleetNaming.Ros7BackboneAreaName,
+            TargetSiteAreaName = "site",
+            LoopbackInterfaceName = "Loopback",
+            LoopbackCidr = "10.16.0.11/32",
+            DerivedManagementCidr = "10.16.11.0/24",
             Areas =
             [
                 new OspfPlanArea { Name = "backbone-v2", AreaId = "0.0.0.0", TargetType = "default", IsBackbone = true },
@@ -587,6 +594,9 @@ public sealed class OspfMultiTemplateTopologyTests
             real.EnsureLoopbackTemplateAsync(connection, template, protectedBackhauls, cancellationToken);
         public Task EnsureSiteNetworkTemplateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls, CancellationToken cancellationToken = default) =>
             real.EnsureSiteNetworkTemplateAsync(connection, template, protectedBackhauls, cancellationToken);
+
+        public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default) =>
+            real.AssertSiteNetworkTemplateStateAsync(connection, template, cancellationToken);
         public Task RemoveObsoleteTemplatesAsync(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default) =>
             real.RemoveObsoleteTemplatesAsync(connection, plan, cancellationToken);
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(ITikConnection connection, OspfMigrationPlan plan, string managementHost, CancellationToken cancellationToken = default) =>
@@ -594,16 +604,20 @@ public sealed class OspfMultiTemplateTopologyTests
         public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
         public Task RemoveAllRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task ClearOspfRedistributionAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SetInstanceRouterIdAsync(ITikConnection connection, string instanceName, string routerId, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task EnsureOspfAreaAsync(ITikConnection connection, string instanceName, OspfPlanArea area, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task EnsureOspfAreaRangeAsync(ITikConnection connection, OspfPlanAreaRange range, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task RemoveOspfV3Async(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<int> CountRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult(0);
-        public Task<OspfV7Inventory> ReadV7InventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult(new OspfV7Inventory());
+        public OspfMigrationPlan PlanForInventory { get; set; } = MultiBackhaulPlan(1, 1);
+
+        public Task<OspfV7Inventory> ReadV7InventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
+            Task.FromResult(OspfTestBaselines.InventoryMatchingPlan(PlanForInventory));
         public Task<OspfCaptureSnapshot> CaptureAsync(ITikConnection connection, OspfCaptureRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<Dictionary<string, string>>> ReadOspfNeighboursAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<Dictionary<string, string>>>([]);
-        public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<OspfIpAddressRow>>([]);
+        public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
+            Task.FromResult(OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
     }
 }

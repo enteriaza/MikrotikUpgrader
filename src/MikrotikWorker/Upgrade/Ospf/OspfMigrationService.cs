@@ -21,7 +21,8 @@ internal interface IOspfMigrationService
         MikrotikScheduledJob job,
         string identity,
         OspfMigrationPlan? inMemoryPlan,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        string? managementHost = null);
 
     void DeletePlan(MikrotikScheduledJob job);
 }
@@ -141,7 +142,8 @@ internal sealed class OspfMigrationService(
         MikrotikScheduledJob job,
         string identity,
         OspfMigrationPlan? inMemoryPlan,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? managementHost = null)
     {
         OspfMigrationPlan? plan = inMemoryPlan
             ?? await planStore.TryLoadAsync(job, identity, cancellationToken).ConfigureAwait(false);
@@ -151,6 +153,10 @@ internal sealed class OspfMigrationService(
                 UpgradeOutcome.OspfPlanValidationFailed,
                 "OSPF migration plan missing, corrupt, or invalid after RouterOS 7 verification.");
         }
+
+        string effectiveManagementHost = string.IsNullOrWhiteSpace(managementHost)
+            ? job.RouterIp.ToString()
+            : managementHost.Trim();
 
         IReadOnlyList<OspfIpAddressRow> currentAddresses;
         try
@@ -192,7 +198,7 @@ internal sealed class OspfMigrationService(
         try
         {
             baseline = await reconciler
-                .ApplyAsync(connection, plan, managementHost: job.RouterIp.ToString(), cancellationToken)
+                .ApplyAsync(connection, plan, managementHost: effectiveManagementHost, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OspfBackboneMutationGuardException ex)

@@ -38,14 +38,57 @@ internal static class OspfMigrationPlanner
             errors.Add("Backbone area (area-id 0.0.0.0) is missing.");
         }
 
-        OspfInstanceRow? instance = SelectInstance(snapshot, backbone, errors);
-        string routerId = instance?.RouterId?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(routerId))
+        if (string.IsNullOrWhiteSpace(snapshot.Identity))
         {
-            errors.Add("OSPF router-id is missing or empty.");
+            errors.Add("Router /system identity name is missing or empty.");
         }
 
-        string instanceName = ResolveInstanceName(instance, snapshot.SourceKind);
+        OspfInstanceRow? instance = SelectInstance(snapshot, backbone, errors);
+        string routerId = string.Empty;
+        // Corroborate multi-address Loopback selection with the OSPF instance router-id when present.
+        OspfLoopbackRouterIdResult loopbackRid = OspfLoopbackRouterId.Derive(
+            snapshot.IpAddresses,
+            instance?.RouterId);
+        if (!loopbackRid.Succeeded || string.IsNullOrWhiteSpace(loopbackRid.RouterId))
+        {
+            errors.AddRange(loopbackRid.Errors);
+            if (loopbackRid.Errors.Count == 0)
+            {
+                errors.Add("Loopback /32 Router ID derivation failed.");
+            }
+        }
+        else
+        {
+            routerId = loopbackRid.RouterId!;
+            string? instanceRid = instance?.RouterId?.Trim();
+            if (string.IsNullOrWhiteSpace(instanceRid))
+            {
+                errors.Add("OSPF instance router-id is missing or empty.");
+            }
+            else if (!OspfLoopbackRouterId.EqualsRouterId(instanceRid, routerId))
+            {
+                errors.Add(
+                    $"OSPF instance router-id '{instanceRid}' does not match Loopback /32 address "
+                    + $"'{loopbackRid.LoopbackCidr}' on '{loopbackRid.LoopbackInterfaceName}'.");
+            }
+
+            if (loopbackRid.IgnoredOutsideRangeAddresses.Count > 0)
+            {
+                notes.Add(
+                    "Ignored outside-range Loopback address(es) for migration identity: "
+                    + string.Join(", ", loopbackRid.IgnoredOutsideRangeAddresses)
+                    + ".");
+            }
+        }
+
+        string instanceName = OspfFleetNaming.SourceInstanceName(snapshot.SourceKind);
+        if (!string.IsNullOrWhiteSpace(instance?.Name)
+            && !string.Equals(instance.Name, instanceName, StringComparison.OrdinalIgnoreCase))
+        {
+            notes.Add(
+                $"Source OSPF instance name '{instance.Name}' differs from deterministic "
+                + $"'{instanceName}' for {snapshot.SourceKind}; retaining deterministic logical name.");
+        }
 
         if (snapshot.SourceKind == OspfCaptureSourceKind.RouterOsV6 && snapshot.Networks.Count == 0
             && snapshot.InterfaceTemplates.Count == 0)
@@ -64,8 +107,8 @@ internal static class OspfMigrationPlanner
         {
             string areaId = NormalizeAreaId(area.AreaId);
             bool isBb = areaId == BackboneAreaId;
-            string? defaultCost = null;
             string? sourceDefaultCost = NullIfWhite(area.DefaultCost);
+            string? defaultCost = null;
             if (sourceDefaultCost is not null)
             {
                 if (!int.TryParse(sourceDefaultCost, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
@@ -80,13 +123,38 @@ internal static class OspfMigrationPlanner
                 }
             }
 
-            if (!isBb && area.Type is not null
-                && !area.Type.Equals("stub", StringComparison.OrdinalIgnoreCase)
-                && !string.IsNullOrWhiteSpace(area.Type)
-                && !area.Type.Equals("default", StringComparison.OrdinalIgnoreCase))
+            if (!isBb)
             {
-                notes.Add(
-                    $"Area '{area.Name}' source type '{area.Type}' normalised to stub (fleet standard).");
+                // Fleet target: site areas are stub with default-cost=1.
+                if (defaultCost is null)
+                {
+                    notes.Add(
+                        $"Area '{area.Name}' missing default-cost; applying fleet target "
+                        + $"{OspfFleetNaming.SiteDefaultCost}.");
+                    defaultCost = OspfFleetNaming.SiteDefaultCost;
+                }
+                else if (!string.Equals(defaultCost, OspfFleetNaming.SiteDefaultCost, StringComparison.Ordinal))
+                {
+                    notes.Add(
+                        $"Area '{area.Name}' default-cost '{defaultCost}' normalised to "
+                        + $"{OspfFleetNaming.SiteDefaultCost} (fleet standard).");
+                    defaultCost = OspfFleetNaming.SiteDefaultCost;
+                }
+
+                if (area.Type is not null
+                    && !area.Type.Equals("stub", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(area.Type)
+                    && !area.Type.Equals("default", StringComparison.OrdinalIgnoreCase))
+                {
+                    notes.Add(
+                        $"Area '{area.Name}' source type '{area.Type}' normalised to stub (fleet standard).");
+                }
+                else if (string.IsNullOrWhiteSpace(area.Type)
+                         || area.Type.Equals("default", StringComparison.OrdinalIgnoreCase))
+                {
+                    notes.Add(
+                        $"Area '{area.Name}' source type '{area.Type ?? "<unset>"}' normalised to stub (fleet standard).");
+                }
             }
 
             // Fleet target: stub site areas permit inter-area summaries. Clear no-summaries when present.
@@ -103,7 +171,7 @@ internal static class OspfMigrationPlanner
                 IsBackbone = isBb,
                 TargetType = isBb ? "default" : "stub",
                 NoSummaries = false,
-                DefaultCost = defaultCost,
+                DefaultCost = isBb ? null : defaultCost,
                 SourceDefaultCost = sourceDefaultCost,
             });
         }
@@ -202,11 +270,65 @@ internal static class OspfMigrationPlanner
         // on a different interface (would risk unintended activation under OR matching).
         errors.AddRange(ValidateBackhaulTemplateIsolation(backhauls, snapshot.IpAddresses));
 
+        string? derivedMgmt = null;
+        if (loopbackRid.Succeeded && backhauls.Count > 0)
+        {
+            IReadOnlyList<string> mgmtHints = OspfSiteManagementSummary.CollectCorroboratingManagementCidrs(
+                ranges,
+                snapshot.Networks);
+            OspfSiteManagementSummaryResult mgmt = OspfSiteManagementSummary.Derive(
+                snapshot.IpAddresses,
+                loopbackRid,
+                backhauls,
+                mgmtHints);
+            if (!mgmt.Succeeded || string.IsNullOrWhiteSpace(mgmt.ManagementCidr))
+            {
+                errors.AddRange(mgmt.Errors);
+            }
+            else
+            {
+                derivedMgmt = mgmt.ManagementCidr;
+                notes.Add(
+                    $"Derived site management /24 '{derivedMgmt}' from "
+                    + string.Join("; ", mgmt.ContributingAddresses));
+                ranges = EnsureManagementAreaRange(
+                    ranges,
+                    areas,
+                    derivedMgmt,
+                    notes,
+                    errors);
+            }
+        }
+
+        OspfPlanArea? siteArea = areas.FirstOrDefault(static a => !a.IsBackbone);
+        if (siteArea is not null
+            && !string.IsNullOrWhiteSpace(snapshot.Identity)
+            && !string.Equals(siteArea.Name, snapshot.Identity.Trim(), StringComparison.Ordinal))
+        {
+            // Genuine fixture exception e.g. Kopefontein: identity uses '.' while area uses '_'.
+            notes.Add(
+                $"Captured site area name '{siteArea.Name}' differs from /system identity "
+                + $"'{snapshot.Identity.Trim()}'; ROS7 target site area remains "
+                + $"'{OspfFleetNaming.Ros7SiteAreaName(snapshot.Identity)}'.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(routerId)
+            && siteArea is not null
+            && !string.Equals(siteArea.AreaId, routerId, StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add(
+                $"Site area '{siteArea.Name}' area-id '{siteArea.AreaId}' does not equal Loopback Router ID '{routerId}'.");
+        }
+
         List<OspfV3ObjectRef> v3 = snapshot.OspfV3Objects.ToList();
         if (v3.Count > 0)
         {
             notes.Add($"OSPFv3 objects queued for removal: {v3.Count}.");
         }
+
+        string targetSite = string.IsNullOrWhiteSpace(snapshot.Identity)
+            ? string.Empty
+            : OspfFleetNaming.Ros7SiteAreaName(snapshot.Identity);
 
         var plan = new OspfMigrationPlan
         {
@@ -219,6 +341,14 @@ internal static class OspfMigrationPlanner
             SourceKind = snapshot.SourceKind,
             InstanceName = instanceName,
             RouterId = routerId,
+            TargetInstanceName = OspfFleetNaming.Ros7InstanceName,
+            TargetBackboneAreaName = OspfFleetNaming.Ros7BackboneAreaName,
+            TargetSiteAreaName = targetSite,
+            LoopbackInterfaceName = loopbackRid.LoopbackInterfaceName,
+            LoopbackCidr = loopbackRid.LoopbackCidr,
+            ObservedInScopeLoopbackAddresses = loopbackRid.ObservedInScopeAddresses,
+            IgnoredOutsideRangeLoopbackAddresses = loopbackRid.IgnoredOutsideRangeAddresses,
+            DerivedManagementCidr = derivedMgmt,
             Areas = areas,
             AreaRanges = ranges,
             ActiveBackhauls = backhauls,
@@ -232,27 +362,7 @@ internal static class OspfMigrationPlanner
 
         // First-class backbone / role invariants before any mutation path accepts the plan.
         errors.AddRange(OspfBackboneSafety.ValidatePlanInvariants(plan, snapshot.IpAddresses));
-        plan = new OspfMigrationPlan
-        {
-            ImportId = plan.ImportId,
-            JobId = plan.JobId,
-            RouterIp = plan.RouterIp,
-            Identity = plan.Identity,
-            SourceRouterOsVersion = plan.SourceRouterOsVersion,
-            Architecture = plan.Architecture,
-            SourceKind = plan.SourceKind,
-            InstanceName = plan.InstanceName,
-            RouterId = plan.RouterId,
-            Areas = plan.Areas,
-            AreaRanges = plan.AreaRanges,
-            ActiveBackhauls = plan.ActiveBackhauls,
-            PassiveLoopbacks = plan.PassiveLoopbacks,
-            PassiveSiteNetworks = plan.PassiveSiteNetworks,
-            SupersededTemplates = plan.SupersededTemplates,
-            OspfV3ToRemove = plan.OspfV3ToRemove,
-            NormalisationNotes = plan.NormalisationNotes,
-            ValidationErrors = errors,
-        };
+        plan = ClonePlan(plan, errors);
         plan.ContentHash = ComputeContentHash(plan);
 
         return new OspfPlanValidationResult { Plan = plan };
@@ -729,6 +839,108 @@ internal static class OspfMigrationPlanner
     private static string? NullIfWhite(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    private static List<OspfPlanAreaRange> EnsureManagementAreaRange(
+        List<OspfPlanAreaRange> ranges,
+        IReadOnlyList<OspfPlanArea> areas,
+        string derivedMgmtCidr,
+        List<string> notes,
+        List<string> errors)
+    {
+        OspfPlanArea? site = areas.FirstOrDefault(static a => !a.IsBackbone);
+        if (site is null)
+        {
+            errors.Add("Cannot attach derived management /24: site area is missing.");
+            return ranges;
+        }
+
+        List<OspfPlanAreaRange> result = ranges.ToList();
+        List<OspfPlanAreaRange> existingMgmt = result
+            .Where(r =>
+                string.Equals(r.AreaName, site.Name, StringComparison.OrdinalIgnoreCase)
+                && (string.Equals(r.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(r.RangeCidr, derivedMgmtCidr, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (existingMgmt.Count == 0)
+        {
+            notes.Add(
+                $"Adding mandatory MGMT area range '{derivedMgmtCidr}' on site area '{site.Name}'.");
+            result.Add(new OspfPlanAreaRange
+            {
+                AreaName = site.Name,
+                RangeCidr = derivedMgmtCidr,
+                Comment = OspfFleetNaming.ManagementRangeComment,
+                Advertise = true,
+            });
+            return result;
+        }
+
+        foreach (OspfPlanAreaRange row in existingMgmt)
+        {
+            if (!string.Equals(row.RangeCidr, derivedMgmtCidr, StringComparison.OrdinalIgnoreCase))
+            {
+                notes.Add(
+                    $"Existing MGMT area range '{row.RangeCidr}' on '{row.AreaName}' differs from derived "
+                    + $"'{derivedMgmtCidr}'; replacing with derived fleet management /24.");
+                result.Remove(row);
+                result.Add(new OspfPlanAreaRange
+                {
+                    AreaName = site.Name,
+                    RangeCidr = derivedMgmtCidr,
+                    Comment = OspfFleetNaming.ManagementRangeComment,
+                    Advertise = row.Advertise ?? true,
+                });
+            }
+            else if (!string.Equals(row.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase))
+            {
+                notes.Add(
+                    $"Normalising management range '{row.RangeCidr}' comment '{row.Comment ?? "<none>"}' to "
+                    + $"{OspfFleetNaming.ManagementRangeComment}.");
+                result.Remove(row);
+                result.Add(new OspfPlanAreaRange
+                {
+                    AreaName = site.Name,
+                    RangeCidr = derivedMgmtCidr,
+                    Comment = OspfFleetNaming.ManagementRangeComment,
+                    Advertise = row.Advertise ?? true,
+                });
+            }
+        }
+
+        return result;
+    }
+
+    private static OspfMigrationPlan ClonePlan(OspfMigrationPlan plan, IReadOnlyList<string> errors) =>
+        new()
+        {
+            ImportId = plan.ImportId,
+            JobId = plan.JobId,
+            RouterIp = plan.RouterIp,
+            Identity = plan.Identity,
+            SourceRouterOsVersion = plan.SourceRouterOsVersion,
+            Architecture = plan.Architecture,
+            SourceKind = plan.SourceKind,
+            InstanceName = plan.InstanceName,
+            RouterId = plan.RouterId,
+            TargetInstanceName = plan.TargetInstanceName,
+            TargetBackboneAreaName = plan.TargetBackboneAreaName,
+            TargetSiteAreaName = plan.TargetSiteAreaName,
+            LoopbackInterfaceName = plan.LoopbackInterfaceName,
+            LoopbackCidr = plan.LoopbackCidr,
+            ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
+            IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
+            DerivedManagementCidr = plan.DerivedManagementCidr,
+            Areas = plan.Areas,
+            AreaRanges = plan.AreaRanges,
+            ActiveBackhauls = plan.ActiveBackhauls,
+            PassiveLoopbacks = plan.PassiveLoopbacks,
+            PassiveSiteNetworks = plan.PassiveSiteNetworks,
+            SupersededTemplates = plan.SupersededTemplates,
+            OspfV3ToRemove = plan.OspfV3ToRemove,
+            NormalisationNotes = plan.NormalisationNotes,
+            ValidationErrors = errors.ToList(),
+        };
+
     /// <summary>
     /// Canonical hashed representation: camelCase JSON of the fields below (excludes
     /// <see cref="OspfMigrationPlan.ContentHash"/>, normalisation notes, and validation errors).
@@ -744,6 +956,14 @@ internal static class OspfMigrationPlanner
             plan.Identity,
             plan.InstanceName,
             plan.RouterId,
+            plan.TargetInstanceName,
+            plan.TargetBackboneAreaName,
+            plan.TargetSiteAreaName,
+            plan.LoopbackInterfaceName,
+            plan.LoopbackCidr,
+            plan.ObservedInScopeLoopbackAddresses,
+            plan.IgnoredOutsideRangeLoopbackAddresses,
+            plan.DerivedManagementCidr,
             plan.Areas,
             plan.AreaRanges,
             plan.ActiveBackhauls,

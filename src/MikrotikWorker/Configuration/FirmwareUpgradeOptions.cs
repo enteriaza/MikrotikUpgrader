@@ -87,4 +87,10 @@ public sealed class OspfLabTargetOptions
 
     /// <summary>Exact RouterOS identity (case-sensitive ordinal match).</summary>
     public string RouterIdentity { get; set; } = string.Empty;
+
+    /// <summary>
+    /// External management host used for OSPF management-plane route observation
+    /// (e.g. the worker/NMS address). When empty, apply falls back to <see cref="RouterIp"/>.
+    /// </summary>
+    public string ManagementHost { get; set; } = string.Empty;
 }

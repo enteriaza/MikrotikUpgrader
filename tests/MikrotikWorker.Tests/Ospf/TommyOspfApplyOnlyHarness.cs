@@ -29,14 +29,10 @@ public sealed class TommyOspfApplyOnlyHarness
     [Trait("Category", "LiveTommyOspfApplyOnly")]
     public async Task Execute_ApplyAndVerifyOnly_OnTommyLab()
     {
-        if (!string.Equals(
-                Environment.GetEnvironmentVariable("TOMMY_OSPF_APPLY_ONLY"),
-                "1",
-                StringComparison.Ordinal))
-        {
-            // Not armed — skip silently when the normal suite runs.
-            return;
-        }
+        // Fail closed before probe/API — silent return previously let mis-filtered runs pass without opt-in.
+        LiveMikrotikTestGate.RequireArmed(
+            LiveMikrotikTestGate.AllowTommyOspfApplyOnlyEnv,
+            "LiveTommyOspfApplyOnly");
 
         string evidenceDir = Environment.GetEnvironmentVariable(EvidenceRootEnv)
             ?? Path.Combine(

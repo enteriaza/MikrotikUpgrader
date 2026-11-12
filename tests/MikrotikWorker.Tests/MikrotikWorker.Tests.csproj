@@ -5,6 +5,8 @@
     <AssemblyName>MikrotikWorker.Tests</AssemblyName>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- Default non-live filter: connecting live categories require explicit filter override plus env opt-in. -->
+    <VSTestTestCaseFilter>Category!=Live&amp;Category!=LiveUpgrade&amp;Category!=LiveTommyOspfApplyOnly&amp;Category!=LiveAuditGate</VSTestTestCaseFilter>
   </PropertyGroup>
 
   <ItemGroup>

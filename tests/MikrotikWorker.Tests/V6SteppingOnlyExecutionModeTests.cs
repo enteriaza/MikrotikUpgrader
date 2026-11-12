@@ -496,12 +496,12 @@ public sealed class V6SteppingOnlyExecutionModeTests
     }
 
     [Fact]
-    public async Task FullUpgrade_Ace_RemainsV6Only_WithoutStageCap()
+    public async Task FullUpgrade_Ace_ProceedsToV7_WithoutStageCap()
     {
         StageTrackingOps ops = new("ACE01.POP001.001.core")
         {
             InitialVersion = "6.49.19",
-            VersionsAfterReboot = ["6.49.23"],
+            VersionsAfterReboot = ["6.49.23", "7.23.8"],
         };
         CountingBackup backup = new();
         CountingPackageResolver packages = CreateCountingResolver();
@@ -532,14 +532,15 @@ public sealed class V6SteppingOnlyExecutionModeTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeSucceededV6Only, result.Outcome);
+        Assert.Equal(UpgradeOutcome.UpgradeSucceeded, result.Outcome);
         Assert.Equal(UpgradeExecutionMode.FullUpgrade, result.ExecutionMode);
-        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
-        Assert.Equal(1, backup.CallCount);
-        Assert.Equal(1, ops.RebootCount);
-        Assert.Equal(0, v7.CaptureCount);
-        Assert.DoesNotContain(packages.ResolvedTargets, static t => t.IsV7OrLater);
-        AssertNoV7Mutation(ops);
+        Assert.Equal(UpgradeCompletedStages.RouterboardFirmware, result.CompletedStage);
+        Assert.Equal("7.23.8", result.PostUpgradeVersion);
+        Assert.Equal(3, backup.CallCount);
+        Assert.Equal(2, ops.RebootCount);
+        Assert.True(v7.CaptureCount >= 1);
+        Assert.Contains(packages.ResolvedTargets, static t => t.IsV7OrLater);
+        Assert.Contains(ops.FetchedFiles, f => f.Contains("7.23.8", StringComparison.Ordinal));
     }
 
     [Fact]

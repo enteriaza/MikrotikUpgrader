@@ -375,8 +375,10 @@ public sealed class OspfSafetyPhase2RegressionTests
                 "loopback",
                 "assert-after-loopback",
                 "site",
+                "assert-site",
                 "assert-after-sites",
                 "remove-obsolete",
+                "assert-site",
                 "assert-after-remove-obsolete",
                 "v3",
                 "assert-after-v3",
@@ -427,6 +429,12 @@ public sealed class OspfSafetyPhase2RegressionTests
         SourceKind = OspfCaptureSourceKind.RouterOsV7,
         InstanceName = "default-v2",
         RouterId = "10.16.0.11",
+        TargetInstanceName = OspfFleetNaming.Ros7InstanceName,
+        TargetBackboneAreaName = OspfFleetNaming.Ros7BackboneAreaName,
+        TargetSiteAreaName = "site",
+        LoopbackInterfaceName = "Loopback",
+        LoopbackCidr = "10.16.0.11/32",
+        DerivedManagementCidr = "10.16.11.0/24",
         Areas =
         [
             new OspfPlanArea
@@ -435,6 +443,14 @@ public sealed class OspfSafetyPhase2RegressionTests
                 AreaId = "0.0.0.0",
                 TargetType = "default",
                 IsBackbone = true,
+            },
+            new OspfPlanArea
+            {
+                Name = "site",
+                AreaId = "10.16.0.11",
+                TargetType = "stub",
+                IsBackbone = false,
+                DefaultCost = "1",
             },
         ],
         ActiveBackhauls = [BackhaulPlan()],
@@ -601,7 +617,7 @@ public sealed class OspfSafetyPhase2RegressionTests
         public Task RemoveAllRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<int> CountRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult(0);
         public Task ClearOspfRedistributionAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task EnsureOspfAreaAsync(ITikConnection connection, string instanceName, OspfPlanArea area, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task EnsureOspfAreaRangeAsync(ITikConnection connection, OspfPlanAreaRange range, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
@@ -626,6 +642,13 @@ public sealed class OspfSafetyPhase2RegressionTests
             return Task.CompletedTask;
         }
 
+
+        public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default)
+        {
+            Events.Add("assert-site");
+            return Task.CompletedTask;
+        }
+
         public Task RemoveObsoleteTemplatesAsync(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default)
         {
             Events.Add("remove-obsolete");
@@ -641,10 +664,10 @@ public sealed class OspfSafetyPhase2RegressionTests
         }
 
         public Task<OspfV7Inventory> ReadV7InventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new OspfV7Inventory());
+            Task.FromResult(OspfTestBaselines.InventoryMatchingPlan(MinimalPlan()));
         public Task SetInstanceRouterIdAsync(ITikConnection connection, string instanceName, string routerId, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<OspfIpAddressRow>>([]);
+            Task.FromResult(OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(ITikConnection connection, OspfMigrationPlan plan, string managementHost, CancellationToken cancellationToken = default) =>
             Task.FromResult(OspfTestBaselines.Tommy(managementHost));
 

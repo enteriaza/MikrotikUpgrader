@@ -29,7 +29,8 @@ internal sealed class PassingOspfMigrationService : IOspfMigrationService
         MikrotikScheduledJob job,
         string identity,
         OspfMigrationPlan? inMemoryPlan,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken,
+        string? managementHost = null) =>
         Task.FromResult(OspfApplyGateResult.Ok(inMemoryPlan ?? CreateMinimalValidPlan(job, identity, "7.23.8", null)));
 
     public void DeletePlan(MikrotikScheduledJob job)

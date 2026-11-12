@@ -512,7 +512,6 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
         int fullyCompatible = 0;
         int blockedMissing = 0;
         int ambiguous = 0;
-        int aceBrExcluded = 0;
         int unknownIdentity = 0;
 
         foreach (LiveFleetRouterAuditRecord record in attempted)
@@ -531,10 +530,6 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
             }
 
             PackageCompatibilityDeviceReport report = record.Compatibility;
-            if (report.Classification.DeviceType is DeviceType.Ace or DeviceType.Br)
-            {
-                aceBrExcluded++;
-            }
 
             bool anyMissing = report.Stages.Any(static s =>
                 s.Status is CatalogueCompatibilityStatus.MissingMainPackage
@@ -587,7 +582,8 @@ internal sealed class LivePackageCompatibilityFleetAuditor(
             FullyCompatibleDevices = fullyCompatible,
             BlockedByMissingPackages = blockedMissing,
             AmbiguousPackages = ambiguous,
-            AceOrBrExcludedFromV7 = aceBrExcluded,
+            // Obsolete counter retained for report schema compatibility; ACE/BR are no longer excluded.
+            AceOrBrExcludedFromV7 = 0,
             UnknownOrUnavailableIdentity = unknownIdentity,
             Completed = completed,
             Cancelled = cancelled,

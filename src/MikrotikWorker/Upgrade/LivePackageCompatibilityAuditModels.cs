@@ -116,6 +116,10 @@ public sealed class LiveFleetAuditSummary
 
     public required int AmbiguousPackages { get; init; }
 
+    /// <summary>
+    /// Obsolete. Always 0 — ACE/BR are eligible for RouterOS 7 under the same policy as other types.
+    /// Retained for live-audit report schema compatibility.
+    /// </summary>
     public required int AceOrBrExcludedFromV7 { get; init; }
 
     public required int UnknownOrUnavailableIdentity { get; init; }

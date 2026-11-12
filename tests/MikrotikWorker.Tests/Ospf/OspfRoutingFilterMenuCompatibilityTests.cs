@@ -341,61 +341,12 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
                 static rows => rows.First() == "/routing/ospf/instance/unset",
                 static _ => [new TikFakeDoneSentence()]);
 
-        await CreateOps().ClearOspfInstanceFilterReferencesAsync(fake, CancellationToken.None);
+        await CreateOps().ClearOspfInstanceFilterReferencesAsync(fake, "default", CancellationToken.None);
 
         CountingOps ops = new()
         {
             FilterCount = 0,
-            Inventory = new OspfV7Inventory
-            {
-                Instances =
-                [
-                    new OspfInstanceRow
-                    {
-                        Id = "*1",
-                        Name = "default",
-                        Version = "2",
-                        RouterId = "10.255.0.1",
-                        InFilter = null,
-                        OutFilter = null,
-                        RedistributeProperties = new Dictionary<string, string?>(),
-                    },
-                ],
-                Areas =
-                [
-                    new OspfAreaRow { Id = "*a0", Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                    new OspfAreaRow { Id = "*a1", Name = "site", AreaId = "10.0.0.1", Type = "stub", NoSummaries = false },
-                ],
-                AreaRanges = [new OspfAreaRangeRow { Id = "*r", Area = "site", Range = "10.10.0.0/16" }],
-                Templates =
-                [
-                    new OspfInterfaceTemplateRow
-                    {
-                        Id = "*b",
-                        Area = "backbone",
-                        Interfaces = "ether1",
-                        Networks = "10.0.0.0/30",
-                        Type = "ptp",
-                        Cost = "10",
-                        Passive = false,
-                    },
-                    new OspfInterfaceTemplateRow
-                    {
-                        Id = "*l",
-                        Area = "backbone",
-                        Networks = "10.255.0.1/32",
-                        Passive = true,
-                    },
-                    new OspfInterfaceTemplateRow
-                    {
-                        Id = "*s",
-                        Area = "site",
-                        Interfaces = "all",
-                        Networks = "10.10.0.0/16",
-                        Passive = true,
-                    },
-                ],
-            },
+            Inventory = BuildVerifierInventory(),
         };
 
         OspfVerificationResult verified = await new OspfV7MigrationVerifier(
@@ -441,7 +392,7 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
                 new OspfAreaRow
                 {
                     Name = "site",
-                    AreaId = "10.0.0.1",
+                    AreaId = "10.255.0.1",
                     Type = "stub",
                     InjectSummaryLsas = "yes",
                 },
@@ -460,6 +411,7 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
             [
                 new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
+                new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
             ],
         };
 
@@ -468,32 +420,46 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
         return built.Plan;
     }
 
-    private static OspfV7Inventory BuildVerifierInventory() =>
-        new()
+    private static OspfV7Inventory BuildVerifierInventory()
+    {
+        OspfMigrationPlan plan = BuildValidPlan();
+        OspfV7Inventory inv = OspfTestBaselines.InventoryMatchingPlan(plan);
+        return new OspfV7Inventory
         {
             Instances =
             [
                 new OspfInstanceRow
                 {
                     Id = "*1",
-                    Name = "default",
+                    Name = plan.TargetInstanceName,
                     Version = "2",
-                    RouterId = "10.255.0.1",
+                    RouterId = plan.RouterId,
+                    InFilter = null,
+                    OutFilter = null,
                     RedistributeProperties = new Dictionary<string, string?>(),
                 },
             ],
-            Areas =
+            Areas = inv.Areas.Select(a => new OspfAreaRow
+            {
+                Id = a.Id,
+                Name = a.Name,
+                AreaId = a.AreaId,
+                Instance = plan.TargetInstanceName,
+                Type = a.Type,
+                DefaultCost = a.DefaultCost,
+                NoSummaries = false,
+            }).ToList(),
+            AreaRanges =
             [
-                new OspfAreaRow { Id = "*a0", Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                new OspfAreaRow { Id = "*a1", Name = "site", AreaId = "10.0.0.1", Type = "stub", NoSummaries = false },
+                new OspfAreaRangeRow { Id = "*r", Area = plan.TargetSiteAreaName, Range = "10.10.0.0/16" },
+                new OspfAreaRangeRow { Id = "*rm", Area = plan.TargetSiteAreaName, Range = "10.10.1.0/24", Comment = "MGMT" },
             ],
-            AreaRanges = [new OspfAreaRangeRow { Id = "*r", Area = "site", Range = "10.10.0.0/16" }],
             Templates =
             [
                 new OspfInterfaceTemplateRow
                 {
                     Id = "*b",
-                    Area = "backbone",
+                    Area = plan.TargetBackboneAreaName,
                     Interfaces = "ether1",
                     Networks = "10.0.0.0/30",
                     Type = "ptp",
@@ -503,20 +469,21 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
                 new OspfInterfaceTemplateRow
                 {
                     Id = "*l",
-                    Area = "backbone",
+                    Area = plan.TargetBackboneAreaName,
                     Networks = "10.255.0.1/32",
                     Passive = true,
                 },
                 new OspfInterfaceTemplateRow
                 {
                     Id = "*s",
-                    Area = "site",
+                    Area = plan.TargetSiteAreaName,
                     Interfaces = "all",
                     Networks = "10.10.0.0/16",
                     Passive = true,
                 },
             ],
         };
+    }
 
     private sealed class RemoveIdCapturingConnection(ITikConnection inner) : DisposeTrackingConnection(inner)
     {
@@ -580,7 +547,7 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
             return Task.CompletedTask;
         }
 
-        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
+        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
         public Task<OspfCaptureSnapshot> CaptureAsync(ITikConnection connection, OspfCaptureRequest request, CancellationToken cancellationToken = default) =>
@@ -603,6 +570,9 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
 
         public Task EnsureSiteNetworkTemplateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+
+        public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(ITikConnection connection, OspfMigrationPlan plan, string managementHost, CancellationToken cancellationToken = default) =>
             Task.FromResult(OspfTestBaselines.Minimal(managementHost));
         public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -622,7 +592,7 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
             Task.CompletedTask;
 
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<OspfIpAddressRow>>([]);
+            Task.FromResult(OspfTestBaselines.LoopbackSlash32("10.255.0.1", "lo"));
     }
 
     private sealed class CountingOps : IOspfMikrotikOperations
@@ -642,7 +612,7 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
         public Task ClearOspfRedistributionAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
-        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
+        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
         public Task<OspfCaptureSnapshot> CaptureAsync(ITikConnection connection, OspfCaptureRequest request, CancellationToken cancellationToken = default) =>
@@ -662,6 +632,9 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
 
         public Task EnsureSiteNetworkTemplateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+
+        public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(ITikConnection connection, OspfMigrationPlan plan, string managementHost, CancellationToken cancellationToken = default) =>
             Task.FromResult(OspfTestBaselines.Minimal(managementHost));
         public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -678,6 +651,6 @@ public sealed class OspfRoutingFilterMenuCompatibilityTests
             Task.CompletedTask;
 
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<OspfIpAddressRow>>([]);
+            Task.FromResult(OspfTestBaselines.LoopbackSlash32("10.255.0.1", "lo"));
     }
 }

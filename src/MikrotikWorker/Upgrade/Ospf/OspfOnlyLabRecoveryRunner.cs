@@ -71,8 +71,6 @@ internal static class OspfOnlyLabRecoveryRunner
         IOspfMigrationService ospf = host.Services.GetRequiredService<IOspfMigrationService>();
         IOspfMikrotikOperations ops = host.Services.GetRequiredService<IOspfMikrotikOperations>();
         IDeviceBackupService backups = host.Services.GetRequiredService<IDeviceBackupService>();
-        RouterboardFirmwareUpgradeService routerboard =
-            host.Services.GetRequiredService<RouterboardFirmwareUpgradeService>();
         ILoggerFactory loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
         MsLog logger = loggerFactory.CreateLogger("OspfOnlyLabRecovery");
 
@@ -112,11 +110,11 @@ internal static class OspfOnlyLabRecoveryRunner
         if (!RouterOsVersion.TryParse(info.Version, out RouterOsVersion ros)
             || !ros.IsV7OrLater
             || ros.Major != 7
-            || ros.Minor != 23
-            || ros.Patch != 8)
+            || ros.Minor != 25
+            || ros.Patch != 1)
         {
             logger.LogError(
-                "Expected RouterOS 7.23.8; observed '{Version}'. Refusing OSPF-only recovery.",
+                "Expected RouterOS 7.25.1; observed '{Version}'. Refusing OSPF-only recovery.",
                 info.Version);
             return 4;
         }
@@ -161,21 +159,107 @@ internal static class OspfOnlyLabRecoveryRunner
             $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_{job.ImportId:N}");
         Directory.CreateDirectory(evidenceDir);
 
+        DateTimeOffset startUtc = DateTimeOffset.UtcNow;
+        string managementHost = string.IsNullOrWhiteSpace(pin.ManagementHost)
+            ? "198.18.0.66"
+            : pin.ManagementHost.Trim();
+
         logger.LogInformation(
-            "OSPF-only lab recovery starting. ImportId={ImportId}, JobId={JobId}, Host={Host}, Identity={Identity}, Version={Version}, EvidenceDir={EvidenceDir}",
+            "OSPF-only lab recovery starting. ImportId={ImportId}, JobId={JobId}, Host={Host}, Identity={Identity}, Version={Version}, ManagementHost={Mgmt}, EvidenceDir={EvidenceDir}",
             job.ImportId,
             job.JobId,
             targetIp,
             info.Identity,
             info.Version,
+            managementHost,
             evidenceDir);
 
-        // Pre-mutation operational snapshot (neighbours / routes / filter menus).
+        // Preflight operational snapshot (neighbours / routes / filter menus) — no mutation yet.
+        object preflightOperational = await CaptureOperationalAsync(ops, connection, cancellationToken)
+            .ConfigureAwait(false);
         await WriteJsonAsync(
-                Path.Combine(evidenceDir, "pre-mutation-operational.json"),
-                await CaptureOperationalAsync(ops, connection, cancellationToken).ConfigureAwait(false),
+                Path.Combine(evidenceDir, "01-preflight-operational.json"),
+                preflightOperational,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        OspfV7Inventory preflightInventory = await ops.ReadV7InventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+        IReadOnlyList<OspfIpAddressRow> preflightAddresses =
+            await ops.ReadIpAddressInventoryAsync(connection, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<Dictionary<string, string>> preflightNeighbours =
+            await ops.ReadOspfNeighboursAsync(connection, cancellationToken).ConfigureAwait(false);
+
+        Dictionary<string, string>? fullNbr = preflightNeighbours.FirstOrDefault(n =>
+            string.Equals(Get(n, "state"), "Full", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(Get(n, "router-id"), "198.18.255.253", StringComparison.Ordinal));
+        if (fullNbr is null)
+        {
+            logger.LogError(
+                "Preflight neighbour RID 198.18.255.253 is not Full. Refusing mutation. Neighbours={Count}",
+                preflightNeighbours.Count);
+            await WriteJsonAsync(
+                    Path.Combine(evidenceDir, "preflight-neighbours.json"),
+                    preflightNeighbours,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "FAILED — PREFLIGHT NEIGHBOUR NOT FULL",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return 4;
+        }
+
+        // --- Pre-reconciliation backup (mandatory before any OSPF mutation) ---
+        logger.LogInformation("Creating pre-reconciliation ROS7 backup");
+        DeviceBackupResult preBackup = await backups
+            .CreatePreUpgradeBackupAsync(
+                connection,
+                job,
+                info,
+                mikrotikOptions.Value.Username,
+                mikrotikOptions.Value.Password,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        await WriteJsonAsync(
+                Path.Combine(evidenceDir, "02-pre-reconciliation-backup.json"),
+                DescribeBackup(preBackup),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!preBackup.Succeeded)
+        {
+            logger.LogError(
+                "Pre-reconciliation backup failed: {Reason}. Refusing OSPF mutation.",
+                preBackup.FailureReason);
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "FAILED — PRE-RECONCILIATION BACKUP FAILED; NO OSPF MUTATION",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return 8;
+        }
+
+        // Fresh inventory + plan rebuild after backup (do not reuse stale .ids).
+        MikrotikDeviceInfo afterBackup = await deviceInfoReader
+            .ReadDeviceInfoAsync(connection, targetIp.ToString(), cancellationToken)
+            .ConfigureAwait(false);
+        string? afterBackupIdentity = DescribeIdentityFailure(afterBackup, targetIp, expectedIdentity);
+        if (afterBackupIdentity is not null
+            || !string.Equals(afterBackup.Version, info.Version, StringComparison.Ordinal))
+        {
+            logger.LogError(
+                "Identity/version changed after pre-backup: {Reason}",
+                afterBackupIdentity ?? "version changed");
+            return 4;
+        }
+
+        OspfV7Inventory liveInventory = await ops.ReadV7InventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+        IReadOnlyList<OspfIpAddressRow> addresses =
+            await ops.ReadIpAddressInventoryAsync(connection, cancellationToken).ConfigureAwait(false);
 
         OspfGateResult capture = await ospf
             .CaptureAndValidateAsync(
@@ -228,11 +312,6 @@ internal static class OspfOnlyLabRecoveryRunner
                 return 5;
             }
 
-            OspfV7Inventory liveInventory = await ops.ReadV7InventoryAsync(connection, cancellationToken)
-                .ConfigureAwait(false);
-            IReadOnlyList<OspfIpAddressRow> addresses =
-                await ops.ReadIpAddressInventoryAsync(connection, cancellationToken).ConfigureAwait(false);
-
             OspfPlanValidationResult recovery = OspfLabRecoveryPlanBuilder.BuildFromLiveAndReference(
                 job.ImportId,
                 job.JobId,
@@ -268,11 +347,96 @@ internal static class OspfOnlyLabRecoveryRunner
             return 5;
         }
 
+        OspfLiveIdentityResolutionResult identityResolution =
+            OspfLiveIdentityResolver.Resolve(plan, liveInventory, addresses);
+        OspfLiveAreaBinding? resolvedBackbone = identityResolution.Binding?.Areas.Values
+            .FirstOrDefault(static a => string.Equals(a.AreaId, "0.0.0.0", StringComparison.Ordinal));
+        OspfLiveAreaBinding? resolvedSite = identityResolution.Binding?.Areas.Values
+            .FirstOrDefault(a =>
+                string.Equals(
+                    a.LiveName,
+                    OspfFleetNaming.Ros7SiteAreaName(expectedIdentity),
+                    StringComparison.OrdinalIgnoreCase));
+
+        await WriteJsonAsync(
+                Path.Combine(evidenceDir, "03-live-identity-resolution.json"),
+                new
+                {
+                    identityResolution.Succeeded,
+                    identityResolution.Errors,
+                    Binding = identityResolution.Binding is null
+                        ? null
+                        : new
+                        {
+                            identityResolution.Binding.LogicalInstanceName,
+                            identityResolution.Binding.LiveInstanceName,
+                            identityResolution.Binding.LiveInstanceId,
+                            identityResolution.Binding.LiveRouterId,
+                            identityResolution.Binding.DerivedLoopbackRouterId,
+                            identityResolution.Binding.LoopbackInterfaceName,
+                            Areas = identityResolution.Binding.Areas.Values.Select(static a => new
+                            {
+                                a.LogicalName,
+                                a.LiveName,
+                                a.AreaId,
+                                a.LiveObjectId,
+                            }),
+                        },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!identityResolution.Succeeded || identityResolution.Binding is null)
+        {
+            logger.LogError(
+                "Live OSPF identity resolution failed: {Detail}",
+                string.Join("; ", identityResolution.Errors));
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "FAILED — LIVE IDENTITY RESOLUTION; NO OSPF MUTATION",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return 5;
+        }
+
+        OspfLiveIdentityBinding binding = identityResolution.Binding;
+        if (!string.Equals(binding.LiveInstanceName, OspfFleetNaming.Ros7InstanceName, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(binding.DerivedLoopbackRouterId, "10.16.0.11", StringComparison.Ordinal)
+            || resolvedBackbone is null
+            || !string.Equals(resolvedBackbone.LiveName, OspfFleetNaming.Ros7BackboneAreaName, StringComparison.OrdinalIgnoreCase)
+            || resolvedSite is null
+            || !string.Equals(resolvedSite.AreaId, "10.16.0.11", StringComparison.Ordinal))
+        {
+            logger.LogError(
+                "Resolved OSPF identities do not match authorised Tommy targets. Instance={Inst} RID={Rid} BH={Bh}/{BhId} Site={Site}/{SiteId}",
+                binding.LiveInstanceName,
+                binding.DerivedLoopbackRouterId,
+                resolvedBackbone?.LiveName,
+                resolvedBackbone?.AreaId,
+                resolvedSite?.LiveName,
+                resolvedSite?.AreaId);
+            return 5;
+        }
+
+        plan = OspfLiveIdentityResolver.RemapPlan(plan, binding);
+
+        string? planGuard = DescribePlanTargetFailure(plan, expectedIdentity);
+        if (planGuard is not null)
+        {
+            logger.LogError("Plan target validation failed: {Reason}", planGuard);
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "FAILED — PLAN TARGET MISMATCH; NO OSPF MUTATION",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return 5;
+        }
+
         IOspfMigrationPlanStore planStore = host.Services.GetRequiredService<IOspfMigrationPlanStore>();
         await planStore.SaveAsync(plan, cancellationToken).ConfigureAwait(false);
 
         await WriteJsonAsync(
-                Path.Combine(evidenceDir, "migration-plan.json"),
+                Path.Combine(evidenceDir, "04-migration-plan.json"),
                 new { PlanSource = planSource, Plan = plan },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -295,12 +459,23 @@ internal static class OspfOnlyLabRecoveryRunner
             return 4;
         }
 
+        logger.LogInformation(
+            "Applying OSPF reconciliation. ManagementHost={MgmtHost}, PlanHash={Hash}",
+            managementHost,
+            plan.ContentHash);
+
         OspfApplyGateResult apply = await ospf
-            .ApplyAndVerifyAsync(connection, job, info.Identity!, plan, cancellationToken)
+            .ApplyAndVerifyAsync(
+                connection,
+                job,
+                info.Identity!,
+                plan,
+                cancellationToken,
+                managementHost)
             .ConfigureAwait(false);
 
         await WriteJsonAsync(
-                Path.Combine(evidenceDir, "apply-result.json"),
+                Path.Combine(evidenceDir, "05-apply-result.json"),
                 new { apply.Succeeded, apply.FailureOutcome, apply.Detail },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -317,6 +492,11 @@ internal static class OspfOnlyLabRecoveryRunner
                     cancellationToken)
                 .ConfigureAwait(false);
             ospf.DeletePlan(job);
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "FAILED — OSPF APPLY/VERIFY",
+                    cancellationToken)
+                .ConfigureAwait(false);
             return 6;
         }
 
@@ -326,7 +506,7 @@ internal static class OspfOnlyLabRecoveryRunner
                 cancellationToken)
             .ConfigureAwait(false);
         await WriteJsonAsync(
-                Path.Combine(evidenceDir, "operational-health.json"),
+                Path.Combine(evidenceDir, "06-operational-health.json"),
                 opsHealth,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -335,13 +515,28 @@ internal static class OspfOnlyLabRecoveryRunner
         {
             logger.LogError("OSPF operational health failed: {Detail}", opsHealth.Detail);
             ospf.DeletePlan(job);
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "PARTIALLY COMPLETED — OSPF VERIFY REPORTED SUCCESS BUT OPERATIONAL HEALTH FAILED",
+                    cancellationToken)
+                .ConfigureAwait(false);
             return 7;
         }
+
+        object postOperational = await CaptureOperationalAsync(ops, connection, cancellationToken)
+            .ConfigureAwait(false);
+        await WriteJsonAsync(
+                Path.Combine(evidenceDir, "07-post-reconciliation-operational.json"),
+                postOperational,
+                cancellationToken)
+            .ConfigureAwait(false);
 
         MikrotikDeviceInfo postOspf = await deviceInfoReader
             .ReadDeviceInfoAsync(connection, targetIp.ToString(), cancellationToken)
             .ConfigureAwait(false);
-        DeviceBackupResult backup = await backups
+
+        logger.LogInformation("Creating post-reconciliation ROS7 backup");
+        DeviceBackupResult postBackup = await backups
             .CreatePreUpgradeBackupAsync(
                 connection,
                 job,
@@ -352,47 +547,34 @@ internal static class OspfOnlyLabRecoveryRunner
             .ConfigureAwait(false);
 
         await WriteJsonAsync(
-                Path.Combine(evidenceDir, "backup-result.json"),
-                new
-                {
-                    backup.Succeeded,
-                    backup.RemoteCleanupFailed,
-                    backup.ManifestLocalPath,
-                    backup.ExportLocalPath,
-                    backup.BinaryLocalPath,
-                    backup.FailureReason,
-                },
+                Path.Combine(evidenceDir, "08-post-reconciliation-backup.json"),
+                DescribeBackup(postBackup),
                 cancellationToken)
             .ConfigureAwait(false);
 
-        if (!backup.Succeeded)
+        if (!postBackup.Succeeded)
         {
-            logger.LogError("Post-migration backup failed: {Reason}", backup.FailureReason);
+            logger.LogError("Post-migration backup failed: {Reason}", postBackup.FailureReason);
             ospf.DeletePlan(job);
+            await WriteTextAsync(
+                    Path.Combine(evidenceDir, "verdict.txt"),
+                    "PARTIALLY COMPLETED — OSPF VERIFIED BUT POST-MIGRATION BACKUP FAILED",
+                    cancellationToken)
+                .ConfigureAwait(false);
             return 8;
         }
 
-        UpgradeExecutionResult rb = await routerboard
-            .ExecuteAsync(
-                connection,
-                job,
-                postOspf,
-                mikrotikOptions.Value.Username,
-                mikrotikOptions.Value.Password,
-                priorRebootInitiated: false,
-                completedStageBefore: UpgradeCompletedStages.OspfMigration,
-                cancellationToken)
-            .ConfigureAwait(false);
-
+        // RouterBOARD firmware is explicitly deferred — report status only; do not upgrade or reboot.
         await WriteJsonAsync(
-                Path.Combine(evidenceDir, "routerboard-result.json"),
+                Path.Combine(evidenceDir, "09-routerboard-status-deferred.json"),
                 new
                 {
-                    rb.Outcome,
-                    rb.Detail,
-                    rb.CompletedStage,
-                    rb.PostUpgradeVersion,
-                    rb.RebootInitiated,
+                    Deferred = true,
+                    Reason = "RouterBOARD upgrade requires separate explicit authorisation.",
+                    postOspf.RouterboardCurrentFirmware,
+                    postOspf.RouterboardUpgradeFirmware,
+                    postOspf.BoardName,
+                    postOspf.RouterboardModel,
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -400,8 +582,9 @@ internal static class OspfOnlyLabRecoveryRunner
         MikrotikDeviceInfo finalInfo = await deviceInfoReader
             .ReadDeviceInfoAsync(connection, targetIp.ToString(), cancellationToken)
             .ConfigureAwait(false);
+        DateTimeOffset endUtc = DateTimeOffset.UtcNow;
         await WriteJsonAsync(
-                Path.Combine(evidenceDir, "final-device-info.json"),
+                Path.Combine(evidenceDir, "10-final-device-info.json"),
                 new
                 {
                     finalInfo.Identity,
@@ -411,40 +594,127 @@ internal static class OspfOnlyLabRecoveryRunner
                     finalInfo.RouterboardModel,
                     finalInfo.RouterboardCurrentFirmware,
                     finalInfo.RouterboardUpgradeFirmware,
+                    StartUtc = startUtc,
+                    EndUtc = endUtc,
+                    job.ImportId,
+                    job.JobId,
+                    PlanSource = planSource,
+                    plan.ContentHash,
+                    PreBackupManifest = preBackup.ManifestLocalPath,
+                    PostBackupManifest = postBackup.ManifestLocalPath,
                 },
                 cancellationToken)
             .ConfigureAwait(false);
 
         ospf.DeletePlan(job);
 
-        bool rbOk = rb.Outcome is UpgradeOutcome.UpgradeSucceeded or UpgradeOutcome.UpgradeSucceededV6Only
-            || (rb.Outcome == UpgradeOutcome.UpgradeSucceeded);
-        // RouterBOARD NotRequired returns UpgradeSucceeded; failure returns RouterboardUpgradeFailed.
-        if (rb.Outcome == UpgradeOutcome.RouterboardUpgradeFailed)
-        {
-            logger.LogError("RouterBOARD stage failed after successful OSPF recovery: {Detail}", rb.Detail);
-            await WriteTextAsync(
-                    Path.Combine(evidenceDir, "verdict.txt"),
-                    "OSPF CONFIGURATION APPLIED — OPERATIONAL HEALTH VERIFIED — ROUTERBOARD FAILED",
-                    cancellationToken)
-                .ConfigureAwait(false);
-            return 9;
-        }
-
         await WriteTextAsync(
                 Path.Combine(evidenceDir, "verdict.txt"),
-                "OSPF MIGRATION SUCCESSFUL — CONFIGURATION AND OPERATIONAL HEALTH VERIFIED",
+                "Completed — OSPF-only recovery verified; pre/post backups verified; RouterBOARD deferred",
                 cancellationToken)
             .ConfigureAwait(false);
 
         logger.LogInformation(
-            "OSPF-only lab recovery completed successfully. EvidenceDir={EvidenceDir}, BackupManifest={Manifest}, RouterBOARD={RbOutcome}",
+            "OSPF-only lab recovery completed successfully. EvidenceDir={EvidenceDir}, PreBackup={Pre}, PostBackup={Post}. RouterBOARD deferred (current={Current}, upgrade={Upgrade})",
             evidenceDir,
-            backup.ManifestLocalPath,
-            rb.Outcome);
-        _ = rbOk;
+            preBackup.ManifestLocalPath,
+            postBackup.ManifestLocalPath,
+            finalInfo.RouterboardCurrentFirmware,
+            finalInfo.RouterboardUpgradeFirmware);
+        _ = preflightInventory;
         return 0;
     }
+
+    private static object DescribeBackup(DeviceBackupResult backup) =>
+        new
+        {
+            backup.Succeeded,
+            backup.FailureReason,
+            backup.ExportLocalPath,
+            backup.BinaryLocalPath,
+            backup.ManifestLocalPath,
+            backup.RemoteCleanupSucceeded,
+            backup.RemoteCleanupFailed,
+            backup.RemainingRemoteFiles,
+            Manifest = backup.Manifest is null
+                ? null
+                : new
+                {
+                    backup.Manifest.ExportSha256,
+                    backup.Manifest.BinaryBackupSha256,
+                    backup.Manifest.ExportSizeBytes,
+                    backup.Manifest.BinaryBackupSizeBytes,
+                    backup.Manifest.ExportFileName,
+                    backup.Manifest.BinaryBackupFileName,
+                    backup.Manifest.RemoteExportFileName,
+                    backup.Manifest.RemoteBinaryFileName,
+                    backup.Manifest.BackupTimestampUtc,
+                    backup.Manifest.BackupCompletionStatus,
+                },
+        };
+
+    private static string? DescribePlanTargetFailure(OspfMigrationPlan plan, string expectedIdentity)
+    {
+        if (!string.Equals(plan.RouterId, "10.16.0.11", StringComparison.Ordinal))
+        {
+            return $"Router ID '{plan.RouterId}' is not 10.16.0.11.";
+        }
+
+        if (!string.Equals(plan.InstanceName, OspfFleetNaming.Ros7InstanceName, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(plan.TargetInstanceName, OspfFleetNaming.Ros7InstanceName, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Instance '{plan.InstanceName}' / target '{plan.TargetInstanceName}' is not default-v2.";
+        }
+
+        string expectedSite = OspfFleetNaming.Ros7SiteAreaName(expectedIdentity);
+        if (!plan.Areas.Any(a =>
+                a.IsBackbone
+                && string.Equals(a.Name, OspfFleetNaming.Ros7BackboneAreaName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(a.AreaId, "0.0.0.0", StringComparison.Ordinal)))
+        {
+            return "Plan is missing backbone-v2 / 0.0.0.0.";
+        }
+
+        if (!plan.Areas.Any(a =>
+                !a.IsBackbone
+                && string.Equals(a.Name, expectedSite, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(a.AreaId, "10.16.0.11", StringComparison.Ordinal)))
+        {
+            return $"Plan is missing site area '{expectedSite}' / 10.16.0.11.";
+        }
+
+        if (!plan.PassiveLoopbacks.Any(l =>
+                string.Equals(l.NetworkCidr, "10.16.0.11/32", StringComparison.Ordinal)
+                || string.Equals(l.NetworkCidr, "10.16.0.11", StringComparison.Ordinal)))
+        {
+            return "Plan is missing Loopback 10.16.0.11/32.";
+        }
+
+        if (!plan.PassiveSiteNetworks.Any(s =>
+                OspfSiteMatcherConsolidation.IsAllInterfaces(s.Interfaces)
+                && OspfNetworkList.SetsEqual(
+                    s.NetworkCidr,
+                    "10.16.11.0/24,100.64.0.0/10,172.16.0.0/12")))
+        {
+            return "Plan is missing consolidated site matcher 10.16.11.0/24,100.64.0.0/10,172.16.0.0/12.";
+        }
+
+        string[] requiredRanges = ["10.16.11.0/24", "100.99.76.16/28", "172.26.197.4/30"];
+        foreach (string range in requiredRanges)
+        {
+            if (!plan.AreaRanges.Any(r =>
+                    string.Equals(r.RangeCidr, range, StringComparison.Ordinal)
+                    || string.Equals(NormalizeCidr(r.RangeCidr), NormalizeCidr(range), StringComparison.Ordinal)))
+            {
+                return $"Plan is missing required area-range '{range}'.";
+            }
+        }
+
+        return null;
+    }
+
+    private static string NormalizeCidr(string? cidr) =>
+        OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p) ? p.ToCidrString() : cidr?.Trim() ?? string.Empty;
 
     internal static string? DescribeGateFailure(FirmwareUpgradeOptions upgrade, MikroTikOptions mikrotik)
     {
@@ -527,8 +797,7 @@ internal static class OspfOnlyLabRecoveryRunner
         services.AddSingleton<OspfV7Reconciler>();
         services.AddSingleton<OspfV7MigrationVerifier>();
         services.AddSingleton<IOspfMigrationService, OspfMigrationService>();
-        services.AddSingleton<RouterboardFirmwareUpgradeService>();
-        // Explicitly do NOT register IRouterOsV6UpgradeExecutor / scheduler / CSV watchers.
+        // Explicitly do NOT register RouterBOARD upgrade, IRouterOsV6UpgradeExecutor, scheduler, or CSV watchers.
     }
 
     private static async Task<object> CaptureOperationalAsync(

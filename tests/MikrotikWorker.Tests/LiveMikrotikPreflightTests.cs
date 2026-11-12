@@ -22,6 +22,8 @@ public sealed class LiveMikrotikPreflightTests
     [Fact]
     public async Task LiveRouter_Preflight_ConnectReadDisconnect()
     {
+        LiveMikrotikTestGate.RequireArmed(LiveMikrotikTestGate.AllowLiveMikrotikEnv, "Live");
+
         string? localConfigPath = FindLocalConfigPath();
         Assert.True(
             localConfigPath is not null,

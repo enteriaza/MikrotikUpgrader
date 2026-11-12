@@ -107,7 +107,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "7.23.8"),
-            CreateJob(),
+            CreateJob(UpgradeExecutionMode.FullUpgrade),
             new MikrotikDeviceInfo
             {
                 Identity = "AP01.POP001.001.access",
@@ -826,7 +826,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
         }
     }
 
-    private static MikrotikScheduledJob CreateJob() =>
+    private static MikrotikScheduledJob CreateJob(
+        UpgradeExecutionMode executionMode = UpgradeExecutionMode.V6SteppingOnly) =>
         new()
         {
             ImportId = Guid.NewGuid(),
@@ -836,12 +837,13 @@ public sealed class RouterOsV6UpgradeExecutorTests
             RouterIp = IPAddress.Parse("10.0.0.50"),
             DateStartUtc = DateTime.UtcNow.AddMinutes(-1),
             DateStopUtc = DateTime.UtcNow.AddHours(1),
+            ExecutionMode = executionMode,
         };
 
     private static MikrotikDeviceInfo CreateDevice() =>
         new()
         {
-            // ACE identity forces v7 skip so stage-unit tests remain focused on a single stage.
+            // Stage-unit tests default to V6SteppingOnly so ACE/BR eligibility does not enter the v7 stage.
             Identity = "ACE01.POP001.001.core",
             Version = "6.49.10",
             ArchitectureName = "mipsbe",

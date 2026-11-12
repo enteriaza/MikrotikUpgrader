@@ -345,6 +345,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         string instanceName,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(instanceName);
+
         IEnumerable<ITikReSentence> rows = await connection
             .CreateCommand("/routing/ospf/instance/print")
             .ExecuteListAsync(cancellationToken)
@@ -352,6 +354,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         foreach (ITikReSentence row in rows)
         {
             if (string.Equals(Field(row, "version"), "3", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!string.Equals(Field(row, "name"), instanceName, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -371,9 +378,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
 
     public async Task ClearOspfInstanceFilterReferencesAsync(
         ITikConnection connection,
+        string instanceName,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(instanceName);
         cancellationToken.ThrowIfCancellationRequested();
 
         IEnumerable<ITikReSentence> rows = await connection
@@ -385,6 +394,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         {
             // Never mutate OSPFv3 instances here — dedicated RemoveOspfV3Async owns that path.
             if (string.Equals(Field(row, "version"), "3", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!string.Equals(Field(row, "name"), instanceName, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -702,13 +716,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ConfigureAwait(false);
 
         List<ITikReSentence> matches = rows
-            .Where(r =>
-                string.Equals(Field(r, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(NormalizeCidr(Field(r, "networks")), NormalizeCidr(template.NetworkCidr), StringComparison.Ordinal)
-                && string.Equals(
-                    Field(r, "interfaces") ?? string.Empty,
-                    template.Interface ?? string.Empty,
-                    StringComparison.Ordinal))
+            .Where(r => MatchesLoopbackTemplateRow(r, template))
             .ToList();
 
         if (matches.Count > 1)
@@ -727,24 +735,19 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             string? currentType = Field(existing, "type");
             // RouterOS 7 rejects /unset value-name=type. Recreate only when an explicit PTP type was forced.
             // Default print values such as broadcast must not trigger remove/recreate every run.
+            // Make-before-break is NOT used: overlapping interface-template matchers (interfaces=/networks=)
+            // can apply concurrently under OR-style matching, and AssertLoopback requires exactly one row.
             bool forcedPtp = !string.IsNullOrWhiteSpace(currentType)
                 && (currentType.Equals("ptp", StringComparison.OrdinalIgnoreCase)
                     || currentType.Equals("point-to-point", StringComparison.OrdinalIgnoreCase));
             if (forcedPtp)
             {
-                await RemoveByIdAsync(
+                await RecreateLoopbackWithoutForcedPtpAsync(
                         connection,
-                        "/routing/ospf/interface-template/remove",
+                        template,
                         id,
+                        currentType!,
                         cancellationToken)
-                    .ConfigureAwait(false);
-                await AddPassiveLoopbackTemplateAsync(connection, template, cancellationToken)
-                    .ConfigureAwait(false);
-                logger.LogInformation(
-                    "Recreated loopback template without type (removed .id={Id}, prior type={Type})",
-                    id,
-                    currentType);
-                await AssertLoopbackTemplateStateAsync(connection, template, cancellationToken)
                     .ConfigureAwait(false);
                 return;
             }
@@ -769,6 +772,83 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ConfigureAwait(false);
         await AssertLoopbackTemplateStateAsync(connection, template, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Remove-then-recreate for forced PTP Loopbacks. Stages are logged explicitly so a mid-sequence
+    /// failure can be diagnosed without replaying stale <c>.id</c> values.
+    /// </summary>
+    private async Task RecreateLoopbackWithoutForcedPtpAsync(
+        ITikConnection connection,
+        OspfPlanLoopbackTemplate template,
+        string removedId,
+        string priorType,
+        CancellationToken cancellationToken)
+    {
+        logger.LogInformation(
+            "Loopback PTP clear stage=remove-begin .id={Id} type={Type} area={Area} interfaces={If} networks={Net}",
+            removedId,
+            priorType,
+            template.AreaName,
+            template.Interface,
+            template.NetworkCidr);
+
+        try
+        {
+            await RemoveByIdAsync(
+                    connection,
+                    "/routing/ospf/interface-template/remove",
+                    removedId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback recreate stage=remove-failed .id={removedId} type={priorType}; "
+                + "old template may still be present. Re-read inventory before any retry.",
+                ex);
+        }
+
+        logger.LogWarning(
+            "Loopback PTP clear stage=removed .id={Id}; Loopback OSPF advertisement may be absent until replacement is verified",
+            removedId);
+
+        try
+        {
+            await AddPassiveLoopbackTemplateAsync(connection, template, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback recreate stage=add-failed after-remove .id={removedId} type={priorType}; "
+                + "Loopback advertisement is absent. Re-read complete inventory and derive next operation from actual state; "
+                + "do not replay using the stale removed .id.",
+                ex);
+        }
+
+        logger.LogInformation(
+            "Loopback PTP clear stage=added after-remove prior.id={Id}; verifying replacement",
+            removedId);
+
+        try
+        {
+            await AssertLoopbackTemplateStateAsync(connection, template, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback recreate stage=verify-failed after-remove-and-add prior.id={removedId}; "
+                + "replacement missing or incorrect. Re-read inventory before retry; do not mark migration successful.",
+                ex);
+        }
+
+        logger.LogInformation(
+            "Loopback PTP clear stage=verified prior.id={Id} networks={Net}",
+            removedId,
+            template.NetworkCidr);
     }
 
     private static async Task AddPassiveLoopbackTemplateAsync(
@@ -813,6 +893,123 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
                 protectedBackhauls,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await AssertSiteNetworkTemplateStateAsync(connection, template, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task AssertSiteNetworkTemplateStateAsync(
+        ITikConnection connection,
+        OspfPlanSiteNetworkTemplate template,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(template);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!template.Passive)
+        {
+            throw new InvalidOperationException(
+                $"Site matcher '{template.NetworkCidr}' assertion requires Passive=true.");
+        }
+
+        if (!OspfSiteMatcherConsolidation.IsAllInterfaces(template.Interfaces)
+            && string.IsNullOrWhiteSpace(template.Interfaces))
+        {
+            throw new InvalidOperationException(
+                $"Site matcher '{template.NetworkCidr}' assertion requires a non-empty interfaces matcher.");
+        }
+
+        IEnumerable<ITikReSentence> rows = await connection
+            .CreateCommand("/routing/ospf/interface-template/print")
+            .ExecuteListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        List<ITikReSentence> matches = rows
+            .Where(r =>
+                OspfSiteMatcherConsolidation.MatchesPlannedSite(
+                    Field(r, "area"),
+                    Field(r, "interfaces"),
+                    Field(r, "networks"),
+                    IsFlagPresent(Field(r, "passive")) || IsTruthy(Field(r, "passive")),
+                    IsTruthy(Field(r, "disabled")),
+                    template))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed: planned matcher area='{template.AreaName}' "
+                + $"interfaces='{template.Interfaces}' networks='{template.NetworkCidr}' is absent on readback. "
+                + "Cleanup must not start.");
+        }
+
+        if (matches.Count > 1)
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed: planned matcher area='{template.AreaName}' "
+                + $"interfaces='{template.Interfaces}' networks='{template.NetworkCidr}' matches {matches.Count} live rows. "
+                + "Cleanup must not start.");
+        }
+
+        ITikReSentence live = matches[0];
+        string? liveId = Field(live, ".id");
+        if (string.IsNullOrWhiteSpace(liveId))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed: matching row for '{template.NetworkCidr}' has no .id. "
+                + "Cleanup must not start.");
+        }
+
+        if (!string.Equals(Field(live, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed (.id={liveId}): area='{Field(live, "area")}' expected '{template.AreaName}'. "
+                + "Cleanup must not start.");
+        }
+
+        if (!OspfSiteMatcherConsolidation.InterfacesEqual(Field(live, "interfaces"), template.Interfaces))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed (.id={liveId}): interfaces='{Field(live, "interfaces")}' "
+                + $"expected '{template.Interfaces}'. Cleanup must not start.");
+        }
+
+        if (!OspfNetworkList.SetsEqual(Field(live, "networks"), template.NetworkCidr))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed (.id={liveId}): networks='{Field(live, "networks")}' "
+                + $"expected exact set '{template.NetworkCidr}'. Cleanup must not start.");
+        }
+
+        if (!IsFlagPresent(Field(live, "passive")) && !IsTruthy(Field(live, "passive")))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed (.id={liveId}): passive is absent. Cleanup must not start.");
+        }
+
+        if (IsTruthy(Field(live, "disabled")))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed (.id={liveId}): template is disabled. Cleanup must not start.");
+        }
+
+        string? type = Field(live, "type");
+        if (!string.IsNullOrWhiteSpace(type)
+            && (type.Equals("ptp", StringComparison.OrdinalIgnoreCase)
+                || type.Equals("point-to-point", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Site template assertion failed (.id={liveId}): unexpected explicit PTP type '{type}'. "
+                + "Cleanup must not start.");
+        }
+
+        logger.LogInformation(
+            "Site template asserted .id={Id} area={Area} interfaces={If} networks={Net}",
+            liveId,
+            template.AreaName,
+            template.Interfaces,
+            template.NetworkCidr);
     }
 
     public async Task RemoveObsoleteTemplatesAsync(
@@ -1407,35 +1604,68 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         OspfPlanLoopbackTemplate template,
         CancellationToken cancellationToken)
     {
+        // Independent print — never treat the preceding add/set response as proof.
         IEnumerable<ITikReSentence> rows = await connection
             .CreateCommand("/routing/ospf/interface-template/print")
             .ExecuteListAsync(cancellationToken)
             .ConfigureAwait(false);
 
         List<ITikReSentence> matches = rows
-            .Where(r =>
-                string.Equals(Field(r, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(
-                    NormalizeCidr(Field(r, "networks")),
-                    NormalizeCidr(template.NetworkCidr),
-                    StringComparison.Ordinal)
-                && string.Equals(
-                    Field(r, "interfaces") ?? string.Empty,
-                    template.Interface ?? string.Empty,
-                    StringComparison.Ordinal))
+            .Where(r => MatchesLoopbackTemplateRow(r, template))
             .ToList();
 
-        if (matches.Count != 1)
+        if (matches.Count == 0)
         {
             throw new OspfBackboneMutationGuardException(
-                $"Loopback template '{template.NetworkCidr}' missing or ambiguous after ensure (count={matches.Count}).");
+                $"Loopback template assertion failed: no template for area='{template.AreaName}' "
+                + $"interfaces='{template.Interface}' networks='{template.NetworkCidr}'.");
+        }
+
+        if (matches.Count > 1)
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback template assertion failed: {matches.Count} templates match "
+                + $"area='{template.AreaName}' interfaces='{template.Interface}' networks='{template.NetworkCidr}'.");
         }
 
         ITikReSentence live = matches[0];
-        if (!IsFlagPresent(Field(live, "passive")))
+        string? liveId = Field(live, ".id");
+        if (string.IsNullOrWhiteSpace(liveId))
         {
             throw new OspfBackboneMutationGuardException(
-                $"Loopback template '{template.NetworkCidr}' is not passive after ensure.");
+                $"Loopback template '{template.NetworkCidr}' matching row has no .id after ensure.");
+        }
+
+        if (!string.Equals(Field(live, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback template .id={liveId} area='{Field(live, "area")}' expected '{template.AreaName}'.");
+        }
+
+        if (!string.Equals(
+                Field(live, "interfaces") ?? string.Empty,
+                template.Interface ?? string.Empty,
+                StringComparison.Ordinal))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback template .id={liveId} interfaces='{Field(live, "interfaces")}' "
+                + $"expected '{template.Interface}'.");
+        }
+
+        if (!string.Equals(
+                NormalizeCidr(Field(live, "networks")),
+                NormalizeCidr(template.NetworkCidr),
+                StringComparison.Ordinal))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback template .id={liveId} networks='{Field(live, "networks")}' "
+                + $"expected '{template.NetworkCidr}'.");
+        }
+
+        if (!IsFlagPresent(Field(live, "passive")) && !IsTruthy(Field(live, "passive")))
+        {
+            throw new OspfBackboneMutationGuardException(
+                $"Loopback template .id={liveId} networks='{template.NetworkCidr}' is not passive after ensure.");
         }
 
         string? type = Field(live, "type");
@@ -1444,15 +1674,26 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
                 || type.Equals("point-to-point", StringComparison.OrdinalIgnoreCase)))
         {
             throw new OspfBackboneMutationGuardException(
-                $"Loopback template '{template.NetworkCidr}' still has explicit PTP type '{type}' after ensure.");
+                $"Loopback template .id={liveId} networks='{template.NetworkCidr}' still has explicit PTP type '{type}' after ensure.");
         }
 
         if (IsTruthy(Field(live, "disabled")))
         {
             throw new OspfBackboneMutationGuardException(
-                $"Loopback template '{template.NetworkCidr}' is disabled after ensure.");
+                $"Loopback template .id={liveId} networks='{template.NetworkCidr}' is disabled after ensure.");
         }
     }
+
+    private static bool MatchesLoopbackTemplateRow(ITikReSentence row, OspfPlanLoopbackTemplate template) =>
+        string.Equals(Field(row, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(
+            NormalizeCidr(Field(row, "networks")),
+            NormalizeCidr(template.NetworkCidr),
+            StringComparison.Ordinal)
+        && string.Equals(
+            Field(row, "interfaces") ?? string.Empty,
+            template.Interface ?? string.Empty,
+            StringComparison.Ordinal);
 
     private async Task<ManagementRouteObservation> ObserveManagementRouteAsync(
         ITikConnection connection,

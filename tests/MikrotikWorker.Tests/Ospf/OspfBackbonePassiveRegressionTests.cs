@@ -126,9 +126,38 @@ public sealed class OspfBackbonePassiveRegressionTests
     [Fact]
     public async Task EnsureSite_CannotSelectBackboneTemplateForUpdate()
     {
-        ParameterCapturingConnection capturing = CreateCapturing(
-            printRows: [BackhaulRow("*1", passive: null)],
-            allowAdd: true);
+        int prints = 0;
+        ParameterCapturingConnection capturing = new(
+            new TikFakeConnection()
+                .WithResponse(
+                    static rows => rows.First() == "/routing/ospf/interface-template/print",
+                    _ =>
+                    {
+                        prints++;
+                        if (prints == 1)
+                        {
+                            // Live inventory is only the protected backhaul — ensure must add, not retarget *1.
+                            return [new TikFakeReSentence(BackhaulRow("*1", passive: null)), new TikFakeDoneSentence()];
+                        }
+
+                        return
+                        [
+                            new TikFakeReSentence(BackhaulRow("*1", passive: null)),
+                            new TikFakeReSentence(new Dictionary<string, string>
+                            {
+                                [".id"] = "*A",
+                                ["area"] = "BR01.POP011.016.Tommy-v2",
+                                ["interfaces"] = "all",
+                                ["networks"] = "10.16.11.0/24",
+                                ["passive"] = "",
+                                ["disabled"] = "false",
+                            }),
+                            new TikFakeDoneSentence(),
+                        ];
+                    })
+                .WithResponse(
+                    static rows => rows.First() == "/routing/ospf/interface-template/add",
+                    static _ => [new TikFakeDoneSentence()]));
 
         await CreateOps().EnsureSiteNetworkTemplateAsync(
             capturing,
@@ -226,11 +255,12 @@ public sealed class OspfBackbonePassiveRegressionTests
                 Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
                 Areas =
                 [
-                    new OspfAreaRow { Name = "backbone-v2", AreaId = "0.0.0.0", Type = "default" },
+                    new OspfAreaRow { Name = "backbone-v2", AreaId = "0.0.0.0", Instance = "default-v2", Type = "default" },
                     new OspfAreaRow
                     {
                         Name = "BR01.POP011.016.Tommy-v2",
                         AreaId = "10.16.0.11",
+                        Instance = "default-v2",
                         Type = "stub",
                         DefaultCost = "1",
                         NoSummaries = false,
@@ -377,6 +407,7 @@ public sealed class OspfBackbonePassiveRegressionTests
     [
         new() { Address = "10.16.248.78/30", Network = "10.16.248.76", Interface = "eth-01_BH01.Tommy-Shylock" },
         new() { Address = "10.16.0.11/32", Network = "10.16.0.11", Interface = "Loopback" },
+        new() { Address = "10.16.11.30/27", Network = "10.16.11.0", Interface = "VLAN-99_MGMT_wlan" },
         new() { Address = "198.18.240.11/24", Network = "198.18.240.0", Interface = "eth-01_BH01.Tommy-Shylock" },
     ];
 
@@ -607,7 +638,7 @@ public sealed class OspfBackbonePassiveRegressionTests
         public Task RemoveAllRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<int> CountRoutingFiltersAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.FromResult(0);
         public Task ClearOspfRedistributionAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task EnsureOspfAreaAsync(ITikConnection connection, string instanceName, OspfPlanArea area, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task EnsureOspfAreaRangeAsync(ITikConnection connection, OspfPlanAreaRange range, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task EnsureBackhaulTemplateAsync(ITikConnection connection, OspfPlanBackhaulTemplate template, CancellationToken cancellationToken = default)
@@ -626,11 +657,43 @@ public sealed class OspfBackbonePassiveRegressionTests
             SiteEnsured = true;
             return Task.CompletedTask;
         }
+
+        public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
         public Task RemoveObsoleteTemplatesAsync(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task RemoveOspfV3Async(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public virtual Task<OspfV7Inventory> ReadV7InventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
             Task.FromResult(new OspfV7Inventory
             {
+                Instances =
+                [
+                    new OspfInstanceRow
+                    {
+                        Id = "*inst",
+                        Name = "default-v2",
+                        RouterId = "10.16.0.11",
+                        Version = "2",
+                    },
+                ],
+                Areas =
+                [
+                    new OspfAreaRow
+                    {
+                        Id = "*a0",
+                        Name = "backbone-v2",
+                        AreaId = "0.0.0.0",
+                        Instance = "default-v2",
+                        Type = "default",
+                    },
+                    new OspfAreaRow
+                    {
+                        Id = "*a1",
+                        Name = "BR01.POP011.016.Tommy-v2",
+                        AreaId = "10.16.0.11",
+                        Instance = "default-v2",
+                        Type = "stub",
+                    },
+                ],
                 Templates =
                 [
                     new OspfInterfaceTemplateRow

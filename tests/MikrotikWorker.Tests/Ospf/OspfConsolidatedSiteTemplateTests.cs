@@ -286,7 +286,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
                 new OspfAreaRow
                 {
                     Name = "site",
-                    AreaId = "10.0.0.1",
+                    AreaId = "10.255.0.1",
                     Type = "stub",
                     DefaultCost = "1",
                     NoSummaries = true,
@@ -309,6 +309,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
             [
                 new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
+                new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
             ],
         };
 
@@ -400,6 +401,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
                 [
                     new OspfIpAddressRow { Address = "10.16.248.78/30", Network = "10.16.248.76", Interface = "eth-01_BH01.Tommy-Shylock" },
                     new OspfIpAddressRow { Address = "10.16.0.11/32", Network = "10.16.0.11", Interface = "Loopback" },
+                    new OspfIpAddressRow { Address = "10.16.11.30/27", Network = "10.16.11.0", Interface = "VLAN-99_MGMT_wlan" },
                     new OspfIpAddressRow { Address = "198.18.240.11/24", Network = "198.18.240.0", Interface = "eth-01_BH01.Tommy-Shylock" },
                 ],
                 path);
@@ -412,21 +414,25 @@ public sealed class OspfConsolidatedSiteTemplateTests
         }
     }
 
-    private static OspfV7Inventory AuthoritativeInventory(OspfMigrationPlan plan) =>
-        new()
+    private static OspfV7Inventory AuthoritativeInventory(OspfMigrationPlan plan)
+    {
+        OspfV7Inventory baseInv = OspfTestBaselines.InventoryMatchingPlan(plan);
+        string backbone = string.IsNullOrWhiteSpace(plan.TargetBackboneAreaName)
+            ? OspfFleetNaming.Ros7BackboneAreaName
+            : plan.TargetBackboneAreaName;
+        string site = string.IsNullOrWhiteSpace(plan.TargetSiteAreaName)
+            ? OspfFleetNaming.Ros7SiteAreaName(plan.Identity)
+            : plan.TargetSiteAreaName;
+
+        return new OspfV7Inventory
         {
-            Instances = [new OspfInstanceRow { Name = plan.InstanceName, RouterId = plan.RouterId, Version = "2" }],
-            Areas = plan.Areas.Select(a => new OspfAreaRow
-            {
-                Name = a.Name,
-                AreaId = a.AreaId,
-                Type = a.TargetType,
-                DefaultCost = a.DefaultCost,
-                NoSummaries = a.NoSummaries,
-            }).ToList(),
+            Instances = baseInv.Instances,
+            Areas = baseInv.Areas,
             AreaRanges = plan.AreaRanges.Select(r => new OspfAreaRangeRow
             {
-                Area = r.AreaName,
+                Area = plan.Areas.FirstOrDefault(a => a.Name == r.AreaName)?.IsBackbone == true
+                    ? backbone
+                    : site,
                 Range = r.RangeCidr,
                 Comment = r.Comment,
                 Advertise = true,
@@ -435,7 +441,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
             [
                 new OspfInterfaceTemplateRow
                 {
-                    Area = plan.ActiveBackhauls[0].AreaName,
+                    Area = backbone,
                     Interfaces = plan.ActiveBackhauls[0].Interface,
                     Networks = plan.ActiveBackhauls[0].NetworkCidr,
                     Type = "ptp",
@@ -444,20 +450,21 @@ public sealed class OspfConsolidatedSiteTemplateTests
                 },
                 new OspfInterfaceTemplateRow
                 {
-                    Area = plan.PassiveLoopbacks[0].AreaName,
+                    Area = backbone,
                     Interfaces = plan.PassiveLoopbacks[0].Interface,
                     Networks = plan.PassiveLoopbacks[0].NetworkCidr,
                     Passive = true,
                 },
                 new OspfInterfaceTemplateRow
                 {
-                    Area = plan.PassiveSiteNetworks[0].AreaName,
+                    Area = site,
                     Interfaces = plan.PassiveSiteNetworks[0].Interfaces,
                     Networks = plan.PassiveSiteNetworks[0].NetworkCidr,
                     Passive = true,
                 },
             ],
         };
+    }
 
     private static OspfV7Inventory WithSiteNetworks(OspfV7Inventory source, string networks) =>
         new()
@@ -499,7 +506,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
         public Task ClearOspfRedistributionAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
-        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
+        public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
         public Task EnsureOspfAreaAsync(ITikConnection connection, string instanceName, OspfPlanArea area, CancellationToken cancellationToken = default) =>
@@ -517,6 +524,9 @@ public sealed class OspfConsolidatedSiteTemplateTests
         public Task EnsureSiteNetworkTemplateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, IReadOnlyList<OspfPlanBackhaulTemplate> protectedBackhauls, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+
+        public Task AssertSiteNetworkTemplateStateAsync(ITikConnection connection, OspfPlanSiteNetworkTemplate template, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
         public Task RemoveObsoleteTemplatesAsync(ITikConnection connection, OspfMigrationPlan plan, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
@@ -536,7 +546,11 @@ public sealed class OspfConsolidatedSiteTemplateTests
             Task.CompletedTask;
 
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<OspfIpAddressRow>>([]);
+            Task.FromResult<IReadOnlyList<OspfIpAddressRow>>(
+            [
+                new OspfIpAddressRow { Address = "10.16.0.11/32", Network = "10.16.0.11", Interface = "Loopback" },
+                new OspfIpAddressRow { Address = "10.16.11.30/27", Network = "10.16.11.0", Interface = "VLAN-99_MGMT_wlan" },
+            ]);
     }
 
     private sealed class ParameterCapturingConnection(ITikConnection inner) : DisposeTrackingConnection(inner)

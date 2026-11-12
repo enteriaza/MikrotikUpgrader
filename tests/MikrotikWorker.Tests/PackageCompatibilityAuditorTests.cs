@@ -191,16 +191,15 @@ public sealed class PackageCompatibilityAuditorTests
     }
 
     [Theory]
-    [InlineData("ace-identity", DeviceType.Ace, true)]
-    [InlineData("br-identity", DeviceType.Br, true)]
-    [InlineData("ap-identity", DeviceType.Ap, false)]
-    [InlineData("dcl-identity", DeviceType.Dcl, false)]
-    [InlineData("empty-identity", DeviceType.Unknown, false)]
-    [InlineData("unknown-identity", DeviceType.Unknown, false)]
-    public void IdentityPolicy_V7NotApplicableOnlyForAceBr(
+    [InlineData("ace-identity", DeviceType.Ace)]
+    [InlineData("br-identity", DeviceType.Br)]
+    [InlineData("ap-identity", DeviceType.Ap)]
+    [InlineData("dcl-identity", DeviceType.Dcl)]
+    [InlineData("empty-identity", DeviceType.Unknown)]
+    [InlineData("unknown-identity", DeviceType.Unknown)]
+    public void IdentityPolicy_AllTypesAssessRouterOs7Compatibility(
         string fixtureName,
-        DeviceType expectedType,
-        bool v7NotApplicable)
+        DeviceType expectedType)
     {
         PackageCompatibilityAuditDevice device = SyntheticPackageInventoryFixtures.All()
             .Single(d => d.FixtureName == fixtureName);
@@ -209,17 +208,11 @@ public sealed class PackageCompatibilityAuditorTests
             CreateCatalog("routeros-mipsbe-6.49.23.npk", "routeros-7.23.8-mipsbe.npk"));
 
         Assert.Equal(expectedType, report.Classification.DeviceType);
+        Assert.True(report.Classification.ShouldUpgradeToV7);
         PackageCompatibilityStageResult v7 = report.Stages.Single(
             static s => s.Stage == PackageCompatibilityUpgradeStage.RouterOs7);
-        if (v7NotApplicable)
-        {
-            Assert.Equal(CatalogueCompatibilityStatus.NotApplicable, v7.Status);
-            Assert.Empty(v7.ResolvedPackageFileNames);
-        }
-        else
-        {
-            Assert.Equal(CatalogueCompatibilityStatus.Compatible, v7.Status);
-        }
+        Assert.Equal(CatalogueCompatibilityStatus.Compatible, v7.Status);
+        Assert.NotEmpty(v7.ResolvedPackageFileNames);
     }
 
     [Fact]
@@ -334,8 +327,9 @@ public sealed class PackageCompatibilityAuditorTests
             Assert.True(File.Exists(Path.Combine(output, "device-compatibility.json")));
             string csv = await File.ReadAllTextAsync(Path.Combine(output, "device-compatibility.csv"));
             Assert.Contains("SyntheticFixture", csv, StringComparison.Ordinal);
-            Assert.Contains("NotApplicable", csv, StringComparison.Ordinal);
+            Assert.Contains("Compatible", csv, StringComparison.Ordinal);
             Assert.Contains("ace-identity", csv, StringComparison.Ordinal);
+            Assert.DoesNotContain("NotApplicable", csv, StringComparison.Ordinal);
         }
         finally
         {

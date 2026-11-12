@@ -145,7 +145,7 @@ public sealed class OspfMigrationPlannerTests
             new OspfAreaRow
             {
                 Name = "site",
-                AreaId = "10.0.0.1",
+                AreaId = "10.255.0.1",
                 Type = "stub",
                 DefaultCost = "20",
                 InjectSummaryLsas = "yes",
@@ -155,8 +155,12 @@ public sealed class OspfMigrationPlannerTests
         OspfPlanValidationResult preserved = OspfMigrationPlanner.Build(ok);
         Assert.True(preserved.Succeeded, string.Join("; ", preserved.Plan.ValidationErrors));
         OspfPlanArea site = Assert.Single(preserved.Plan.Areas, a => a.Name == "site");
-        Assert.Equal("20", site.DefaultCost);
+        Assert.Equal(OspfFleetNaming.SiteDefaultCost, site.DefaultCost);
         Assert.Equal("20", site.SourceDefaultCost);
+        Assert.Contains(
+            preserved.Plan.NormalisationNotes,
+            n => n.Contains("normalised to", StringComparison.OrdinalIgnoreCase)
+                 && n.Contains(OspfFleetNaming.SiteDefaultCost, StringComparison.Ordinal));
         // Never infer default-route origination from inject-summary-lsas.
         Assert.DoesNotContain(
             preserved.Plan.NormalisationNotes,
@@ -165,7 +169,9 @@ public sealed class OspfMigrationPlannerTests
         OspfCaptureSnapshot unset = WithAreas(CreateV6Baseline(), [Backbone(), SiteArea(defaultCost: null)]);
         OspfPlanValidationResult unsetResult = OspfMigrationPlanner.Build(unset);
         Assert.True(unsetResult.Succeeded);
-        Assert.Null(Assert.Single(unsetResult.Plan.Areas, a => a.Name == "site").DefaultCost);
+        Assert.Equal(
+            OspfFleetNaming.SiteDefaultCost,
+            Assert.Single(unsetResult.Plan.Areas, a => a.Name == "site").DefaultCost);
 
         OspfCaptureSnapshot bad = WithAreas(CreateV6Baseline(), [Backbone(), SiteArea(defaultCost: "not-a-number")]);
         OspfPlanValidationResult badResult = OspfMigrationPlanner.Build(bad);
@@ -364,6 +370,7 @@ public sealed class OspfMigrationPlannerTests
             [
                 Addr("10.255.0.1/32", "10.255.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
+                Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ],
             OspfV3Objects =
             [
@@ -375,7 +382,7 @@ public sealed class OspfMigrationPlannerTests
         Assert.True(result.Succeeded, string.Join("; ", result.Plan.ValidationErrors));
         Assert.Equal(OspfCaptureSourceKind.RouterOsV7, result.Plan.SourceKind);
         Assert.Equal(10, result.Plan.ActiveBackhauls[0].Cost);
-        Assert.Equal("5", Assert.Single(result.Plan.Areas, a => a.Name == "site").DefaultCost);
+        Assert.Equal(OspfFleetNaming.SiteDefaultCost, Assert.Single(result.Plan.Areas, a => a.Name == "site").DefaultCost);
         Assert.Single(result.Plan.OspfV3ToRemove);
         Assert.Contains(result.Plan.NormalisationNotes, n => n.Contains("OSPFv3", StringComparison.OrdinalIgnoreCase));
     }
@@ -463,7 +470,7 @@ public sealed class OspfMigrationPlannerTests
     private static OspfAreaRow SiteArea(string? defaultCost = null) => new()
     {
         Name = "site",
-        AreaId = "10.0.0.1",
+        AreaId = "10.255.0.1",
         Type = "stub",
         DefaultCost = defaultCost,
     };

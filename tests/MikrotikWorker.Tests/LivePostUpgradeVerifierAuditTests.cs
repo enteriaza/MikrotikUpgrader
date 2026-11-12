@@ -24,6 +24,9 @@ public sealed class LivePostUpgradeVerifierAuditTests
     [Fact]
     public async Task LiveInventory_PassesProductionPostUpgradePackageVerifier()
     {
+        // Must run before any TCP/API contact — incorrectly scoped non-live filters must not reach Tommy.
+        LiveMikrotikTestGate.RequireArmed(LiveMikrotikTestGate.AllowLiveMikrotikEnv, "Live");
+
         string repoRoot = FindRepoRoot();
         string localConfig = Path.Combine(
             repoRoot,

@@ -59,7 +59,7 @@ public sealed class OspfLabRecoveryPlanBuilderTests
                     new OspfAreaRow
                     {
                         Name = "site-v2",
-                        AreaId = "10.0.0.1",
+                        AreaId = "10.255.0.1",
                         Instance = "default-v2",
                         Type = "stub",
                         DefaultCost = "1",
@@ -82,6 +82,7 @@ public sealed class OspfLabRecoveryPlanBuilderTests
                 [
                     new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
                     new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
+                new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
                 ],
                 temp);
 

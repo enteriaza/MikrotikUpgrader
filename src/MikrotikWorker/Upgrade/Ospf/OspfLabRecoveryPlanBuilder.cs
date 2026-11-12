@@ -183,9 +183,87 @@ internal static class OspfLabRecoveryPlanBuilder
             });
         }
 
-        // Preserve any live templates that are already passive network-only matchers not present in reference
-        // (should not invent; reference is authoritative for recovery).
-        _ = notes;
+        // Include live auto-converted passive site templates so planner consolidation records
+        // complete KnownLegacy provenance for cleanup (ROS7 conversion leaves per-VLAN matchers).
+        int liveSiteImported = 0;
+        foreach (OspfInterfaceTemplateRow liveTemplate in live.Templates.Where(static t => !t.Disabled))
+        {
+            string? areaName = liveTemplate.Area;
+            if (string.IsNullOrWhiteSpace(areaName))
+            {
+                continue;
+            }
+
+            bool isBackbone = string.Equals(areaName, backboneLiveName, StringComparison.OrdinalIgnoreCase)
+                || live.Areas.Any(a =>
+                    string.Equals(a.Name, areaName, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(a.AreaId, OspfMigrationPlanner.BackboneAreaId, StringComparison.Ordinal));
+            if (isBackbone || !liveTemplate.Passive)
+            {
+                continue;
+            }
+
+            if (!OspfNetworkList.TryParseAll(liveTemplate.Networks, out List<OspfIpPrefix> liveNets, out _))
+            {
+                continue;
+            }
+
+            bool alreadyRepresented = templates.Any(t =>
+                string.Equals(t.Area, areaName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(t.Interfaces ?? string.Empty, liveTemplate.Interfaces ?? string.Empty, StringComparison.Ordinal)
+                && OspfNetworkList.SetsEqual(t.Networks, liveTemplate.Networks));
+            if (alreadyRepresented)
+            {
+                continue;
+            }
+
+            // Skip if every live network is already covered by a reference-derived site template network
+            // with interfaces=all intent (broad matchers). Still import when interfaces are specific.
+            bool specificInterfaces = !string.IsNullOrWhiteSpace(liveTemplate.Interfaces)
+                && !OspfSiteMatcherConsolidation.IsAllInterfaces(liveTemplate.Interfaces);
+            if (!specificInterfaces
+                && liveNets.All(n => templates.Any(t =>
+                    string.Equals(t.Area, areaName, StringComparison.OrdinalIgnoreCase)
+                    && OspfNetworkList.TryParseAll(t.Networks, out List<OspfIpPrefix> refNets, out _)
+                    && refNets.Any(r => r.Equals(n) || r.Contains(n)))))
+            {
+                continue;
+            }
+
+            templates.Add(new OspfInterfaceTemplateRow
+            {
+                Id = liveTemplate.Id,
+                Area = liveTemplate.Area,
+                Interfaces = liveTemplate.Interfaces,
+                Networks = liveTemplate.Networks,
+                Type = liveTemplate.Type,
+                Cost = liveTemplate.Cost,
+                Passive = liveTemplate.Passive,
+                Disabled = liveTemplate.Disabled,
+                Comment = liveTemplate.Comment,
+                Auth = liveTemplate.Auth,
+                AuthId = liveTemplate.AuthId,
+                AuthKey = liveTemplate.AuthKey,
+                AuthenticationKey = liveTemplate.AuthenticationKey,
+                Priority = liveTemplate.Priority,
+                UseBfd = liveTemplate.UseBfd,
+                HelloInterval = liveTemplate.HelloInterval,
+                DeadInterval = liveTemplate.DeadInterval,
+                RetransmitInterval = liveTemplate.RetransmitInterval,
+                TransmitDelay = liveTemplate.TransmitDelay,
+                InstanceId = liveTemplate.InstanceId,
+                PrefixList = liveTemplate.PrefixList,
+                VlinkNeighborId = liveTemplate.VlinkNeighborId,
+                VlinkTransitArea = liveTemplate.VlinkTransitArea,
+            });
+            liveSiteImported++;
+        }
+
+        if (liveSiteImported > 0)
+        {
+            notes.Add(
+                $"Imported {liveSiteImported} live passive site template(s) for consolidation/KnownLegacy provenance.");
+        }
 
         OspfCaptureSnapshot snapshot = new()
         {
@@ -232,6 +310,14 @@ internal static class OspfLabRecoveryPlanBuilder
             ContentHash = plan.ContentHash,
             InstanceName = plan.InstanceName,
             RouterId = plan.RouterId,
+            TargetInstanceName = plan.TargetInstanceName,
+            TargetBackboneAreaName = plan.TargetBackboneAreaName,
+            TargetSiteAreaName = plan.TargetSiteAreaName,
+            LoopbackInterfaceName = plan.LoopbackInterfaceName,
+            LoopbackCidr = plan.LoopbackCidr,
+            ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
+            IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
+            DerivedManagementCidr = plan.DerivedManagementCidr,
             Areas = plan.Areas,
             AreaRanges = plan.AreaRanges,
             ActiveBackhauls = plan.ActiveBackhauls,

@@ -121,6 +121,8 @@ public sealed class UpgradeLifecycleDeviceLogTests
             RouterIp = IPAddress.Parse("198.18.0.83"),
             DateStartUtc = time.GetUtcNow().UtcDateTime.AddMinutes(-5),
             DateStopUtc = time.GetUtcNow().UtcDateTime.AddHours(1),
+            // Cap at v6 so this lifecycle log test stays single-stage after ACE/BR became v7-eligible.
+            ExecutionMode = UpgradeExecutionMode.V6SteppingOnly,
         };
 
         MikrotikDeviceInfo before = new()
