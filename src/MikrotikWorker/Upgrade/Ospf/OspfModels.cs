@@ -87,6 +87,14 @@ internal sealed class OspfCaptureSnapshot
     /// </summary>
     public IReadOnlyList<OspfIpAddressRow> IpAddresses { get; init; } = [];
     /// <summary>
+    /// Captured <c>/routing/id</c> rows (ROS7), used to resolve symbolic OSPF router-id references.
+    /// </summary>
+    public IReadOnlyList<OspfRoutingIdRow> RoutingIds { get; init; } = [];
+    /// <summary>
+    /// Captured OSPF neighbour rows used for backbone adjacency evidence.
+    /// </summary>
+    public IReadOnlyList<OspfNeighbourRow> Neighbours { get; init; } = [];
+    /// <summary>
     /// Captured routing-filter rows.
     /// </summary>
     public IReadOnlyList<OspfRoutingFilterRow> RoutingFilters { get; init; } = [];
@@ -123,6 +131,15 @@ internal sealed class OspfInstanceRow
     public bool IsDefault { get; init; }
     /// <summary>Redistribution-related properties read from the instance (<c>redistribute</c>, <c>redistribute-static</c>, <c>redistribute-connected</c>, <c>redistribute-other</c>) keyed case-insensitively; only properties present on the router are included.</summary>
     public Dictionary<string, string?> RedistributeProperties { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether the instance is administratively disabled.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
+    /// </summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
 
     /// <summary>Live <c>in-filter</c> (null/empty means unset).</summary>
     public string? InFilter { get; init; }
@@ -161,6 +178,14 @@ internal sealed class OspfAreaRow
     /// </summary>
     public string? DefaultCost { get; init; }
     /// <summary>
+    /// Whether the area is administratively disabled.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
+    /// </summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
+    /// <summary>
     /// Area no-summaries flag when present.
     /// </summary>
     public bool? NoSummaries { get; init; }
@@ -195,6 +220,14 @@ internal sealed class OspfAreaRangeRow
     /// Whether the area-range is advertised.
     /// </summary>
     public bool? Advertise { get; init; }
+    /// <summary>
+    /// Whether the area-range is administratively disabled.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
+    /// </summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
 }
 
 /// <summary>
@@ -218,6 +251,14 @@ internal sealed class OspfNetworkRow
     /// RouterOS comment field.
     /// </summary>
     public string? Comment { get; init; }
+    /// <summary>
+    /// Whether the network statement is administratively disabled.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
+    /// </summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
 }
 
 /// <summary>
@@ -248,6 +289,14 @@ internal sealed class OspfInterfaceRow
     /// Whether the template/interface is passive.
     /// </summary>
     public bool Passive { get; init; }
+    /// <summary>
+    /// Whether the OSPF interface row is administratively disabled.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
+    /// </summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
 }
 
 /// <summary>
@@ -288,8 +337,12 @@ internal sealed class OspfInterfaceTemplateRow
     public bool Passive { get; init; }
     /// <summary>
     /// Whether the template is disabled.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
     /// </summary>
     public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
     /// <summary>
     /// RouterOS comment field.
     /// </summary>
@@ -363,6 +416,43 @@ internal sealed class OspfIpAddressRow
     /// Interface name.
     /// </summary>
     public string? Interface { get; init; }
+    /// <summary>
+    /// Whether the address entry is administratively disabled. Disabled addresses never contribute
+    /// to management-prefix discovery or corroboration.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
+    /// </summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
+}
+
+/// <summary>
+/// Captured <c>/routing/id</c> row (ROS7 routing identity object that OSPF may reference by name).
+/// </summary>
+internal sealed class OspfRoutingIdRow
+{
+    /// <summary>RouterOS object <c>.id</c> when present.</summary>
+    public string? Id { get; init; }
+    /// <summary>Routing-id object name (may appear as OSPF instance <c>router-id</c>).</summary>
+    public string? Name { get; init; }
+    /// <summary>IPv4 address stored on the routing-id object.</summary>
+    public string? Address { get; init; }
+}
+
+/// <summary>
+/// Captured OSPF neighbour row used for backbone adjacency evidence at plan time.
+/// </summary>
+internal sealed class OspfNeighbourRow
+{
+    /// <summary>Neighbour IPv4 address.</summary>
+    public string? Address { get; init; }
+    /// <summary>Neighbour router-id.</summary>
+    public string? RouterId { get; init; }
+    /// <summary>Neighbour state (for example <c>Full</c>).</summary>
+    public string? State { get; init; }
+    /// <summary>Local interface name when reported by RouterOS.</summary>
+    public string? Interface { get; init; }
 }
 
 /// <summary>
@@ -378,6 +468,14 @@ internal sealed class OspfRoutingFilterRow
     /// Object name as reported by RouterOS.
     /// </summary>
     public string? Name { get; init; }
+    /// <summary>
+    /// Whether the filter rule is administratively disabled.
+    /// Prefer <see cref="AdminState"/> for eligibility decisions.
+    /// </summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
 }
 
 /// <summary>Captured OSPFv3 object reference (v6 /routing ospf-v3 or v7 version=3 dependents).</summary>
@@ -467,7 +565,7 @@ internal sealed class OspfMigrationPlan
     public string? LoopbackCidr { get; init; }
 
     /// <summary>
-    /// Distinct in-scope (<c>10.0.0.0/8</c>) Loopback hosts observed during Router ID selection.
+    /// Distinct in-scope (<c>10.16.0.0/24</c>) Loopback hosts observed during Router ID selection.
     /// </summary>
     public IReadOnlyList<string> ObservedInScopeLoopbackAddresses { get; init; } = [];
 
@@ -476,8 +574,17 @@ internal sealed class OspfMigrationPlan
     /// </summary>
     public IReadOnlyList<string> IgnoredOutsideRangeLoopbackAddresses { get; init; } = [];
 
-    /// <summary>Mandatory site management summary <c>/24</c> derived from interface addresses.</summary>
+    /// <summary>
+    /// Primary site management summary <c>/24</c> (compatibility / diagnostics).
+    /// Prefer <see cref="DerivedManagementCidrs"/> for authoritative membership, ranges, matchers and supersession.
+    /// </summary>
     public string? DerivedManagementCidr { get; init; }
+
+    /// <summary>
+    /// Authoritative set of required management <c>/24</c> aggregates, including same-interface expansions.
+    /// When empty, callers should treat <see cref="DerivedManagementCidr"/> as the sole member.
+    /// </summary>
+    public IReadOnlyList<string> DerivedManagementCidrs { get; init; } = [];
 
     /// <summary>
     /// Planned OSPF areas.
@@ -515,7 +622,8 @@ internal sealed class OspfMigrationPlan
     /// </summary>
     public bool ClearAllRedistribution { get; init; } = true;
     /// <summary>
-    /// When true, migration removes selected OSPFv3 objects.
+    /// Historical plan flag retained for serialisation compatibility. OSPFv3 removal is mandatory
+    /// and unconditional in the apply path; this value does not disable removal.
     /// </summary>
     public bool RemoveAllOspfV3 { get; init; } = true;
     /// <summary>
@@ -889,12 +997,14 @@ internal sealed class OspfMigrationPlanHashPayload
     public string? LoopbackInterfaceName { get; init; }
     /// <summary>Selected loopback CIDR used for Router ID derivation.</summary>
     public string? LoopbackCidr { get; init; }
-    /// <summary>Distinct in-scope (<c>10.0.0.0/8</c>) loopback hosts observed during Router ID selection.</summary>
+    /// <summary>Distinct in-scope (<c>10.16.0.0/24</c>) loopback hosts observed during Router ID selection.</summary>
     public required IReadOnlyList<string> ObservedInScopeLoopbackAddresses { get; init; }
     /// <summary>Outside-range loopback hosts ignored for migration identity (configuration is preserved).</summary>
     public required IReadOnlyList<string> IgnoredOutsideRangeLoopbackAddresses { get; init; }
-    /// <summary>Mandatory site management summary <c>/24</c> derived from interface addresses.</summary>
+    /// <summary>Primary management <c>/24</c> only (hash/compat); not the authoritative multi-prefix set.</summary>
     public string? DerivedManagementCidr { get; init; }
+    /// <summary>Authoritative required management <c>/24</c> set including same-interface expansions.</summary>
+    public IReadOnlyList<string> DerivedManagementCidrs { get; init; } = [];
     /// <summary>Planned OSPF areas.</summary>
     public required IReadOnlyList<OspfPlanArea> Areas { get; init; }
     /// <summary>Planned area ranges (summaries).</summary>

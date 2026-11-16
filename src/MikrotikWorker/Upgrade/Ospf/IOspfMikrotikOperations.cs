@@ -174,6 +174,27 @@ internal interface IOspfMikrotikOperations
         ITikConnection connection,
         OspfMigrationPlan plan,
         OspfManagementPlaneBaseline baseline,
+        CancellationToken cancellationToken = default,
+        bool requireFleetCost = true);
+
+    /// <summary>
+    /// Renames the live OSPFv2 instance from <paramref name="currentName"/> to <paramref name="targetName"/>
+    /// when they differ. Fails closed when the target name already exists on another instance.
+    /// </summary>
+    Task EnsureOspfInstanceNameAsync(
+        ITikConnection connection,
+        string currentName,
+        string targetName,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// After the OSPF instance router-id has been set to a literal IPv4 address, considers whether
+    /// an obsolete symbolic <c>/routing/id</c> entry may be removed. Cleanup is conservative: when
+    /// a complete non-OSPF reference inventory cannot be established, the entry is retained.
+    /// </summary>
+    Task TryRemoveUnusedRoutingIdAsync(
+        ITikConnection connection,
+        string? routingIdName,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -270,24 +291,93 @@ internal sealed class OspfCaptureRequest
 }
 
 /// <summary>
+/// Per-collection capture completeness for a RouterOS 7 OSPF inventory.
+/// Empty lists are valid only when the corresponding collection was successfully queried.
+/// </summary>
+internal sealed class OspfInventoryCaptureStatus
+{
+    /// <summary>True when <c>/routing/ospf/instance/print</c> succeeded and was parsed.</summary>
+    public bool InstancesCaptured { get; init; }
+
+    /// <summary>True when <c>/routing/ospf/area/print</c> succeeded and was parsed.</summary>
+    public bool AreasCaptured { get; init; }
+
+    /// <summary>True when <c>/routing/ospf/interface-template/print</c> succeeded and was parsed.</summary>
+    public bool TemplatesCaptured { get; init; }
+
+    /// <summary>True when <c>/routing/ospf/area/range/print</c> succeeded and was parsed.</summary>
+    public bool RangesCaptured { get; init; }
+
+    /// <summary>True when every required OSPFv3 residual collection was successfully captured.</summary>
+    public bool IsComplete =>
+        InstancesCaptured && AreasCaptured && TemplatesCaptured && RangesCaptured;
+
+    /// <summary>Fully successful capture of all required collections (lists may still be empty).</summary>
+    public static OspfInventoryCaptureStatus Complete { get; } = new()
+    {
+        InstancesCaptured = true,
+        AreasCaptured = true,
+        TemplatesCaptured = true,
+        RangesCaptured = true,
+    };
+
+    /// <summary>Default: no collection has been proven captured.</summary>
+    public static OspfInventoryCaptureStatus Incomplete { get; } = new();
+
+    /// <summary>Human-readable list of collections that were not captured.</summary>
+    public string DescribeMissing()
+    {
+        List<string> missing = [];
+        if (!InstancesCaptured)
+        {
+            missing.Add("instances");
+        }
+
+        if (!AreasCaptured)
+        {
+            missing.Add("areas");
+        }
+
+        if (!TemplatesCaptured)
+        {
+            missing.Add("interface-templates");
+        }
+
+        if (!RangesCaptured)
+        {
+            missing.Add("area-ranges");
+        }
+
+        return missing.Count == 0 ? "none" : string.Join(", ", missing);
+    }
+}
+
+/// <summary>
 /// Live RouterOS 7 OSPF inventory snapshot used during reconcile/verify.
 /// </summary>
 internal sealed class OspfV7Inventory
 {
     /// <summary>
-    /// Live OSPF instances.
+    /// Whether each required OSPF collection was successfully queried and parsed.
+    /// Defaults to <see cref="OspfInventoryCaptureStatus.Incomplete"/> so an empty hand-built
+    /// inventory cannot be mistaken for a proven OSPFv3-free router.
+    /// </summary>
+    public OspfInventoryCaptureStatus CaptureStatus { get; init; } = OspfInventoryCaptureStatus.Incomplete;
+
+    /// <summary>
+    /// Live OSPF instances. Meaningful only when <see cref="CaptureStatus.InstancesCaptured"/> is true.
     /// </summary>
     public IReadOnlyList<OspfInstanceRow> Instances { get; init; } = [];
     /// <summary>
-    /// Live OSPF areas.
+    /// Live OSPF areas. Meaningful only when <see cref="CaptureStatus.AreasCaptured"/> is true.
     /// </summary>
     public IReadOnlyList<OspfAreaRow> Areas { get; init; } = [];
     /// <summary>
-    /// Live OSPF area ranges.
+    /// Live OSPF area ranges. Meaningful only when <see cref="CaptureStatus.RangesCaptured"/> is true.
     /// </summary>
     public IReadOnlyList<OspfAreaRangeRow> AreaRanges { get; init; } = [];
     /// <summary>
-    /// Live OSPF interface templates.
+    /// Live OSPF interface templates. Meaningful only when <see cref="CaptureStatus.TemplatesCaptured"/> is true.
     /// </summary>
     public IReadOnlyList<OspfInterfaceTemplateRow> Templates { get; init; } = [];
     /// <summary>

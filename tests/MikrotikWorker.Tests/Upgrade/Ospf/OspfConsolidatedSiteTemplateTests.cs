@@ -77,6 +77,8 @@ public sealed class OspfConsolidatedSiteTemplateTests
         OspfV7Inventory dirty = AuthoritativeInventory(plan);
         dirty = new OspfV7Inventory
         {
+            
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
             Instances = dirty.Instances,
             Areas = dirty.Areas,
             AreaRanges = dirty.AreaRanges,
@@ -101,8 +103,10 @@ public sealed class OspfConsolidatedSiteTemplateTests
         Assert.False(bad.Succeeded);
         Assert.Contains(
             bad.Errors,
-            e => e.Contains("Unexpected template remains", StringComparison.OrdinalIgnoreCase)
-                 || e.Contains("legacy interface-bound", StringComparison.OrdinalIgnoreCase));
+            e => e.Contains("Unexpected superseded/legacy template remains", StringComparison.OrdinalIgnoreCase)
+                 || e.Contains("Unexpected template remains", StringComparison.OrdinalIgnoreCase)
+                 || e.Contains("legacy interface-bound", StringComparison.OrdinalIgnoreCase)
+                 || e.Contains("obsolete more-specific management", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -125,6 +129,8 @@ public sealed class OspfConsolidatedSiteTemplateTests
         OspfV7Inventory activeSite = AuthoritativeInventory(plan);
         activeSite = new OspfV7Inventory
         {
+            
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
             Instances = activeSite.Instances,
             Areas = activeSite.Areas,
             AreaRanges = activeSite.AreaRanges,
@@ -265,16 +271,17 @@ public sealed class OspfConsolidatedSiteTemplateTests
 
     /// <summary>
     /// Scenario: post-apply inventory still holds a disabled legacy Bridge-VLAN-99_MGMT template next to the three planned ones.
-    /// Expected: verification fails with an error about a disabled legacy template remaining (or not exactly 3 templates).
-    /// Invariant: disabling a legacy template is not a substitute for removing it.
+    /// Expected: verification succeeds — disabled OSPFv2 objects are excluded from eligible equality/count.
+    /// Invariant: disabled leftovers are invisible to OSPFv2 migration decisions; they are not deleted solely to satisfy verification.
     /// </summary>
     [Fact]
-    public async Task Verifier_FailsWhenDisabledLegacyTemplateRemains()
+    public async Task Verifier_AcceptsWhenDisabledLegacyTemplateRemains()
     {
         OspfMigrationPlan plan = BuildTommyRecoveryPlan();
         OspfV7Inventory inventory = AuthoritativeInventory(plan);
         inventory = new OspfV7Inventory
         {
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
             Instances = inventory.Instances,
             Areas = inventory.Areas,
             AreaRanges = inventory.AreaRanges,
@@ -288,6 +295,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
                     Networks = "10.16.11.0/27",
                     Passive = true,
                     Disabled = true,
+                    AdminState = OspfAdminState.Disabled,
                 },
             ],
         };
@@ -297,11 +305,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
                 NullLogger<OspfV7MigrationVerifier>.Instance)
             .VerifyAsync(FakeMikrotikConnections.CreateFullyPopulated(), plan, CancellationToken.None);
 
-        Assert.False(result.Succeeded);
-        Assert.Contains(
-            result.Errors,
-            e => e.Contains("Disabled legacy template remains", StringComparison.OrdinalIgnoreCase)
-                 || e.Contains("expected exactly 3", StringComparison.OrdinalIgnoreCase));
+        Assert.True(result.Succeeded, result.Detail);
     }
 
     /// <summary>
@@ -321,14 +325,14 @@ public sealed class OspfConsolidatedSiteTemplateTests
             RouterOsVersion = "6.49.23",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV6,
-            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.255.0.1", IsDefault = true }],
+            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.16.0.1", IsDefault = true }],
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
                 new OspfAreaRow
                 {
                     Name = "site",
-                    AreaId = "10.255.0.1",
+                    AreaId = "10.16.0.1",
                     Type = "stub",
                     DefaultCost = "1",
                     NoSummaries = true,
@@ -337,7 +341,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
             AreaRanges = [new OspfAreaRangeRow { Area = "site", Range = "10.10.0.0/16" }],
             Networks =
             [
-                new OspfNetworkRow { Area = "backbone", Network = "10.255.0.1/32" },
+                new OspfNetworkRow { Area = "backbone", Network = "10.16.0.1/32" },
                 new OspfNetworkRow { Area = "backbone", Network = "10.0.0.0/30" },
                 new OspfNetworkRow { Area = "site", Network = "10.10.0.0/16" },
                 new OspfNetworkRow { Area = "site", Network = "100.99.0.0/16" },
@@ -349,7 +353,7 @@ public sealed class OspfConsolidatedSiteTemplateTests
             ],
             IpAddresses =
             [
-                new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
+                new OspfIpAddressRow { Address = "10.16.0.1/32", Network = "10.16.0.1", Interface = "lo" },
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
                 new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
             ],
@@ -433,7 +437,9 @@ public sealed class OspfConsolidatedSiteTemplateTests
                 "mipsbe",
                 new OspfV7Inventory
                 {
-                    Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
+                    
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
                     Areas =
                     [
                         new OspfAreaRow { Name = "backbone-v2", AreaId = "0.0.0.0", Instance = "default-v2", Type = "default" },
@@ -478,6 +484,8 @@ public sealed class OspfConsolidatedSiteTemplateTests
 
         return new OspfV7Inventory
         {
+            
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
             Instances = baseInv.Instances,
             Areas = baseInv.Areas,
             AreaRanges = plan.AreaRanges.Select(r => new OspfAreaRangeRow
@@ -642,8 +650,12 @@ public sealed class OspfConsolidatedSiteTemplateTests
         /// <summary>
         /// No-op; the backbone guard is not under test.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) =>
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) =>
             Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
 
         /// <summary>
         /// Reports no OSPF neighbours.

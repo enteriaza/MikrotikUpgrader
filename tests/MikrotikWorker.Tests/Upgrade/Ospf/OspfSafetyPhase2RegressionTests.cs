@@ -408,8 +408,8 @@ public sealed class OspfSafetyPhase2RegressionTests
 
     /// <summary>
     /// Scenario: run the reconciler on a minimal plan using an operations fake that records the sequence of calls.
-    /// Expected: a baseline is returned and events occur in the order backhaul, assert, loopback, assert, site, assert, remove-obsolete, assert, v3, assert.
-    /// Invariant: a backbone safety assertion runs after every mutation stage, including OSPFv3 removal.
+    /// Expected: OSPFv3 removal runs before OSPFv2 template reconciliation; backbone asserts still follow each stage.
+    /// Invariant: OSPFv3 is removed and verified before area/template reconcile; later stages remain guarded.
     /// </summary>
     [Fact]
     public async Task Reconciler_AssertsAfterEveryMutationStage_IncludingOspfV3()
@@ -425,6 +425,9 @@ public sealed class OspfSafetyPhase2RegressionTests
         Assert.NotNull(baseline);
         Assert.Equal(
             [
+                "v3",
+                "assert-after-v3",
+                "area",
                 "backhaul",
                 "assert-after-backhaul",
                 "loopback",
@@ -435,15 +438,19 @@ public sealed class OspfSafetyPhase2RegressionTests
                 "remove-obsolete",
                 "assert-site",
                 "assert-after-remove-obsolete",
-                "v3",
-                "assert-after-v3",
             ],
             ops.Events);
+        Assert.True(
+            ops.Events.IndexOf("v3") < ops.Events.IndexOf("area"),
+            "OSPFv3 removal must precede OSPFv2 area reconciliation.");
+        Assert.True(
+            ops.Events.IndexOf("v3") < ops.Events.IndexOf("backhaul"),
+            "OSPFv3 removal must precede OSPFv2 template reconciliation.");
     }
 
     /// <summary>
     /// Scenario: the safety assertion fails right after the backhaul stage.
-    /// Expected: OspfBackboneMutationGuardException is thrown; the backhaul stage ran but the loopback, site, remove-obsolete and v3 stages did not.
+    /// Expected: OspfBackboneMutationGuardException; OSPFv3 already removed earlier, but later OSPFv2 stages stop.
     /// Invariant: a failed backbone assertion stops the migration before any later mutation.
     /// </summary>
     [Fact]
@@ -458,11 +465,11 @@ public sealed class OspfSafetyPhase2RegressionTests
                     managementHost: "198.18.240.11",
                     CancellationToken.None));
 
+        Assert.Contains(ops.Events, e => e == "v3");
         Assert.Contains(ops.Events, e => e == "backhaul");
         Assert.DoesNotContain(ops.Events, e => e == "loopback");
         Assert.DoesNotContain(ops.Events, e => e == "site");
         Assert.DoesNotContain(ops.Events, e => e == "remove-obsolete");
-        Assert.DoesNotContain(ops.Events, e => e == "v3");
     }
 
     /// <summary>
@@ -791,9 +798,17 @@ public sealed class OspfSafetyPhase2RegressionTests
         public Task ClearOspfInstanceFilterReferencesAsync(ITikConnection connection, string instanceName, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         /// <summary>
-        /// No-op: area reconciliation is not under test in this scenario.
+        /// Records <c>area</c> so ordering tests can prove OSPFv3 removal precedes area reconcile.
         /// </summary>
-        public Task EnsureOspfAreaAsync(ITikConnection connection, string instanceName, OspfPlanArea area, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task EnsureOspfAreaAsync(ITikConnection connection, string instanceName, OspfPlanArea area, CancellationToken cancellationToken = default)
+        {
+            if (!Events.Contains("area"))
+            {
+                Events.Add("area");
+            }
+
+            return Task.CompletedTask;
+        }
 
         /// <summary>
         /// No-op: area-range reconciliation is not under test in this scenario.
@@ -892,7 +907,7 @@ public sealed class OspfSafetyPhase2RegressionTests
         /// Records the label armed by the preceding mutation and throws when it matches <see
         /// cref="FailOnAssertAfter"/>, simulating a safety abort at that stage.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default)
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true)
         {
             string label = _lastAssertLabel ?? "assert";
             Events.Add(label);
@@ -903,6 +918,10 @@ public sealed class OspfSafetyPhase2RegressionTests
 
             return Task.CompletedTask;
         }
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
 
         /// <summary>
         /// Returns no neighbours; the adjacency guard is not exercised by this scenario.

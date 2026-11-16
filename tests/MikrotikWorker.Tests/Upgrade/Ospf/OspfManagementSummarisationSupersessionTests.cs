@@ -97,11 +97,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
 
     /// <summary>
     /// Scenario: an extra 192.0.2.0/24 template on Bridge-OTHER in the site area lies outside every planned aggregate.
-    /// Expected: enrichment records no superseded templates, and classification throws <c>InvalidOperationException</c> mentioning "unknown/unrelated" and "No deletion was attempted".
+    /// Expected: enrichment records no superseded templates, and classification preserves <c>*U</c> as <c>PreservedUnmanaged</c>.
     /// Invariant: templates outside the consolidated prefixes are never treated as obsolete.
     /// </summary>
     [Fact]
-    public void Enrich_UnrelatedOutsideAggregate_RemainsUnknown()
+    public void Enrich_UnrelatedOutsideAggregate_IsPreservedUnmanaged()
     {
         OspfMigrationPlan plan = ConsolidatedPlan();
         OspfV7Inventory inventory = InventoryWith(
@@ -111,19 +111,20 @@ public sealed class OspfManagementSummarisationSupersessionTests
         OspfMigrationPlan enriched = OspfLiveSupersededProvenance.EnrichFromLiveInventory(plan, inventory);
         Assert.Empty(enriched.SupersededTemplates);
 
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(enriched, ToRows(inventory)));
-        Assert.Contains("unknown/unrelated", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
+        OspfTemplateClassificationReport report =
+            OspfTemplateCleanupClassifier.ClassifyOrThrow(enriched, ToRows(inventory));
+        Assert.Equal("*U", Assert.Single(report.PreservedUnmanaged).Row.Id);
+        Assert.Empty(report.Unknown);
+        Assert.Empty(report.KnownLegacy);
     }
 
     /// <summary>
     /// Scenario: a live 10.16.11.0/27 template lies inside the management /24 but belongs to a different area (<c>other-site-v2</c>).
-    /// Expected: enrichment records nothing, and classification throws <c>InvalidOperationException</c> mentioning "unknown/unrelated".
+    /// Expected: enrichment records nothing, and classification preserves <c>*U</c> as <c>PreservedUnmanaged</c>.
     /// Invariant: containment only supersedes templates in the same area as the consolidated template.
     /// </summary>
     [Fact]
-    public void Enrich_SamePrefixUnrelatedArea_RemainsUnknown()
+    public void Enrich_SamePrefixUnrelatedArea_IsPreservedUnmanaged()
     {
         OspfMigrationPlan plan = ConsolidatedPlan();
         OspfV7Inventory inventory = InventoryWith(
@@ -133,9 +134,11 @@ public sealed class OspfManagementSummarisationSupersessionTests
         OspfMigrationPlan enriched = OspfLiveSupersededProvenance.EnrichFromLiveInventory(plan, inventory);
         Assert.Empty(enriched.SupersededTemplates);
 
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(enriched, ToRows(inventory)));
-        Assert.Contains("unknown/unrelated", ex.Message, StringComparison.OrdinalIgnoreCase);
+        OspfTemplateClassificationReport report =
+            OspfTemplateCleanupClassifier.ClassifyOrThrow(enriched, ToRows(inventory));
+        Assert.Equal("*U", Assert.Single(report.PreservedUnmanaged).Row.Id);
+        Assert.Empty(report.Unknown);
+        Assert.Empty(report.KnownLegacy);
     }
 
     /// <summary>
@@ -356,7 +359,7 @@ public sealed class OspfManagementSummarisationSupersessionTests
 
     /// <summary>
     /// Scenario: a single candidate template is checked in several variants: legitimate, different cost, type, authentication, blank interfaces, active, or extra hello interval (all contained), versus a different area or a prefix outside the consolidation.
-    /// Expected: contained candidates are superseded and classified as one known legacy row with nothing unknown; the others are not superseded and classification throws mentioning "unknown/unrelated" and "No deletion was attempted".
+    /// Expected: contained candidates are superseded and classified as one known legacy row with nothing unknown; the others are not superseded and are preserved as <c>PreservedUnmanaged</c>.
     /// Invariant: area and prefix containment, not attribute equality, decide supersession.
     /// </summary>
     [Theory]
@@ -384,14 +387,16 @@ public sealed class OspfManagementSummarisationSupersessionTests
                 OspfTemplateCleanupClassifier.ClassifyOrThrow(enriched, ToRows(inventory));
             Assert.Single(report.KnownLegacy);
             Assert.Empty(report.Unknown);
+            Assert.Empty(report.PreservedUnmanaged);
             return;
         }
 
         Assert.Empty(enriched.SupersededTemplates);
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(enriched, ToRows(inventory)));
-        Assert.Contains("unknown/unrelated", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
+        OspfTemplateClassificationReport preserved =
+            OspfTemplateCleanupClassifier.ClassifyOrThrow(enriched, ToRows(inventory));
+        Assert.Single(preserved.PreservedUnmanaged);
+        Assert.Empty(preserved.Unknown);
+        Assert.Empty(preserved.KnownLegacy);
     }
 
     /// <summary>
@@ -915,6 +920,8 @@ public sealed class OspfManagementSummarisationSupersessionTests
         string? backbone = list.FirstOrDefault(t => !t.Passive)?.Area ?? "backbone-v2";
         return new OspfV7Inventory
         {
+            
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
             Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
             Areas =
             [

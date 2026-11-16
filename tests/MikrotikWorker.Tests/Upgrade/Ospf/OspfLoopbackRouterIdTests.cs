@@ -15,8 +15,8 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 public sealed class OspfLoopbackRouterIdTests
 {
     /// <summary>
-    /// Scenario: the address inventory has a <c>lo</c> interface with 10.255.0.1/32 plus an unrelated ether1 /30.
-    /// Expected: derivation succeeds with router-id 10.255.0.1, loopback interface <c>lo</c> and CIDR 10.255.0.1/32.
+    /// Scenario: the address inventory has a <c>lo</c> interface with 10.16.0.1/32 plus an unrelated ether1 /30.
+    /// Expected: derivation succeeds with router-id 10.16.0.1, loopback interface <c>lo</c> and CIDR 10.16.0.1/32.
     /// Invariant: a /32 on a supported loopback name yields the router-id; other interfaces are ignored.
     /// </summary>
     [Fact]
@@ -24,14 +24,14 @@ public sealed class OspfLoopbackRouterIdTests
     {
         OspfLoopbackRouterIdResult result = OspfLoopbackRouterId.Derive(
         [
-            new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
+            new OspfIpAddressRow { Address = "10.16.0.1/32", Network = "10.16.0.1", Interface = "lo" },
             new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
         ]);
 
         Assert.True(result.Succeeded, result.Detail);
-        Assert.Equal("10.255.0.1", result.RouterId);
+        Assert.Equal("10.16.0.1", result.RouterId);
         Assert.Equal("lo", result.LoopbackInterfaceName);
-        Assert.Equal("10.255.0.1/32", result.LoopbackCidr);
+        Assert.Equal("10.16.0.1/32", result.LoopbackCidr);
     }
 
     /// <summary>
@@ -172,8 +172,8 @@ public sealed class OspfLoopbackRouterIdTests
     }
 
     /// <summary>
-    /// Scenario: <c>Loopback</c> carries bare addresses 172.16.150.253 and 102.66.242.100 (outside the infrastructure range) and 10.16.254.1 (inside).
-    /// Expected: derivation succeeds with router-id 10.16.254.1 and CIDR 10.16.254.1/32, two addresses reported as ignored and one as in-scope.
+    /// Scenario: <c>Loopback</c> carries bare addresses 172.16.150.253, 102.66.242.100 and 10.255.1.1 (outside the 10.16.0.0/24 loopback scope) and 10.16.0.1 (inside).
+    /// Expected: derivation succeeds with router-id 10.16.0.1 and CIDR 10.16.0.1/32, three addresses reported as ignored and one as in-scope.
     /// Invariant: out-of-range loopback addresses are skipped rather than blocking selection of the in-scope one.
     /// </summary>
     [Fact]
@@ -183,13 +183,14 @@ public sealed class OspfLoopbackRouterIdTests
         [
             new OspfIpAddressRow { Address = "172.16.150.253", Network = "172.16.150.253", Interface = "Loopback" },
             new OspfIpAddressRow { Address = "102.66.242.100", Network = "102.66.242.100", Interface = "Loopback" },
-            new OspfIpAddressRow { Address = "10.16.254.1", Network = "10.16.254.1", Interface = "Loopback" },
+            new OspfIpAddressRow { Address = "10.255.1.1", Network = "10.255.1.1", Interface = "Loopback" },
+            new OspfIpAddressRow { Address = "10.16.0.1", Network = "10.16.0.1", Interface = "Loopback" },
         ]);
 
         Assert.True(result.Succeeded, result.Detail);
-        Assert.Equal("10.16.254.1", result.RouterId);
-        Assert.Equal("10.16.254.1/32", result.LoopbackCidr);
-        Assert.Equal(2, result.IgnoredOutsideRangeAddresses.Count);
+        Assert.Equal("10.16.0.1", result.RouterId);
+        Assert.Equal("10.16.0.1/32", result.LoopbackCidr);
+        Assert.Equal(3, result.IgnoredOutsideRangeAddresses.Count);
         Assert.Single(result.ObservedInScopeAddresses);
     }
 

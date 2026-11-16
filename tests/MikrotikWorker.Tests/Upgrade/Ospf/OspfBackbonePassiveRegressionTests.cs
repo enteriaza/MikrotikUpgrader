@@ -312,7 +312,9 @@ public sealed class OspfBackbonePassiveRegressionTests
         {
             Inventory = new OspfV7Inventory
             {
-                Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
+                
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
                 Areas =
                 [
                     new OspfAreaRow { Name = "backbone-v2", AreaId = "0.0.0.0", Instance = "default-v2", Type = "default" },
@@ -579,7 +581,9 @@ public sealed class OspfBackbonePassiveRegressionTests
             "mipsbe",
             new OspfV7Inventory
             {
-                Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
+                
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.11", Version = "2" }],
                 Areas =
                 [
                     new OspfAreaRow { Name = "backbone-v2", AreaId = "0.0.0.0", Instance = "default-v2", Type = "default" },
@@ -781,7 +785,7 @@ public sealed class OspfBackbonePassiveRegressionTests
             ITikConnection connection,
             OspfMigrationPlan plan,
             OspfManagementPlaneBaseline baseline,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default, bool requireFleetCost = true)
         {
             if (BackhaulEnsured)
             {
@@ -917,7 +921,9 @@ public sealed class OspfBackbonePassiveRegressionTests
         public virtual Task<OspfV7Inventory> ReadV7InventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
             Task.FromResult(new OspfV7Inventory
             {
-                Instances =
+                
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances =
                 [
                     new OspfInstanceRow
                     {
@@ -985,8 +991,12 @@ public sealed class OspfBackbonePassiveRegressionTests
         /// No-op by default (backbone assumed healthy); virtual so a subclass can simulate
         /// adjacency loss.
         /// </summary>
-        public virtual Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) =>
+        public virtual Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) =>
             Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
 
         /// <summary>
         /// Returns one Full neighbour (10.16.248.77, router-id 198.18.255.253) so the

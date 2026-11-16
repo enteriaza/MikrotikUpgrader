@@ -63,7 +63,7 @@ public sealed class OspfLabRecoveryPlanBuilderTests
             add area=site comment=MGMT range=10.10.0.0/16
             /routing ospf network
             add area=backbone network=10.0.0.0/30
-            add area=backbone network=10.255.0.1/32
+            add area=backbone network=10.16.0.1/32
             add area=site comment="Active PPPoE Range" network=100.99.0.0/16
             add area=site network=10.10.0.0/16
             """);
@@ -72,14 +72,14 @@ public sealed class OspfLabRecoveryPlanBuilderTests
         {
             OspfV7Inventory live = new()
             {
-                Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.255.0.1", Version = "2" }],
+                Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.1", Version = "2" }],
                 Areas =
                 [
                     new OspfAreaRow { Name = "backbone-v2", AreaId = "0.0.0.0", Instance = "default-v2", Type = "default" },
                     new OspfAreaRow
                     {
                         Name = "site-v2",
-                        AreaId = "10.255.0.1",
+                        AreaId = "10.16.0.1",
                         Instance = "default-v2",
                         Type = "stub",
                         DefaultCost = "1",
@@ -100,7 +100,7 @@ public sealed class OspfLabRecoveryPlanBuilderTests
                 "mipsbe",
                 live,
                 [
-                    new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
+                    new OspfIpAddressRow { Address = "10.16.0.1/32", Network = "10.16.0.1", Interface = "lo" },
                     new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
                 new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
                 ],

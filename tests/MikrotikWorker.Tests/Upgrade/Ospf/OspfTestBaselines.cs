@@ -119,7 +119,8 @@ internal static class OspfTestBaselines
 
         return new OspfV7Inventory
         {
-            Instances =
+           
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,Instances =
             [
                 new OspfInstanceRow
                 {
@@ -157,7 +158,8 @@ internal static class OspfTestBaselines
 
         return new OspfV7Inventory
         {
-            Instances =
+           
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,Instances =
             [
                 new OspfInstanceRow
                 {
@@ -180,4 +182,20 @@ internal static class OspfTestBaselines
                 .ToList(),
         };
     }
+
+    /// <summary>
+    /// Copies <paramref name="inventory"/> while forcing <see cref="OspfInventoryCaptureStatus.Complete"/>.
+    /// </summary>
+    public static OspfV7Inventory WithCompleteCapture(OspfV7Inventory inventory) =>
+        new()
+        {
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances = inventory.Instances,
+            Areas = inventory.Areas,
+            AreaRanges = inventory.AreaRanges,
+            Templates = inventory.Templates,
+            Filters = inventory.Filters,
+            OspfV3Objects = inventory.OspfV3Objects,
+            IssuedMutatingCommands = inventory.IssuedMutatingCommands,
+        };
 }

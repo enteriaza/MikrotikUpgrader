@@ -91,8 +91,8 @@ public sealed class OspfConsolidatedPrefixCleanupTests
 
     /// <summary>
     /// Scenario: a matching legacy template exists in site-v2 and an identical-looking one exists in another area (other-site-v2).
-    /// Expected: cleanup throws InvalidOperationException ('No deletion was attempted'), removes nothing and leaves both *3 and *X.
-    /// Invariant: a template in a different area is unexpected and aborts cleanup before any deletion.
+    /// Expected: cleanup succeeds, removes only the legacy *3 and preserves *X.
+    /// Invariant: a template in a different area is preserved unmanaged and never deleted.
     /// </summary>
     [Fact]
     public async Task ProductionCleanup_DifferentArea_IsPreserved()
@@ -103,19 +103,18 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         store.Templates.Add(Row("*X", "other-site-v2", "Bridge-VLAN-99_MGMT", "10.16.11.0/27"));
 
         CapturingConnection capturing = store.Connect();
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Empty(capturing.RemovedIds);
+        Assert.Equal(["*3"], capturing.RemovedIds);
+        Assert.DoesNotContain(store.Templates, t => t[".id"] == "*3");
         Assert.Contains(store.Templates, t => t[".id"] == "*X");
-        Assert.Contains(store.Templates, t => t[".id"] == "*3");
+        Assert.DoesNotContain(store.Templates, t => t[".id"] == "*3");
     }
 
     /// <summary>
     /// Scenario: besides a legacy /27, the site area holds a Bridge-OTHER template for 10.16.50.0/24 outside the consolidated /24.
-    /// Expected: cleanup throws ('No deletion was attempted'), nothing is removed and *O is retained.
-    /// Invariant: templates outside the consolidated prefix are never deleted and their presence aborts the whole cleanup.
+    /// Expected: cleanup succeeds, only the legacy *3 is removed and *O is preserved.
+    /// Invariant: templates outside the consolidated prefix are never deleted and do not block cleanup of legacy rows.
     /// </summary>
     [Fact]
     public async Task ProductionCleanup_OutsideConsolidated24_IsPreserved()
@@ -126,17 +125,16 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         store.Templates.Add(Row("*O", "site-v2", "Bridge-OTHER", "10.16.50.0/24"));
 
         CapturingConnection capturing = store.Connect();
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Empty(capturing.RemovedIds);
+        Assert.Equal(["*3"], capturing.RemovedIds);
+        Assert.DoesNotContain(store.Templates, t => t[".id"] == "*3");
         Assert.Contains(store.Templates, t => t[".id"] == "*O");
     }
 
     /// <summary>
     /// Scenario: a broader 10.16.0.0/16 'all' template exists in the site area alongside a legacy /27.
-    /// Expected: cleanup throws ('No deletion was attempted'), removes nothing and keeps *W.
+    /// Expected: cleanup succeeds, only the legacy *3 is removed and *W is preserved.
     /// Invariant: a template broader than the consolidated /24 is not more specific, so it is never removed.
     /// </summary>
     [Fact]
@@ -148,18 +146,17 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         store.Templates.Add(Row("*W", "site-v2", "all", "10.16.0.0/16"));
 
         CapturingConnection capturing = store.Connect();
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Empty(capturing.RemovedIds);
+        Assert.Equal(["*3"], capturing.RemovedIds);
+        Assert.DoesNotContain(store.Templates, t => t[".id"] == "*3");
         Assert.Contains(store.Templates, t => t[".id"] == "*W");
     }
 
     /// <summary>
     /// Scenario: a Bridge-OTHER template for 192.0.2.0/24 is present in the site area next to a legacy /27.
-    /// Expected: cleanup throws ('No deletion was attempted'), removes nothing and keeps *U.
-    /// Invariant: unrelated templates are never touched, and cleanup fails closed when it meets one.
+    /// Expected: cleanup succeeds, only the legacy *3 is removed and *U is preserved.
+    /// Invariant: unrelated templates are never touched; they are preserved and do not block cleanup.
     /// </summary>
     [Fact]
     public async Task ProductionCleanup_UnrelatedTemplate_IsPreserved()
@@ -170,11 +167,10 @@ public sealed class OspfConsolidatedPrefixCleanupTests
         store.Templates.Add(Row("*U", "site-v2", "Bridge-OTHER", "192.0.2.0/24"));
 
         CapturingConnection capturing = store.Connect();
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Empty(capturing.RemovedIds);
+        Assert.Equal(["*3"], capturing.RemovedIds);
+        Assert.DoesNotContain(store.Templates, t => t[".id"] == "*3");
         Assert.Contains(store.Templates, t => t[".id"] == "*U");
     }
 
@@ -247,7 +243,8 @@ public sealed class OspfConsolidatedPrefixCleanupTests
     /// <summary>
     /// Scenario: IsStrictlyContainedBy is called with a /27 in a /24, an identical /24, a /16 against a /24, and an IPv6 /80 in a /64.
     /// Expected: true for the /27 in the /24 and the IPv6 /80 in /64; false for the equal prefix and for the broader /16.
-    /// Invariant: only strictly narrower prefixes count as contained; equal or broader ones do not.
+    /// Invariant: strict containment remains stricter than exact membership; exact equals are covered separately by
+    /// <see cref="OspfConsolidatedPrefixObsolescence.IsExactMemberOf"/> / <see cref="OspfConsolidatedPrefixObsolescence.IsCoveredByConsolidated"/>.
     /// </summary>
     [Fact]
     public void Containment_StrictlyMoreSpecific_Ipv4AndIpv6()
@@ -258,6 +255,14 @@ public sealed class OspfConsolidatedPrefixCleanupTests
                 IPNetwork.Parse("10.16.11.0/24")));
         Assert.False(
             OspfConsolidatedPrefixObsolescence.IsStrictlyContainedBy(
+                IPNetwork.Parse("10.16.11.0/24"),
+                IPNetwork.Parse("10.16.11.0/24")));
+        Assert.True(
+            OspfConsolidatedPrefixObsolescence.IsExactMemberOf(
+                IPNetwork.Parse("10.16.11.0/24"),
+                IPNetwork.Parse("10.16.11.0/24")));
+        Assert.True(
+            OspfConsolidatedPrefixObsolescence.IsCoveredByConsolidated(
                 IPNetwork.Parse("10.16.11.0/24"),
                 IPNetwork.Parse("10.16.11.0/24")));
         Assert.False(

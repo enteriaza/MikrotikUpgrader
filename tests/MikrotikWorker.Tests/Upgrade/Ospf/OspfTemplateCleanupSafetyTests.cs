@@ -22,8 +22,8 @@ public sealed class OspfTemplateCleanupSafetyTests
 {
     /// <summary>
     /// Scenario: one unrelated live template (<c>*U</c>) is added beside the planned templates: unexpected area, unrelated network, unrelated active or passive, or a disabled unrelated template.
-    /// Expected: <c>RemoveObsoleteTemplatesAsync</c> throws <c>InvalidOperationException</c> mentioning "No deletion was attempted" and <c>*U</c>; no ids are removed and all four templates remain.
-    /// Invariant: a single unrecognised template aborts cleanup before any deletion, whatever its flags.
+    /// Expected: cleanup succeeds; <c>*U</c> is retained as <c>PreservedUnmanaged</c>; no ids are removed and all four templates remain.
+    /// Invariant: non-conflicting unmanaged templates are preserved, not treated as cleanup blockers.
     /// </summary>
     [Theory]
     [InlineData("unexpected-area", "backbone-v2", "ether99", "10.255.255.0/30", true, false)]
@@ -31,7 +31,7 @@ public sealed class OspfTemplateCleanupSafetyTests
     [InlineData("unrelated-active", "site", "Bridge-VLAN-50", "198.51.100.0/30", false, false)]
     [InlineData("unrelated-passive", "site", "all", "203.0.113.0/24", true, false)]
     [InlineData("disabled-unrelated", "backbone-v2", "ether88", "10.254.0.0/30", true, true)]
-    public async Task UnknownTemplate_Aborts_WithZeroDeletes(
+    public async Task UnknownTemplate_PreservedUnmanaged_WithZeroDeletes(
         string _,
         string area,
         string interfaces,
@@ -52,10 +52,38 @@ public sealed class OspfTemplateCleanupSafetyTests
         store.Templates.Add(unknown);
 
         MutableTemplateConnection capturing = store.Connect();
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
+
+        Assert.Empty(capturing.RemovedIds);
+        Assert.Equal(4, store.Templates.Count);
+        Assert.Contains(store.Templates, t => t.GetValueOrDefault(".id") == "*U");
+    }
+
+    /// <summary>
+    /// Scenario: an active unmanaged template shares the planned backhaul interface.
+    /// Expected: <c>RemoveObsoleteTemplatesAsync</c> throws <c>InvalidOperationException</c> mentioning conflicting unmanaged and <c>*U</c>; no ids are removed.
+    /// Invariant: active adjacency conflicts still abort cleanup before any deletion.
+    /// </summary>
+    [Fact]
+    public async Task ConflictingActiveUnmanaged_Aborts_WithZeroDeletes()
+    {
+        OspfMigrationPlan plan = MinimalPlan();
+        MutableTemplateStore store = MutableTemplateStore.WithPlanned(plan);
+        store.Templates.Add(Row(
+            "*U",
+            "backbone-v2",
+            plan.ActiveBackhauls[0].Interface,
+            "10.255.255.0/30",
+            passive: false,
+            disabled: false,
+            type: "ptp"));
+
+        MutableTemplateConnection capturing = store.Connect();
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
 
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("conflicting", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("*U", ex.Message, StringComparison.Ordinal);
         Assert.Empty(capturing.RemovedIds);
         Assert.Equal(4, store.Templates.Count);
@@ -91,11 +119,11 @@ public sealed class OspfTemplateCleanupSafetyTests
 
     /// <summary>
     /// Scenario: the plan is classified against the three planned rows plus legacy rows; first with an unrelated <c>*U1</c> on ether99, then with two legacy 10.16.11.0/27 rows (one enabled, one disabled).
-    /// Expected: the first run throws <c>InvalidOperationException</c> naming <c>*U1</c> and "No deletion was attempted"; the second reports two known legacy rows, nothing unknown, and one backhaul, loopback and site matcher.
-    /// Invariant: the classifier separates removable legacy rows from unknown ones, and any unknown aborts the whole run.
+    /// Expected: the first run preserves <c>*U1</c> as <c>PreservedUnmanaged</c> with no unknowns; the second reports two known legacy rows, nothing unknown, and one backhaul, loopback and site matcher.
+    /// Invariant: the classifier separates removable legacy rows from preserved unmanaged ones, and only conflicting unknowns abort.
     /// </summary>
     [Fact]
-    public void Classifier_IdentifiesUnknown_AndKnownLegacy()
+    public void Classifier_IdentifiesPreservedUnmanaged_AndKnownLegacy()
     {
         OspfMigrationPlan plan = MinimalPlan();
         List<OspfTemplateInventoryRow> rows =
@@ -107,10 +135,10 @@ public sealed class OspfTemplateCleanupSafetyTests
             InventoryFrom(Row("*U1", "backbone-v2", "ether99", "10.255.0.0/30", passive: false, disabled: false, type: "ptp")),
         ];
 
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, rows));
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("*U1", ex.Message, StringComparison.Ordinal);
+        OspfTemplateClassificationReport withUnmanaged = OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, rows);
+        Assert.Equal("*U1", Assert.Single(withUnmanaged.PreservedUnmanaged).Row.Id);
+        Assert.Empty(withUnmanaged.Unknown);
+        Assert.Single(withUnmanaged.KnownLegacy);
 
         List<OspfTemplateInventoryRow> legacyOnly =
         [
@@ -123,6 +151,7 @@ public sealed class OspfTemplateCleanupSafetyTests
         OspfTemplateClassificationReport report = OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, legacyOnly);
         Assert.Equal(2, report.KnownLegacy.Count);
         Assert.Empty(report.Unknown);
+        Assert.Empty(report.PreservedUnmanaged);
         Assert.Single(report.Backhauls);
         Assert.Single(report.Loopbacks);
         Assert.Single(report.SiteMatchers);
@@ -131,25 +160,24 @@ public sealed class OspfTemplateCleanupSafetyTests
 
     /// <summary>
     /// Scenario: the plan has no legacy provenance, and the live inventory has an extra 192.0.2.0/24 template (<c>*OP</c>) in the site area.
-    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "No deletion was attempted", <c>*OP</c> and "consolidated-prefix replacement".
-    /// Invariant: without provenance, only prefixes inside the consolidated prefix can be treated as removable.
+    /// Expected: classification preserves <c>*OP</c> as <c>PreservedUnmanaged</c> with no unknowns.
+    /// Invariant: without provenance, prefixes outside the consolidated prefix are retained when they do not conflict.
     /// </summary>
     [Fact]
-    public void Classifier_UnrelatedPrefixOutsideConsolidated_IsUnknown()
+    public void Classifier_UnrelatedPrefixOutsideConsolidated_IsPreservedUnmanaged()
     {
         OspfMigrationPlan plan = MinimalPlan(includeLegacyProvenance: false);
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(
-                plan,
-                [
-                    InventoryFrom(PlannedBackhaul(plan)),
-                    InventoryFrom(PlannedLoopback(plan)),
-                    InventoryFrom(PlannedSite(plan)),
-                    InventoryFrom(Row("*OP", "site", "VLAN-200", "192.0.2.0/24", passive: true, disabled: false)),
-                ]));
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("*OP", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("consolidated-prefix replacement", ex.Message, StringComparison.OrdinalIgnoreCase);
+        OspfTemplateClassificationReport report = OspfTemplateCleanupClassifier.ClassifyOrThrow(
+            plan,
+            [
+                InventoryFrom(PlannedBackhaul(plan)),
+                InventoryFrom(PlannedLoopback(plan)),
+                InventoryFrom(PlannedSite(plan)),
+                InventoryFrom(Row("*OP", "site", "VLAN-200", "192.0.2.0/24", passive: true, disabled: false)),
+            ]);
+        Assert.Equal("*OP", Assert.Single(report.PreservedUnmanaged).Row.Id);
+        Assert.Empty(report.Unknown);
+        Assert.Empty(report.KnownLegacy);
     }
 
     /// <summary>
@@ -291,8 +319,8 @@ public sealed class OspfTemplateCleanupSafetyTests
 
     /// <summary>
     /// Scenario: after the first classification print, the legacy <c>*L1</c> has its network changed to 198.51.100.0/24 before the pre-delete refresh.
-    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted"; no ids are removed and <c>*L1</c> remains.
-    /// Invariant: a candidate that changes between classification and delete is re-evaluated, and an unrecognised result aborts instead of deleting.
+    /// Expected: cleanup aborts without deleting because the mutated row is no longer known-legacy and final inventory no longer matches the initial preserved set.
+    /// Invariant: a candidate that changes between classification and delete is re-evaluated; deletes never use a stale classification.
     /// </summary>
     [Fact]
     public async Task InventoryMutationBetweenRefresh_AbortsWithoutDeletingChangedCandidate()
@@ -310,7 +338,7 @@ public sealed class OspfTemplateCleanupSafetyTests
                 Dictionary<string, string>? legacy = store.Templates.FirstOrDefault(t => t[".id"] == "*L1");
                 if (legacy is not null)
                 {
-                    legacy["networks"] = "198.51.100.0/24"; // no longer covered → Unknown / not legacy
+                    legacy["networks"] = "198.51.100.0/24"; // no longer covered → PreservedUnmanaged / not legacy
                 }
             }
         };
@@ -318,7 +346,11 @@ public sealed class OspfTemplateCleanupSafetyTests
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
+        Assert.True(
+            ex.Message.Contains("No deletion was attempted", StringComparison.Ordinal)
+            || ex.Message.Contains("final inventory invalid", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("fingerprint", StringComparison.OrdinalIgnoreCase),
+            ex.Message);
         Assert.Empty(capturing.RemovedIds);
         Assert.Contains(store.Templates, t => t[".id"] == "*L1");
     }
@@ -488,21 +520,19 @@ public sealed class OspfTemplateCleanupSafetyTests
 
     /// <summary>
     /// Scenario: the plan has no legacy provenance and the live site area holds an operator-managed 192.0.2.0/24 template (<c>*OP</c>).
-    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted"; no ids are removed and <c>*OP</c> remains.
-    /// Invariant: operator-managed templates outside the consolidated prefix are never deleted.
+    /// Expected: cleanup succeeds with zero deletes and <c>*OP</c> remains as preserved unmanaged.
+    /// Invariant: operator-managed unrelated passive templates are preserved, not treated as blockers.
     /// </summary>
     [Fact]
-    public async Task OperatorManagedUnrelatedPrefix_AbortsCleanup()
+    public async Task OperatorManagedUnrelatedPrefix_IsPreservedWithoutDeletion()
     {
         OspfMigrationPlan plan = MinimalPlan(includeLegacyProvenance: false);
         MutableTemplateStore store = MutableTemplateStore.WithPlanned(plan);
         store.Templates.Add(Row("*OP", "site", "VLAN-200", "192.0.2.0/24", passive: true, disabled: false));
         MutableTemplateConnection capturing = store.Connect();
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Empty(capturing.RemovedIds);
         Assert.Contains(store.Templates, t => t[".id"] == "*OP");
     }
@@ -1051,8 +1081,14 @@ public sealed class OspfTemplateCleanupSafetyTests
         /// <summary>
         /// No-op: the backbone guard is stubbed so cleanup behaviour can be tested in isolation.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) =>
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) =>
             Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) =>
+            real.EnsureOspfInstanceNameAsync(connection, currentName, targetName, cancellationToken);
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) =>
+            real.TryRemoveUnusedRoutingIdAsync(connection, routingIdName, cancellationToken);
+
 
         /// <summary>
         /// No-op: routing-filter removal is outside this scenario, so the fake completes without

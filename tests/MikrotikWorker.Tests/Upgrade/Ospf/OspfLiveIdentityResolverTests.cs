@@ -70,11 +70,11 @@ public sealed class OspfLiveIdentityResolverTests
 
     /// <summary>
     /// Scenario: the live <c>default-v2</c> instance has no router-id.
-    /// Expected: resolution fails with an error containing "no router-id".
-    /// Invariant: a live instance cannot be identified without a router-id.
+    /// Expected: resolution succeeds using the Loopback-derived target RID.
+    /// Invariant: missing live RID is recoverable when Loopback identity is unambiguous.
     /// </summary>
     [Fact]
-    public void Resolve_Fails_WhenLiveRouterIdMissing()
+    public void Resolve_Succeeds_WhenLiveRouterIdMissing_UsesLoopbackTarget()
     {
         OspfV7Inventory live = LiveDefaultV2Inventory(routerId: null);
         OspfLiveIdentityResolutionResult result = OspfLiveIdentityResolver.Resolve(
@@ -82,27 +82,27 @@ public sealed class OspfLiveIdentityResolverTests
             live,
             OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
 
-        Assert.False(result.Succeeded);
-        Assert.Contains(result.Errors, e => e.Contains("no router-id", StringComparison.OrdinalIgnoreCase));
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.Equal("10.16.0.11", result.Binding!.DerivedLoopbackRouterId);
     }
 
     /// <summary>
     /// Scenario: the live instance router-id is 198.18.0.1 while the Loopback address is 10.16.0.11.
-    /// Expected: resolution fails with an error containing "conflicts with", "does not match Loopback" or "no unique router-id match".
-    /// Invariant: a live router-id that contradicts the Loopback is never accepted.
+    /// Expected: resolution succeeds and keeps the Loopback-derived target RID for later normalisation.
+    /// Invariant: a legacy live router-id is a migration input, not a pre-mutation blocker.
     /// </summary>
     [Fact]
-    public void Resolve_Fails_WhenLiveRouterIdDiffersFromLoopback()
+    public void Resolve_Succeeds_WhenLiveRouterIdDiffersFromLoopback_LegacyRidIsNormalisedLater()
     {
         OspfLiveIdentityResolutionResult result = OspfLiveIdentityResolver.Resolve(
             Ros6LogicalPlan(),
             LiveDefaultV2Inventory(routerId: "198.18.0.1"),
             OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
 
-        Assert.False(result.Succeeded);
-        Assert.Contains(result.Errors, e => e.Contains("conflicts with", StringComparison.OrdinalIgnoreCase)
-            || e.Contains("does not match Loopback", StringComparison.OrdinalIgnoreCase)
-            || e.Contains("no unique router-id match", StringComparison.OrdinalIgnoreCase));
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.Equal("default-v2", result.Binding!.LiveInstanceName);
+        Assert.Equal("198.18.0.1", result.Binding.LiveRouterId);
+        Assert.Equal("10.16.0.11", result.Binding.DerivedLoopbackRouterId);
     }
 
     /// <summary>
@@ -209,12 +209,13 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfLiveIdentityResolutionResult result = OspfLiveIdentityResolver.Resolve(
             Ros6LogicalPlan(),
-            new OspfV7Inventory { Instances = [], Areas = [] },
+            new OspfV7Inventory { 
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances = [], Areas = [] },
             OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
 
         Assert.False(result.Succeeded);
-        Assert.Contains(result.Errors, e => e.Contains("default-v2", StringComparison.Ordinal)
-            && e.Contains("missing", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, e => e.Contains("No live OSPFv2 instance", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -227,7 +228,7 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "other-v2", RouterId = "1.1.1.1", Version = "2" },
                 new OspfInstanceRow { Id = "*2", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
@@ -254,7 +255,7 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
                 new OspfInstanceRow { Id = "*2", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
@@ -272,19 +273,19 @@ public sealed class OspfLiveIdentityResolverTests
     }
 
     /// <summary>
-    /// Scenario: <c>default-v2</c> and <c>other-v2</c> both carry router-id 10.16.0.11.
+    /// Scenario: <c>default-v2</c> carries the target router-id 10.16.0.11 while <c>other-v2</c> carries a different router-id (10.16.0.12).
     /// Expected: resolution succeeds and binds <c>default-v2</c>.
-    /// Invariant: an exact name match wins over other instances with the same router-id.
+    /// Invariant: an exact name match wins over other instances; only another instance holding the target RID is a collision.
     /// </summary>
     [Fact]
     public void Resolve_IgnoresOtherInstances_WhenExactDefaultV2Matches()
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
-                new OspfInstanceRow { Id = "*2", Name = "other-v2", RouterId = "10.16.0.11", Version = "2" },
+                new OspfInstanceRow { Id = "*2", Name = "other-v2", RouterId = "10.16.0.12", Version = "2" },
             ],
             Areas = TommyAreas("default-v2"),
         };
@@ -299,9 +300,9 @@ public sealed class OspfLiveIdentityResolverTests
     }
 
     /// <summary>
-    /// Scenario: <c>default-v2</c> has router-id 198.18.0.1 (conflicting) while <c>other-v2</c> has the plan's router-id 10.16.0.11.
-    /// Expected: resolution fails with an error containing "not falling back" or "conflicts with".
-    /// Invariant: a conflicting exact-name instance is never replaced by a different instance.
+    /// Scenario: <c>default-v2</c> has router-id 198.18.0.1 while <c>other-v2</c> already holds the target Loopback RID.
+    /// Expected: resolution fails with an identity-collision error (does not fall back to <c>other-v2</c>).
+    /// Invariant: exact fleet name is selected, but another instance owning the target RID is a hard stop.
     /// </summary>
     [Fact]
     public void Resolve_Fails_ExactNameWithConflictingRouterId_DoesNotFallBack()
@@ -309,7 +310,7 @@ public sealed class OspfLiveIdentityResolverTests
         OspfMigrationPlan plan = ClonePlan(Ros6LogicalPlan(), instanceName: "default-v2", routerId: "10.16.0.11");
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "198.18.0.1", Version = "2" },
                 new OspfInstanceRow { Id = "*2", Name = "other-v2", RouterId = "10.16.0.11", Version = "2" },
@@ -323,21 +324,21 @@ public sealed class OspfLiveIdentityResolverTests
             OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
 
         Assert.False(result.Succeeded);
-        Assert.Contains(result.Errors, e => e.Contains("not falling back", StringComparison.OrdinalIgnoreCase)
-            || e.Contains("conflicts with", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, e => e.Contains("identity collision", StringComparison.OrdinalIgnoreCase)
+            || e.Contains("already configured on another OSPFv2 instance", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
     /// Scenario: the only live instance, <c>default-v2</c>, has no router-id.
-    /// Expected: resolution fails with an error containing "no router-id".
-    /// Invariant: a sole instance is not accepted without router-id validation.
+    /// Expected: resolution succeeds; migration will write the Loopback-derived literal RID.
+    /// Invariant: missing live RID is recoverable, not a pre-mutation blocker when Loopback identity is clear.
     /// </summary>
     [Fact]
-    public void Resolve_Fails_WhenSoleInstanceLacksRouterId_NeverAcceptsWithoutRidValidation()
+    public void Resolve_Succeeds_WhenSoleInstanceLacksRouterId_NormalisesLater()
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = null, Version = "2" },
             ],
@@ -349,21 +350,22 @@ public sealed class OspfLiveIdentityResolverTests
             live,
             OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
 
-        Assert.False(result.Succeeded);
-        Assert.Contains(result.Errors, e => e.Contains("no router-id", StringComparison.OrdinalIgnoreCase));
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.Equal("10.16.0.11", result.Binding!.DerivedLoopbackRouterId);
+        Assert.Null(result.Binding.LiveRouterId);
     }
 
     /// <summary>
     /// Scenario: live areas are named "backbone" and "site-renamed-v2", though their area-ids match the plan.
-    /// Expected: resolution fails with errors naming <c>backbone-v2</c> and <c>Tommy-v2</c>.
-    /// Invariant: areas are matched by the expected v2 name; a matching area-id alone is not enough.
+    /// Expected: resolution succeeds via unique area-id fallback under the live instance.
+    /// Invariant: legacy area names are acceptable when area-ids uniquely identify backbone and site.
     /// </summary>
     [Fact]
-    public void Resolve_Fails_WhenExpectedAreaNamesMissing_DoesNotFallBackToAreaId()
+    public void Resolve_Succeeds_WhenExpectedAreaNamesMissing_FallsBackToUniqueAreaId()
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
             ],
@@ -394,9 +396,9 @@ public sealed class OspfLiveIdentityResolverTests
             live,
             OspfTestBaselines.LoopbackSlash32("10.16.0.11"));
 
-        Assert.False(result.Succeeded);
-        Assert.Contains(result.Errors, e => e.Contains("backbone-v2", StringComparison.Ordinal));
-        Assert.Contains(result.Errors, e => e.Contains("Tommy-v2", StringComparison.Ordinal));
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.Equal("backbone", result.Binding!.Areas.Values.Single(a => a.AreaId == "0.0.0.0").LiveName);
+        Assert.Equal("site-renamed-v2", result.Binding.Areas.Values.Single(a => a.AreaId == "10.16.0.11").LiveName);
     }
 
     /// <summary>
@@ -409,7 +411,7 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
             ],
@@ -446,7 +448,7 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
             ],
@@ -483,7 +485,7 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
             ],
@@ -528,7 +530,7 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
                 new OspfInstanceRow { Id = "*2", Name = "other-v2", RouterId = "1.2.3.4", Version = "2" },
@@ -576,7 +578,7 @@ public sealed class OspfLiveIdentityResolverTests
     {
         OspfV7Inventory live = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.11", Version = "2" },
             ],
@@ -670,7 +672,9 @@ public sealed class OspfLiveIdentityResolverTests
     {
         TrackingMutationOps ops = new()
         {
-            Inventory = new OspfV7Inventory { Instances = [], Areas = [] },
+            Inventory = new OspfV7Inventory { 
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances = [], Areas = [] },
             Addresses = OspfTestBaselines.LoopbackSlash32("10.16.0.11"),
         };
 
@@ -688,13 +692,12 @@ public sealed class OspfLiveIdentityResolverTests
     }
 
     /// <summary>
-    /// Scenario: the reconciler applies a plan where identity resolution fails: Loopback missing, live router-id mismatching the Loopback, or areas with empty instance ownership.
+    /// Scenario: the reconciler applies a plan where identity resolution fails: Loopback missing, or areas with empty instance ownership.
     /// Expected: <c>ApplyAsync</c> throws <c>InvalidOperationException</c>, and the ops fake recorded no mutations.
-    /// Invariant: identity failures abort before any router change.
+    /// Invariant: identity failures abort before any router change. Legacy live RID mismatch is no longer an identity failure.
     /// </summary>
     [Theory]
     [InlineData("loopback-missing")]
-    [InlineData("live-rid-mismatch")]
     [InlineData("empty-area-instance")]
     public async Task Apply_FailsClosed_BeforeAnyMutation_ForIdentityFailures(string mode)
     {
@@ -705,16 +708,13 @@ public sealed class OspfLiveIdentityResolverTests
                 Inventory = LiveDefaultV2Inventory("10.16.0.11"),
                 Addresses = [],
             },
-            "live-rid-mismatch" => new()
-            {
-                Inventory = LiveDefaultV2Inventory("198.18.0.1"),
-                Addresses = OspfTestBaselines.LoopbackSlash32("10.16.0.11"),
-            },
             "empty-area-instance" => new()
             {
                 Inventory = new OspfV7Inventory
                 {
-                    Instances =
+                    
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances =
                     [
                         new OspfInstanceRow
                         {
@@ -802,7 +802,7 @@ public sealed class OspfLiveIdentityResolverTests
         OspfMigrationPlan plan = Ros6LogicalPlan();
         OspfV7Inventory inventory = new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow
                 {
@@ -887,7 +887,7 @@ public sealed class OspfLiveIdentityResolverTests
 
     /// <summary>
     /// Scenario: the reconciler applies the same plan twice, and the ops fake changes the live instance id from <c>*FIRST</c> to <c>*SECOND</c> between calls.
-    /// Expected: the ids observed by the ops are <c>*FIRST</c> and then <c>*SECOND</c>.
+    /// Expected: each apply re-reads inventory at resolve and again after OSPFv3 residual verification; ids advance per apply.
     /// Invariant: each apply re-reads inventory, so stale RouterOS ids are not reused across calls.
     /// </summary>
     [Fact]
@@ -903,7 +903,8 @@ public sealed class OspfLiveIdentityResolverTests
                 managementHost: "198.18.240.11",
                 CancellationToken.None);
 
-        Assert.Equal(["*FIRST"], ops.ObservedInstanceIds);
+        // Resolve inventory + post-OSPFv3 residual inventory within a single apply.
+        Assert.Equal(["*FIRST", "*FIRST"], ops.ObservedInstanceIds);
 
         ops.NextInstanceId = "*SECOND";
         await new OspfV7Reconciler(ops, NullLogger<OspfV7Reconciler>.Instance)
@@ -913,16 +914,16 @@ public sealed class OspfLiveIdentityResolverTests
                 managementHost: "198.18.240.11",
                 CancellationToken.None);
 
-        Assert.Equal(["*FIRST", "*SECOND"], ops.ObservedInstanceIds);
+        Assert.Equal(["*FIRST", "*FIRST", "*SECOND", "*SECOND"], ops.ObservedInstanceIds);
     }
 
     /// <summary>
-    /// Scenario: a ROS6 capture whose instance router-id is 1.2.3.4 while the <c>lo</c> address is 10.255.0.1/32.
-    /// Expected: the plan fails validation with an error containing "does not match Loopback /32".
-    /// Invariant: the planner refuses a router-id that disagrees with the Loopback /32.
+    /// Scenario: a ROS6 capture whose instance router-id is 1.2.3.4 while the <c>lo</c> address is 10.16.0.1/32.
+    /// Expected: the plan succeeds with target router-id 10.16.0.1 and a normalisation note about the legacy RID.
+    /// Invariant: a legacy instance router-id is normalised to the Loopback literal, not treated as a plan blocker.
     /// </summary>
     [Fact]
-    public void Planner_Fails_WhenInstanceRouterIdDiffersFromLoopbackSlash32()
+    public void Planner_Succeeds_WhenInstanceRouterIdDiffersFromLoopbackSlash32_RecordsNormalisationNote()
     {
         OspfCaptureSnapshot snap = new()
         {
@@ -937,28 +938,30 @@ public sealed class OspfLiveIdentityResolverTests
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                new OspfAreaRow { Name = "site", AreaId = "10.255.0.1", Type = "stub" },
+                new OspfAreaRow { Name = "site", AreaId = "10.16.0.1", Type = "stub" },
             ],
             Networks =
             [
-                new OspfNetworkRow { Area = "backbone", Network = "10.255.0.1/32" },
+                new OspfNetworkRow { Area = "backbone", Network = "10.16.0.1/32" },
                 new OspfNetworkRow { Area = "backbone", Network = "10.0.0.0/30" },
                 new OspfNetworkRow { Area = "site", Network = "10.10.0.0/16" },
             ],
             Interfaces = [new OspfInterfaceRow { Interface = "ether1", NetworkType = "ptp", Cost = "10" }],
             IpAddresses =
             [
-                new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
+                new OspfIpAddressRow { Address = "10.16.0.1/32", Network = "10.16.0.1", Interface = "lo" },
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
                 new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
             ],
         };
 
         OspfPlanValidationResult result = OspfMigrationPlanner.Build(snap);
-        Assert.False(result.Succeeded);
+        Assert.True(result.Succeeded, string.Join("; ", result.Plan.ValidationErrors));
+        Assert.Equal("10.16.0.1", result.Plan.RouterId);
         Assert.Contains(
-            result.Plan.ValidationErrors,
-            e => e.Contains("does not match Loopback /32", StringComparison.Ordinal));
+            result.Plan.NormalisationNotes,
+            n => n.Contains("1.2.3.4", StringComparison.Ordinal)
+                 && n.Contains("normalise", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -967,7 +970,7 @@ public sealed class OspfLiveIdentityResolverTests
     private static OspfV7Inventory LiveDefaultV2Inventory(string? routerId) =>
         new()
         {
-            Instances =
+            CaptureStatus = OspfInventoryCaptureStatus.Complete, Instances =
             [
                 new OspfInstanceRow
                 {
@@ -1293,8 +1296,12 @@ public sealed class OspfLiveIdentityResolverTests
         /// No-op backbone guard: this fake never reports a dropped adjacency or a changed
         /// management route.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) =>
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) =>
             Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
 
         /// <summary>
         /// Reports zero routing filters so the "routing filters remain" read-back check cannot fail
@@ -1350,7 +1357,9 @@ public sealed class OspfLiveIdentityResolverTests
             ObservedInstanceIds.Add(NextInstanceId);
             return Task.FromResult(new OspfV7Inventory
             {
-                Instances =
+                
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances =
                 [
                     new OspfInstanceRow
                     {
@@ -1440,7 +1449,11 @@ public sealed class OspfLiveIdentityResolverTests
         /// No-op backbone guard: this fake never reports a dropped adjacency or a changed
         /// management route.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) => Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
 
         /// <summary>
         /// Reports zero routing filters so the "routing filters remain" read-back check cannot fail

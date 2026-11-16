@@ -46,12 +46,16 @@ internal static class OspfMigrationPlanner
         List<string> errors = [];
         List<string> notes = [];
 
-        if (snapshot.Instances.Count == 0)
+        // Eligible inventory boundary: disabled/unknown-admin-state objects remain in the raw
+        // snapshot for diagnostics but never enter OSPF migration decisions.
+        OspfCaptureSnapshot eligible = ToEligibleDecisionSnapshot(snapshot, notes);
+
+        if (eligible.Instances.Count == 0)
         {
             errors.Add("OSPF instance is missing; empty OSPF configuration is a serious configuration error.");
         }
 
-        OspfAreaRow? backbone = snapshot.Areas.FirstOrDefault(static a =>
+        OspfAreaRow? backbone = eligible.Areas.FirstOrDefault(static a =>
             string.Equals(NormalizeAreaId(a.AreaId), BackboneAreaId, StringComparison.Ordinal));
         if (backbone is null)
         {
@@ -63,11 +67,11 @@ internal static class OspfMigrationPlanner
             errors.Add("Router /system identity name is missing or empty.");
         }
 
-        OspfInstanceRow? instance = SelectInstance(snapshot, backbone, errors);
+        OspfInstanceRow? instance = SelectInstance(eligible, backbone, errors);
         string routerId = string.Empty;
         // Corroborate multi-address Loopback selection with the OSPF instance router-id when present.
         OspfLoopbackRouterIdResult loopbackRid = OspfLoopbackRouterId.Derive(
-            snapshot.IpAddresses,
+            eligible.IpAddresses,
             instance?.RouterId);
         if (!loopbackRid.Succeeded || string.IsNullOrWhiteSpace(loopbackRid.RouterId))
         {
@@ -81,15 +85,19 @@ internal static class OspfMigrationPlanner
         {
             routerId = loopbackRid.RouterId!;
             string? instanceRid = instance?.RouterId?.Trim();
+            string? resolvedLegacyRid = ResolveLegacyRouterIdValue(instanceRid, snapshot.RoutingIds);
             if (string.IsNullOrWhiteSpace(instanceRid))
             {
-                errors.Add("OSPF instance router-id is missing or empty.");
+                notes.Add(
+                    "OSPF instance router-id is missing or empty; migration will apply Loopback-derived "
+                    + $"literal router-id '{routerId}'.");
             }
-            else if (!OspfLoopbackRouterId.EqualsRouterId(instanceRid, routerId))
+            else if (!OspfLoopbackRouterId.EqualsRouterId(resolvedLegacyRid ?? instanceRid, routerId))
             {
-                errors.Add(
-                    $"OSPF instance router-id '{instanceRid}' does not match Loopback /32 address "
-                    + $"'{loopbackRid.LoopbackCidr}' on '{loopbackRid.LoopbackInterfaceName}'.");
+                notes.Add(
+                    $"OSPF instance router-id '{instanceRid}' differs from Loopback /32 address "
+                    + $"'{loopbackRid.LoopbackCidr}' on '{loopbackRid.LoopbackInterfaceName}'; "
+                    + $"migration will normalise to literal '{routerId}'.");
             }
 
             if (loopbackRid.IgnoredOutsideRangeAddresses.Count > 0)
@@ -106,24 +114,25 @@ internal static class OspfMigrationPlanner
             && !string.Equals(instance.Name, instanceName, StringComparison.OrdinalIgnoreCase))
         {
             notes.Add(
-                $"Source OSPF instance name '{instance.Name}' differs from deterministic "
-                + $"'{instanceName}' for {snapshot.SourceKind}; retaining deterministic logical name.");
+                $"Source OSPF instance name '{instance.Name}' differs from fleet target "
+                + $"'{OspfFleetNaming.Ros7InstanceName}'; migration will rename the OSPFv2 instance to "
+                + $"'{OspfFleetNaming.Ros7InstanceName}'.");
         }
 
-        if (snapshot.SourceKind == OspfCaptureSourceKind.RouterOsV6 && snapshot.Networks.Count == 0
-            && snapshot.InterfaceTemplates.Count == 0)
+        if (eligible.SourceKind == OspfCaptureSourceKind.RouterOsV6 && eligible.Networks.Count == 0
+            && eligible.InterfaceTemplates.Count == 0)
         {
             errors.Add("No OSPF network statements (or v7 templates) were found; configuration is incomplete.");
         }
 
-        if (snapshot.SourceKind == OspfCaptureSourceKind.RouterOsV7 && snapshot.InterfaceTemplates.Count == 0
-            && snapshot.Networks.Count == 0)
+        if (eligible.SourceKind == OspfCaptureSourceKind.RouterOsV7 && eligible.InterfaceTemplates.Count == 0
+            && eligible.Networks.Count == 0)
         {
             errors.Add("No OSPF interface-templates were found on RouterOS 7; cannot establish topology.");
         }
 
         List<OspfPlanArea> areas = [];
-        foreach (OspfAreaRow area in snapshot.Areas.Where(a => BelongsToInstance(a, instance)))
+        foreach (OspfAreaRow area in eligible.Areas.Where(a => BelongsToInstance(a, instance)))
         {
             string areaId = NormalizeAreaId(area.AreaId);
             bool isBb = areaId == BackboneAreaId;
@@ -214,7 +223,7 @@ internal static class OspfMigrationPlanner
             .ToDictionary(static g => g.Key, static g => g.First().Name, StringComparer.Ordinal);
 
         List<OspfPlanAreaRange> ranges = [];
-        foreach (OspfAreaRangeRow range in snapshot.AreaRanges)
+        foreach (OspfAreaRangeRow range in eligible.AreaRanges)
         {
             string? areaName = ResolveAreaName(range.Area, areas, areaNameById);
             if (areaName is null)
@@ -242,10 +251,10 @@ internal static class OspfMigrationPlanner
         List<OspfPlanLoopbackTemplate> loopbacks = [];
         List<OspfPlanSiteNetworkTemplate> sites = [];
 
-        if (snapshot.SourceKind == OspfCaptureSourceKind.RouterOsV6)
+        if (eligible.SourceKind == OspfCaptureSourceKind.RouterOsV6)
         {
             ClassifyFromV6(
-                snapshot,
+                eligible,
                 areas,
                 backboneName,
                 areaNameById,
@@ -258,7 +267,7 @@ internal static class OspfMigrationPlanner
         else
         {
             ClassifyFromV7(
-                snapshot,
+                eligible,
                 areas,
                 backboneName,
                 areaNameById,
@@ -271,7 +280,20 @@ internal static class OspfMigrationPlanner
 
         if (backhauls.Count == 0)
         {
-            errors.Add("No valid active backbone PTP backhaul could be classified.");
+            TryClassifyBackhaulFromNeighbourEvidence(
+                eligible,
+                areas,
+                backboneName,
+                backhauls,
+                errors,
+                notes);
+        }
+
+        if (backhauls.Count == 0)
+        {
+            errors.Add(
+                "No valid active backbone backhaul could be classified from PTP templates/interfaces "
+                + "or Full neighbour evidence.");
         }
 
         if (loopbacks.Count == 0)
@@ -281,38 +303,49 @@ internal static class OspfMigrationPlanner
 
         // Active template must not use a network that contains another local interface's address
         // on a different interface (would risk unintended activation under OR matching).
-        errors.AddRange(ValidateBackhaulTemplateIsolation(backhauls, snapshot.IpAddresses));
+        errors.AddRange(ValidateBackhaulTemplateIsolation(backhauls, eligible.IpAddresses));
 
-        // Derive management /24 and attach the MGMT area-range BEFORE consolidation so FoldPrefix
-        // can fold subdivided management matchers into the planned summary during provenance capture.
+        // Derive management /24 set and attach MGMT area-ranges BEFORE consolidation so FoldPrefix
+        // can fold subdivided management matchers into the planned summaries during provenance capture.
         string? derivedMgmt = null;
+        IReadOnlyList<string> derivedMgmtSet = [];
         if (loopbackRid.Succeeded && backhauls.Count > 0)
         {
             IReadOnlyList<string> mgmtHints = OspfSiteManagementSummary.CollectCorroboratingManagementCidrs(
                 ranges,
-                snapshot.Networks);
+                eligible.Networks);
             OspfSiteManagementSummaryResult mgmt = OspfSiteManagementSummary.Derive(
-                snapshot.IpAddresses,
+                eligible.IpAddresses,
                 loopbackRid,
                 backhauls,
                 mgmtHints);
-            if (!mgmt.Succeeded || string.IsNullOrWhiteSpace(mgmt.ManagementCidr))
+            if (!mgmt.Succeeded
+                || string.IsNullOrWhiteSpace(mgmt.ManagementCidr)
+                || mgmt.ManagementCidrs.Count == 0)
             {
                 errors.AddRange(mgmt.Errors);
             }
             else
             {
                 derivedMgmt = mgmt.ManagementCidr;
+                derivedMgmtSet = mgmt.ManagementCidrs;
                 notes.Add(
-                    $"Derived site management /24 '{derivedMgmt}' from "
+                    $"Derived site management /24 set [{string.Join(", ", derivedMgmtSet)}] from "
                     + string.Join("; ", mgmt.ContributingAddresses));
-                ranges = EnsureManagementAreaRange(
+                notes.AddRange(
+                    mgmt.SelectionDiagnostics.Where(static d =>
+                        d.StartsWith("accepted additional management expansion", StringComparison.Ordinal)
+                        || d.StartsWith("selected existing management aggregate", StringComparison.Ordinal)));
+                ranges = EnsureManagementAreaRanges(
                     ranges,
                     areas,
-                    derivedMgmt,
+                    derivedMgmtSet,
                     notes,
                     errors);
-                sites = EnsureDerivedManagementSiteMatcher(sites, areas, derivedMgmt, notes);
+                foreach (string cidr in derivedMgmtSet)
+                {
+                    sites = EnsureDerivedManagementSiteMatcher(sites, areas, cidr, notes);
+                }
             }
         }
 
@@ -372,6 +405,7 @@ internal static class OspfMigrationPlanner
             ObservedInScopeLoopbackAddresses = loopbackRid.ObservedInScopeAddresses,
             IgnoredOutsideRangeLoopbackAddresses = loopbackRid.IgnoredOutsideRangeAddresses,
             DerivedManagementCidr = derivedMgmt,
+            DerivedManagementCidrs = derivedMgmtSet,
             Areas = areas,
             AreaRanges = ranges,
             ActiveBackhauls = backhauls,
@@ -384,7 +418,7 @@ internal static class OspfMigrationPlanner
         };
 
         // First-class backbone / role invariants before any mutation path accepts the plan.
-        errors.AddRange(OspfBackboneSafety.ValidatePlanInvariants(plan, snapshot.IpAddresses));
+        errors.AddRange(OspfBackboneSafety.ValidatePlanInvariants(plan, eligible.IpAddresses));
         plan = ClonePlan(plan, errors);
         plan.ContentHash = ComputeContentHash(plan);
 
@@ -588,7 +622,7 @@ internal static class OspfMigrationPlanner
         List<string> errors,
         List<string> notes)
     {
-        foreach (OspfInterfaceTemplateRow template in snapshot.InterfaceTemplates.Where(t => !t.Disabled))
+        foreach (OspfInterfaceTemplateRow template in snapshot.InterfaceTemplates.Where(OspfInventoryEligibility.IsEligible))
         {
             string? areaName = ResolveAreaName(template.Area, areas, areaNameById);
             if (areaName is null)
@@ -629,11 +663,20 @@ internal static class OspfMigrationPlanner
                 continue;
             }
 
-            if (isBackbone && !passive && ptp && !string.IsNullOrWhiteSpace(template.Interfaces)
+            // Active backbone template with interfaces + networks. Prefer PTP; also accept non-PTP
+            // when a Full neighbour on the same interface corroborates the adjacency (bridged /
+            // VLAN / wireless logical backhaul).
+            bool neighbourFullOnIface = !string.IsNullOrWhiteSpace(template.Interfaces)
+                && snapshot.Neighbours.Any(n =>
+                    string.Equals(n.State, "Full", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(n.Interface, template.Interfaces, StringComparison.OrdinalIgnoreCase));
+            if (isBackbone && !passive && (ptp || neighbourFullOnIface)
+                && !string.IsNullOrWhiteSpace(template.Interfaces)
                 && OspfIpPrefix.TryParse(template.Networks, out OspfIpPrefix net))
             {
                 OspfIpAddressRow? addr = snapshot.IpAddresses.FirstOrDefault(a =>
-                    string.Equals(a.Interface, template.Interfaces, StringComparison.Ordinal)
+                    OspfInventoryEligibility.IsEligible(a)
+                    && string.Equals(a.Interface, template.Interfaces, StringComparison.Ordinal)
                     && TryInterfaceSubnet(a, out OspfIpPrefix sub)
                     && (sub.Equals(net) || net.Contains(sub)));
                 if (addr is null || !TryInterfaceSubnet(addr, out OspfIpPrefix exactSubnet))
@@ -650,6 +693,13 @@ internal static class OspfMigrationPlanner
                         $"Narrowing backhaul networks from '{net.ToCidrString()}' to interface subnet '{exactSubnet.ToCidrString()}'.");
                 }
 
+                if (!ptp && neighbourFullOnIface)
+                {
+                    notes.Add(
+                        $"Classifying non-PTP active backbone template on '{template.Interfaces}' as backhaul "
+                        + "using Full neighbour corroboration; planned type normalised to ptp.");
+                }
+
                 backhauls.Add(new OspfPlanBackhaulTemplate
                 {
                     AreaName = backboneName,
@@ -660,6 +710,13 @@ internal static class OspfMigrationPlanner
                     Passive = false,
                     SourceCost = template.Cost,
                 });
+                if (!string.IsNullOrWhiteSpace(template.Cost)
+                    && template.Cost != FleetBackhaulCost.ToString(CultureInfo.InvariantCulture))
+                {
+                    notes.Add(
+                        $"Backhaul '{template.Interfaces}' source cost '{template.Cost}' normalised to {FleetBackhaulCost}.");
+                }
+
                 continue;
             }
 
@@ -726,7 +783,7 @@ internal static class OspfMigrationPlanner
                 continue;
             }
 
-            foreach (OspfIpAddressRow addr in addresses)
+            foreach (OspfIpAddressRow addr in addresses.Where(OspfInventoryEligibility.IsEligible))
             {
                 if (string.Equals(addr.Interface, bh.Interface, StringComparison.Ordinal))
                 {
@@ -750,6 +807,74 @@ internal static class OspfMigrationPlanner
     }
 
     /// <summary>
+    /// Builds a decision snapshot containing only demonstrably enabled objects.
+    /// OSPFv3 removal refs are retained from the raw snapshot so mandatory removal is unchanged.
+    /// </summary>
+    private static OspfCaptureSnapshot ToEligibleDecisionSnapshot(
+        OspfCaptureSnapshot raw,
+        List<string> notes)
+    {
+        IReadOnlyList<OspfIpAddressRow> addresses = OspfInventoryEligibility.Eligible(raw.IpAddresses);
+        IReadOnlyList<OspfInstanceRow> instances = OspfInventoryEligibility.Eligible(raw.Instances);
+        IReadOnlyList<OspfAreaRow> areas = OspfInventoryEligibility.Eligible(raw.Areas);
+        IReadOnlyList<OspfAreaRangeRow> ranges = OspfInventoryEligibility.Eligible(raw.AreaRanges);
+        IReadOnlyList<OspfNetworkRow> networks = OspfInventoryEligibility.Eligible(raw.Networks);
+        IReadOnlyList<OspfInterfaceRow> interfaces = OspfInventoryEligibility.Eligible(raw.Interfaces);
+        IReadOnlyList<OspfInterfaceTemplateRow> templates =
+            OspfInventoryEligibility.Eligible(raw.InterfaceTemplates);
+        IReadOnlyList<OspfRoutingFilterRow> filters =
+            OspfInventoryEligibility.Eligible(raw.RoutingFilters);
+
+        NoteExcludedDisabled(notes, "IP address", raw.IpAddresses.Count, addresses.Count);
+        NoteExcludedDisabled(notes, "OSPF instance", raw.Instances.Count, instances.Count);
+        NoteExcludedDisabled(notes, "OSPF area", raw.Areas.Count, areas.Count);
+        NoteExcludedDisabled(notes, "OSPF area-range", raw.AreaRanges.Count, ranges.Count);
+        NoteExcludedDisabled(notes, "OSPF network", raw.Networks.Count, networks.Count);
+        NoteExcludedDisabled(notes, "OSPF interface", raw.Interfaces.Count, interfaces.Count);
+        NoteExcludedDisabled(notes, "OSPF interface-template", raw.InterfaceTemplates.Count, templates.Count);
+        NoteExcludedDisabled(notes, "routing filter", raw.RoutingFilters.Count, filters.Count);
+
+        return new OspfCaptureSnapshot
+        {
+            ImportId = raw.ImportId,
+            JobId = raw.JobId,
+            RouterIp = raw.RouterIp,
+            Identity = raw.Identity,
+            RouterOsVersion = raw.RouterOsVersion,
+            Architecture = raw.Architecture,
+            SourceKind = raw.SourceKind,
+            Instances = instances,
+            Areas = areas,
+            AreaRanges = ranges,
+            Networks = networks,
+            Interfaces = interfaces,
+            InterfaceTemplates = templates,
+            IpAddresses = addresses,
+            RoutingFilters = filters,
+            RoutingIds = raw.RoutingIds,
+            Neighbours = raw.Neighbours,
+            // Keep raw OSPFv3 refs so mandatory removal still covers disabled OSPFv3 leftovers.
+            OspfV3Objects = raw.OspfV3Objects,
+        };
+    }
+
+    private static void NoteExcludedDisabled(
+        List<string> notes,
+        string kind,
+        int rawCount,
+        int eligibleCount)
+    {
+        int excluded = rawCount - eligibleCount;
+        if (excluded <= 0)
+        {
+            return;
+        }
+
+        notes.Add(
+            $"Excluded {excluded} disabled/unknown-admin-state {kind} object(s) from OSPF migration decisions.");
+    }
+
+    /// <summary>
     /// Selects the OSPFv2 instance that owns the backbone, recording an error when the choice is ambiguous.
     /// </summary>
     /// <param name="snapshot">Captured router state.</param>
@@ -761,20 +886,25 @@ internal static class OspfMigrationPlanner
         OspfAreaRow? backbone,
         List<string> errors)
     {
-        if (snapshot.Instances.Count == 0)
+        // OSPFv2 migration target only — OSPFv3 instances are mandatory removal targets, never the
+        // OSPFv2 plan source instance. Caller must pass eligible (enabled) inventory.
+        List<OspfInstanceRow> list = snapshot.Instances
+            .Where(static i => !string.Equals(i.Version, "3", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (list.Count == 0)
         {
+            if (snapshot.Instances.Any(static i =>
+                    string.Equals(i.Version, "3", StringComparison.OrdinalIgnoreCase)))
+            {
+                errors.Add(
+                    "No OSPFv2 instance is present; sole/remaining OSPF instance(s) are OSPFv3 "
+                    + "removal targets and cannot be selected as the OSPFv2 migration target.");
+            }
+
             return null;
         }
 
-        if (snapshot.Instances.Count == 1)
-        {
-            return snapshot.Instances[0];
-        }
-
-        // Prefer instance owning backbone; exclude version=3
-        IEnumerable<OspfInstanceRow> v2 = snapshot.Instances.Where(static i =>
-            !string.Equals(i.Version, "3", StringComparison.OrdinalIgnoreCase));
-        List<OspfInstanceRow> list = v2.ToList();
         if (list.Count == 1)
         {
             return list[0];
@@ -796,8 +926,8 @@ internal static class OspfMigrationPlanner
             return def;
         }
 
-        errors.Add("Multiple OSPF instances present; cannot select the owning instance unambiguously.");
-        return list.FirstOrDefault();
+        errors.Add("Multiple OSPFv2 instances present; cannot select the owning instance unambiguously.");
+        return null;
     }
 
     /// <summary>
@@ -814,6 +944,183 @@ internal static class OspfMigrationPlanner
         }
 
         return kind == OspfCaptureSourceKind.RouterOsV7 ? "default-v2" : "default";
+    }
+
+    /// <summary>
+    /// Resolves a legacy OSPF instance router-id value that may be a literal IPv4 address or a
+    /// <c>/routing/id</c> object name. Returns null when the value cannot be resolved to IPv4.
+    /// </summary>
+    internal static string? ResolveLegacyRouterIdValue(
+        string? routerIdValue,
+        IReadOnlyList<OspfRoutingIdRow> routingIds)
+    {
+        if (string.IsNullOrWhiteSpace(routerIdValue))
+        {
+            return null;
+        }
+
+        string trimmed = routerIdValue.Trim();
+        if (OspfLoopbackRouterId.IsDottedQuadIPv4(trimmed))
+        {
+            int slash = trimmed.IndexOf('/');
+            return slash < 0 ? trimmed : trimmed[..slash];
+        }
+
+        OspfRoutingIdRow? match = routingIds.FirstOrDefault(r =>
+            string.Equals(r.Name, trimmed, StringComparison.OrdinalIgnoreCase));
+        if (match is null || string.IsNullOrWhiteSpace(match.Address))
+        {
+            return null;
+        }
+
+        string address = match.Address.Trim();
+        if (!OspfLoopbackRouterId.IsDottedQuadIPv4(address))
+        {
+            return null;
+        }
+
+        int addrSlash = address.IndexOf('/');
+        return addrSlash < 0 ? address : address[..addrSlash];
+    }
+
+    /// <summary>
+    /// When PTP classification found no backhaul, attempt a single uniquely evidenced backbone
+    /// adjacency from Full neighbours correlated to a local interface address in the backbone area.
+    /// </summary>
+    private static void TryClassifyBackhaulFromNeighbourEvidence(
+        OspfCaptureSnapshot snapshot,
+        List<OspfPlanArea> areas,
+        string backboneName,
+        List<OspfPlanBackhaulTemplate> backhauls,
+        List<string> errors,
+        List<string> notes)
+    {
+        List<OspfNeighbourRow> full = snapshot.Neighbours
+            .Where(static n =>
+                string.Equals(n.State, "Full", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(n.Interface))
+            .ToList();
+        if (full.Count == 0)
+        {
+            return;
+        }
+
+        List<(string Interface, OspfIpPrefix Subnet, string? SourceCost)> candidates = [];
+        foreach (OspfNeighbourRow nbr in full)
+        {
+            string iface = nbr.Interface!.Trim();
+            // Prefer the OSPF interface/template cost when present; otherwise leave null.
+            string? sourceCost = snapshot.Interfaces
+                .Where(OspfInventoryEligibility.IsEligible)
+                .FirstOrDefault(i => string.Equals(i.Interface, iface, StringComparison.Ordinal))
+                ?.Cost
+                ?? snapshot.InterfaceTemplates
+                    .Where(OspfInventoryEligibility.IsEligible)
+                    .FirstOrDefault(t =>
+                        string.Equals(t.Interfaces, iface, StringComparison.Ordinal)
+                        && !t.Passive)
+                    ?.Cost;
+
+            List<OspfIpAddressRow> addrs = snapshot.IpAddresses
+                .Where(a =>
+                    OspfInventoryEligibility.IsEligible(a)
+                    && string.Equals(a.Interface, iface, StringComparison.Ordinal))
+                .ToList();
+            foreach (OspfIpAddressRow addr in addrs)
+            {
+                if (!TryInterfaceSubnet(addr, out OspfIpPrefix subnet))
+                {
+                    continue;
+                }
+
+                // Transport-style prefixes only (/30 preferred; reject host /32 loopbacks).
+                if (subnet.PrefixLength is < 30 or > 30)
+                {
+                    continue;
+                }
+
+                if (candidates.Any(c =>
+                        string.Equals(c.Interface, iface, StringComparison.Ordinal)
+                        && c.Subnet.Equals(subnet)))
+                {
+                    continue;
+                }
+
+                candidates.Add((iface, subnet, sourceCost));
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        if (candidates.Count > 1)
+        {
+            errors.Add(
+                "Multiple Full-neighbour backbone adjacency candidates were observed ("
+                + string.Join(
+                    ", ",
+                    candidates.Select(static c => $"{c.Interface}:{c.Subnet.ToCidrString()}"))
+                + "); refusing to select without unique evidence.");
+            return;
+        }
+
+        (string Interface, OspfIpPrefix Subnet, string? SourceCost) chosen = candidates[0];
+        // Ensure the neighbour interface is not already classified as a site-only template without
+        // backbone ownership evidence: require either a backbone template/network or no conflicting
+        // non-backbone exclusive claim.
+        bool onBackboneTemplate = snapshot.InterfaceTemplates.Any(t =>
+            OspfInventoryEligibility.IsEligible(t)
+            && string.Equals(t.Interfaces, chosen.Interface, StringComparison.Ordinal)
+            && areas.Any(a =>
+                a.IsBackbone
+                && string.Equals(a.Name, t.Area, StringComparison.OrdinalIgnoreCase)));
+        bool onBackboneNetwork = snapshot.Networks.Any(n =>
+            areas.Any(a =>
+                a.IsBackbone
+                && (string.Equals(a.Name, n.Area, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(NormalizeAreaId(a.AreaId), NormalizeAreaId(n.Area), StringComparison.Ordinal)))
+            && OspfIpPrefix.TryParse(n.Network, out OspfIpPrefix net)
+            && (net.Contains(chosen.Subnet) || chosen.Subnet.Contains(net) || net.Equals(chosen.Subnet)));
+
+        if (snapshot.InterfaceTemplates.Count > 0 && !onBackboneTemplate && !onBackboneNetwork
+            && snapshot.Networks.Count > 0 && !onBackboneNetwork)
+        {
+            // Soft: still allow when only neighbour evidence exists and no explicit site-only exclusive
+            // active template claims the interface.
+            bool siteActiveClaim = snapshot.InterfaceTemplates.Any(t =>
+                OspfInventoryEligibility.IsEligible(t)
+                && !t.Passive
+                && string.Equals(t.Interfaces, chosen.Interface, StringComparison.Ordinal)
+                && areas.Any(a =>
+                    !a.IsBackbone
+                    && string.Equals(a.Name, t.Area, StringComparison.OrdinalIgnoreCase)));
+            if (siteActiveClaim)
+            {
+                errors.Add(
+                    $"Full neighbour on '{chosen.Interface}' is claimed by an active site-area template; "
+                    + "refusing to classify as backbone.");
+                return;
+            }
+        }
+
+        backhauls.Add(new OspfPlanBackhaulTemplate
+        {
+            AreaName = backboneName,
+            Interface = chosen.Interface,
+            NetworkCidr = chosen.Subnet.ToCidrString(),
+            Cost = FleetBackhaulCost,
+            Type = "ptp",
+            Passive = false,
+            SourceCost = chosen.SourceCost,
+        });
+        notes.Add(
+            $"Classified backbone backhaul '{chosen.Interface}' {chosen.Subnet.ToCidrString()} "
+            + "from unique Full OSPF neighbour evidence"
+            + (string.IsNullOrWhiteSpace(chosen.SourceCost)
+                ? "."
+                : $" (source cost '{chosen.SourceCost}' normalised to {FleetBackhaulCost})."));
     }
 
     /// <summary>
@@ -1000,19 +1307,13 @@ internal static class OspfMigrationPlanner
     }
 
     /// <summary>
-    /// Ensures the site area carries exactly one MGMT area range equal to the derived management CIDR.
-    /// Existing ranges that differ in prefix or comment are replaced with the fleet-standard form.
+    /// Ensures the site area carries a MGMT area range for each derived management <c>/24</c>.
+    /// Existing MGMT-commented ranges whose CIDR is not in the derived set are removed.
     /// </summary>
-    /// <param name="ranges">Current planned area ranges.</param>
-    /// <param name="areas">Planned areas.</param>
-    /// <param name="derivedMgmtCidr">Derived management CIDR.</param>
-    /// <param name="notes">Receives normalisation notes.</param>
-    /// <param name="errors">Receives an error when no site area exists.</param>
-    /// <returns>The updated range list.</returns>
-    private static List<OspfPlanAreaRange> EnsureManagementAreaRange(
+    private static List<OspfPlanAreaRange> EnsureManagementAreaRanges(
         List<OspfPlanAreaRange> ranges,
         IReadOnlyList<OspfPlanArea> areas,
-        string derivedMgmtCidr,
+        IReadOnlyList<string> derivedMgmtCidrs,
         List<string> notes,
         List<string> errors)
     {
@@ -1023,45 +1324,34 @@ internal static class OspfMigrationPlanner
             return ranges;
         }
 
+        HashSet<string> required = new(
+            derivedMgmtCidrs.Where(static c => !string.IsNullOrWhiteSpace(c)).Select(static c => c.Trim()),
+            StringComparer.OrdinalIgnoreCase);
+        if (required.Count == 0)
+        {
+            return ranges;
+        }
+
         List<OspfPlanAreaRange> result = ranges.ToList();
         List<OspfPlanAreaRange> existingMgmt = result
             .Where(r =>
                 string.Equals(r.AreaName, site.Name, StringComparison.OrdinalIgnoreCase)
                 && (string.Equals(r.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(r.RangeCidr, derivedMgmtCidr, StringComparison.OrdinalIgnoreCase)))
+                    || required.Contains(r.RangeCidr ?? string.Empty)))
             .ToList();
-
-        if (existingMgmt.Count == 0)
-        {
-            notes.Add(
-                $"Adding mandatory MGMT area range '{derivedMgmtCidr}' on site area '{site.Name}'.");
-            result.Add(new OspfPlanAreaRange
-            {
-                AreaName = site.Name,
-                RangeCidr = derivedMgmtCidr,
-                Comment = OspfFleetNaming.ManagementRangeComment,
-                Advertise = true,
-            });
-            return result;
-        }
 
         foreach (OspfPlanAreaRange row in existingMgmt)
         {
-            if (!string.Equals(row.RangeCidr, derivedMgmtCidr, StringComparison.OrdinalIgnoreCase))
+            if (!required.Contains(row.RangeCidr ?? string.Empty))
             {
                 notes.Add(
-                    $"Existing MGMT area range '{row.RangeCidr}' on '{row.AreaName}' differs from derived "
-                    + $"'{derivedMgmtCidr}'; replacing with derived fleet management /24.");
+                    $"Removing MGMT area range '{row.RangeCidr}' on '{row.AreaName}' because it is not in the "
+                    + $"derived management set [{string.Join(", ", required.OrderBy(static s => s, StringComparer.Ordinal))}].");
                 result.Remove(row);
-                result.Add(new OspfPlanAreaRange
-                {
-                    AreaName = site.Name,
-                    RangeCidr = derivedMgmtCidr,
-                    Comment = OspfFleetNaming.ManagementRangeComment,
-                    Advertise = row.Advertise ?? true,
-                });
+                continue;
             }
-            else if (!string.Equals(row.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase))
+
+            if (!string.Equals(row.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase))
             {
                 notes.Add(
                     $"Normalising management range '{row.RangeCidr}' comment '{row.Comment ?? "<none>"}' to "
@@ -1070,14 +1360,58 @@ internal static class OspfMigrationPlanner
                 result.Add(new OspfPlanAreaRange
                 {
                     AreaName = site.Name,
-                    RangeCidr = derivedMgmtCidr,
+                    RangeCidr = row.RangeCidr!,
                     Comment = OspfFleetNaming.ManagementRangeComment,
                     Advertise = row.Advertise ?? true,
                 });
             }
         }
 
+        HashSet<string> present = new(
+            result
+                .Where(r =>
+                    string.Equals(r.AreaName, site.Name, StringComparison.OrdinalIgnoreCase)
+                    && required.Contains(r.RangeCidr ?? string.Empty))
+                .Select(r => r.RangeCidr!),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (string cidr in required.OrderBy(static s => s, StringComparer.Ordinal))
+        {
+            if (present.Contains(cidr))
+            {
+                continue;
+            }
+
+            notes.Add($"Adding mandatory MGMT area range '{cidr}' on site area '{site.Name}'.");
+            result.Add(new OspfPlanAreaRange
+            {
+                AreaName = site.Name,
+                RangeCidr = cidr,
+                Comment = OspfFleetNaming.ManagementRangeComment,
+                Advertise = true,
+            });
+        }
+
         return result;
+    }
+
+    /// <summary>Normalises the plan's derived management prefix set for callers and hashing.</summary>
+    internal static IReadOnlyList<string> GetDerivedManagementCidrs(OspfMigrationPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (plan.DerivedManagementCidrs.Count > 0)
+        {
+            return plan.DerivedManagementCidrs
+                .Where(static c => !string.IsNullOrWhiteSpace(c))
+                .Select(static c => c.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(static s => s, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        return string.IsNullOrWhiteSpace(plan.DerivedManagementCidr)
+            ? []
+            : [plan.DerivedManagementCidr.Trim()];
     }
 
     /// <summary>
@@ -1106,6 +1440,7 @@ internal static class OspfMigrationPlanner
             ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
             IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
             DerivedManagementCidr = plan.DerivedManagementCidr,
+            DerivedManagementCidrs = plan.DerivedManagementCidrs,
             Areas = plan.Areas,
             AreaRanges = plan.AreaRanges,
             ActiveBackhauls = plan.ActiveBackhauls,
@@ -1140,6 +1475,7 @@ internal static class OspfMigrationPlanner
             ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
             IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
             DerivedManagementCidr = plan.DerivedManagementCidr,
+            DerivedManagementCidrs = GetDerivedManagementCidrs(plan),
             Areas = plan.Areas,
             AreaRanges = plan.AreaRanges,
             ActiveBackhauls = plan.ActiveBackhauls,

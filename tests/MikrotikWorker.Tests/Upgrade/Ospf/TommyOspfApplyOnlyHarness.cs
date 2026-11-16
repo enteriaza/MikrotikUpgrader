@@ -2,9 +2,9 @@
 // File: TommyOspfApplyOnlyHarness.cs
 //
 // Description:
-// Disposable lab harness: capture → plan → ApplyAndVerifyAsync → stop. Does
-// NOT invoke OspfOnlyLabRecoveryRunner (which continues to
-// backup/RouterBOARD).
+// Disposable lab harness: capture → centrally verified backup →
+// ApplyAndVerifyAsync → stop. Does NOT invoke OspfOnlyLabRecoveryRunner
+// (which continues to RouterBOARD).
 //
 // -----------------------------------------------------------------------------
 
@@ -17,6 +17,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MikrotikWorker.Assessment;
+using MikrotikWorker.Backup;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.Logging;
 using MikrotikWorker.MikroTik;
@@ -27,8 +28,8 @@ using tik4net;
 
 namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// <summary>
-/// Disposable lab harness: capture → plan → ApplyAndVerifyAsync → stop.
-/// Does NOT invoke OspfOnlyLabRecoveryRunner (which continues to backup/RouterBOARD).
+/// Disposable lab harness: capture → centrally verified backup → plan → ApplyAndVerifyAsync → stop.
+/// Does NOT invoke OspfOnlyLabRecoveryRunner (which continues to RouterBOARD).
 /// </summary>
 public sealed class TommyOspfApplyOnlyHarness
 {
@@ -102,9 +103,11 @@ public sealed class TommyOspfApplyOnlyHarness
 
         IMikrotikConnectionFactory factory = host.Services.GetRequiredService<IMikrotikConnectionFactory>();
         IMikrotikDeviceInfoReader deviceInfo = host.Services.GetRequiredService<IMikrotikDeviceInfoReader>();
+        IDeviceBackupService backups = host.Services.GetRequiredService<IDeviceBackupService>();
         IOspfMigrationService ospf = host.Services.GetRequiredService<IOspfMigrationService>();
         IOspfMikrotikOperations ops = host.Services.GetRequiredService<IOspfMikrotikOperations>();
         ILogger logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("TommyOspfApplyOnly");
+        List<string> operationOrder = [];
 
         MikrotikConnectionOptions connOpts = new()
         {
@@ -361,7 +364,37 @@ public sealed class TommyOspfApplyOnlyHarness
             Assert.Fail("Pre-apply identity/version changed.");
         }
 
+        logger.LogInformation(
+            "Creating centrally verified pre-OSPF backup before mutation. ProbeFailuresSoFar={Failures}",
+            probe.FailureCount);
+        try
+        {
+            await OspfCentralBackupGate.EnsureCentralBackupBeforeMutationAsync(
+                backups,
+                connection,
+                job,
+                beforeApply,
+                mikrotik.Value.Username,
+                mikrotik.Value.Password,
+                targetIp.ToString(),
+                expectedIdentity,
+                entryPoint: "TommyOspfApplyOnly",
+                operationOrder,
+                cts.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            WriteVerdict(
+                evidenceDir,
+                "NOT EXECUTED — PRECONDITIONS NOT MET",
+                "Central backup gate failed; no OSPF mutation. " + ex.Message);
+            Assert.Fail("Central backup gate failed: " + ex.Message);
+        }
+
+        await WriteJson(evidenceDir, "backup-gate-order.json", operationOrder);
+
         logger.LogInformation("ApplyAndVerifyAsync starting. ProbeFailuresSoFar={Failures}", probe.FailureCount);
+        operationOrder.Add("first-ospf-mutation-begin");
         DateTimeOffset applyStart = DateTimeOffset.Now;
         OspfApplyGateResult apply = await ospf.ApplyAndVerifyAsync(
             connection,
@@ -439,7 +472,8 @@ public sealed class TommyOspfApplyOnlyHarness
     }
 
     /// <summary>
-    /// Intentionally NO backup service, NO RouterBOARD, NO upgrade executor.
+    /// Registers the same central backup + SCP stack used by lab recovery; intentionally NO
+    /// RouterBOARD / upgrade executor.
     /// </summary>
     private static void ConfigureServices(IServiceCollection services, IConfiguration configuration)
     {
@@ -466,12 +500,14 @@ public sealed class TommyOspfApplyOnlyHarness
         services.AddSingleton<IMikrotikApiClient>(static sp => sp.GetRequiredService<MikrotikApiClient>());
         services.AddSingleton<IMikrotikDeviceInfoReader>(static sp => sp.GetRequiredService<MikrotikApiClient>());
         services.AddSingleton<IMikrotikRouterOperations>(static sp => sp.GetRequiredService<MikrotikApiClient>());
+        services.AddSingleton<IMikrotikFileTransferClient, MikrotikScpFileTransferClient>();
+        services.AddSingleton<IDeviceBackupService, DeviceBackupService>();
         services.AddSingleton<IOspfMikrotikOperations, OspfMikrotikOperations>();
         services.AddSingleton<IOspfMigrationPlanStore, OspfMigrationPlanStore>();
         services.AddSingleton<OspfV7Reconciler>();
         services.AddSingleton<OspfV7MigrationVerifier>();
         services.AddSingleton<IOspfMigrationService, OspfMigrationService>();
-        // Intentionally NO backup service, NO RouterBOARD, NO upgrade executor.
+        // Intentionally NO RouterBOARD / upgrade executor. Backup is mandatory before OSPF mutation.
     }
 
     /// <summary>

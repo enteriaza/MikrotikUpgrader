@@ -13,11 +13,12 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// Resolves deterministic ROS7 target identities onto the live RouterOS 7 inventory.
 /// </summary>
 /// <remarks>
-/// Expected live objects are derived from fleet naming conventions — never by blind string
-/// rewrite or “only available candidate” selection:
+/// Target fleet identities are:
 /// instance <c>default-v2</c>, backbone <c>backbone-v2</c>/<c>0.0.0.0</c>,
-/// site <c>{Identity}-v2</c>/<c>{Loopback}</c>, Router ID = Loopback <c>/32</c>.
-/// Live <c>.id</c> values are ephemeral for the current inventory snapshot only.
+/// site <c>{Identity}-v2</c>/<c>{Loopback}</c>, Router ID = Loopback <c>/32</c> in <c>10.16.0.0/24</c>.
+/// Legacy live instance/area names and non-matching live router-ids are discovery inputs;
+/// migration renames/normalises them. Live <c>.id</c> values are ephemeral for the current
+/// inventory snapshot only.
 /// </remarks>
 internal static class OspfLiveIdentityResolver
 {
@@ -25,8 +26,10 @@ internal static class OspfLiveIdentityResolver
     /// Resolves the plan's deterministic ROS7 instance, backbone area and site area onto the live inventory.
     /// </summary>
     /// <remarks>
-    /// Fails closed on a missing plan identity, a Router ID that does not match the Loopback /32-derived one, a missing,
-    /// duplicated or mismatched instance, areas with empty or foreign instance ownership, or area-id conflicts.
+    /// Fails closed on a missing plan identity, a plan Router ID that does not match the Loopback /32,
+    /// missing/ambiguous OSPFv2 instance selection, areas with empty or foreign instance ownership,
+    /// or area-id conflicts. A legacy live router-id that differs from the Loopback is accepted for
+    /// binding and normalised later by <c>SetInstanceRouterIdAsync</c>.
     /// </remarks>
     /// <param name="plan">Migration plan whose logical names and Router ID are being resolved.</param>
     /// <param name="inventory">Live RouterOS 7 OSPF inventory snapshot.</param>
@@ -48,8 +51,13 @@ internal static class OspfLiveIdentityResolver
             return Failed("Plan router identity is missing; cannot derive deterministic site area name.");
         }
 
+        IReadOnlyList<OspfIpAddressRow> eligibleAddresses = OspfInventoryEligibility.Eligible(ipAddresses);
+        IReadOnlyList<OspfInstanceRow> eligibleInstances =
+            OspfInventoryEligibility.Eligible(inventory.Instances);
+        IReadOnlyList<OspfAreaRow> eligibleAreas = OspfInventoryEligibility.Eligible(inventory.Areas);
+
         // Use the immutable plan Router ID to disambiguate multiple in-scope Loopback addresses.
-        OspfLoopbackRouterIdResult loopback = OspfLoopbackRouterId.Derive(ipAddresses, plan.RouterId);
+        OspfLoopbackRouterIdResult loopback = OspfLoopbackRouterId.Derive(eligibleAddresses, plan.RouterId);
         if (!loopback.Succeeded || string.IsNullOrWhiteSpace(loopback.RouterId))
         {
             return Failed(loopback.Errors.Count > 0
@@ -81,55 +89,45 @@ internal static class OspfLiveIdentityResolver
             ? OspfFleetNaming.Ros7SiteAreaName(plan.Identity)
             : plan.TargetSiteAreaName;
 
-        List<OspfInstanceRow> v2Instances = inventory.Instances
+        List<OspfInstanceRow> v2Instances = eligibleInstances
             .Where(static i => !string.Equals(i.Version, "3", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        List<OspfInstanceRow> named = v2Instances
-            .Where(i => string.Equals(i.Name, expectedInstance, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (named.Count == 0)
-        {
-            return Failed($"Expected ROS7 OSPFv2 instance '{expectedInstance}' is missing.");
-        }
-
-        if (named.Count > 1)
-        {
-            return Failed($"Multiple live OSPFv2 instances named '{expectedInstance}'; refusing.");
-        }
-
-        OspfInstanceRow instance = named[0];
-        if (string.IsNullOrWhiteSpace(instance.RouterId))
-        {
-            return Failed(
-                $"Live OSPFv2 instance '{instance.Name}' has no router-id; Loopback RID validation requires it.");
-        }
-
-        if (!OspfLoopbackRouterId.EqualsRouterId(instance.RouterId, derivedRid))
-        {
-            return Failed(
-                $"Live OSPFv2 instance '{instance.Name}' router-id '{instance.RouterId}' conflicts with "
-                + $"Loopback /32-derived Router ID '{derivedRid}'.");
-        }
-
-        // Refuse to silently use a differently named sole instance.
-        if (v2Instances.Count == 1
-            && !string.Equals(v2Instances[0].Name, expectedInstance, StringComparison.OrdinalIgnoreCase))
-        {
-            return Failed(
-                $"Sole live OSPFv2 instance is '{v2Instances[0].Name}', expected deterministic '{expectedInstance}'.");
-        }
-
-        OspfAreaRow? backbone = ResolveExpectedArea(
-            inventory.Areas,
+        OspfInstanceRow? instance = SelectLiveOspfV2Instance(
+            v2Instances,
+            eligibleAreas,
             expectedInstance,
+            derivedRid,
+            errors);
+        if (instance is null)
+        {
+            return Failed(errors.Count > 0 ? errors : ["OSPFv2 instance resolution failed."]);
+        }
+
+        // Another OSPFv2 instance already using the target literal RID is a collision.
+        List<OspfInstanceRow> ridCollisions = v2Instances
+            .Where(i =>
+                !ReferenceEquals(i, instance)
+                && OspfLoopbackRouterId.EqualsRouterId(i.RouterId, derivedRid))
+            .ToList();
+        if (ridCollisions.Count > 0)
+        {
+            return Failed(
+                $"Target Loopback Router ID '{derivedRid}' is already configured on another OSPFv2 instance "
+                + $"'{ridCollisions[0].Name}'; refusing identity collision.");
+        }
+
+        string liveInstanceName = instance.Name!;
+        OspfAreaRow? backbone = ResolveExpectedArea(
+            eligibleAreas,
+            liveInstanceName,
             expectedBackbone,
             OspfFleetNaming.BackboneAreaId,
             "backbone",
             errors);
         OspfAreaRow? site = ResolveExpectedArea(
-            inventory.Areas,
-            expectedInstance,
+            eligibleAreas,
+            liveInstanceName,
             expectedSite,
             derivedRid,
             "site",
@@ -192,7 +190,7 @@ internal static class OspfLiveIdentityResolver
             Binding = new OspfLiveIdentityBinding
             {
                 LogicalInstanceName = plan.InstanceName,
-                LiveInstanceName = instance.Name!,
+                LiveInstanceName = liveInstanceName,
                 LiveInstanceId = instance.Id,
                 LiveRouterId = instance.RouterId,
                 DerivedLoopbackRouterId = derivedRid,
@@ -200,6 +198,80 @@ internal static class OspfLiveIdentityResolver
                 Areas = areaBindings,
             },
         };
+    }
+
+    /// <summary>
+    /// Selects the live OSPFv2 instance to migrate: prefer fleet name <paramref name="expectedInstance"/>,
+    /// else the sole v2 instance, else the unique instance owning backbone area-id 0.0.0.0.
+    /// </summary>
+    private static OspfInstanceRow? SelectLiveOspfV2Instance(
+        IReadOnlyList<OspfInstanceRow> v2Instances,
+        IReadOnlyList<OspfAreaRow> areas,
+        string expectedInstance,
+        string derivedRid,
+        List<string> errors)
+    {
+        if (v2Instances.Count == 0)
+        {
+            errors.Add("No live OSPFv2 instance is present.");
+            return null;
+        }
+
+        List<OspfInstanceRow> named = v2Instances
+            .Where(i => string.Equals(i.Name, expectedInstance, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (named.Count > 1)
+        {
+            errors.Add($"Multiple live OSPFv2 instances named '{expectedInstance}'; refusing.");
+            return null;
+        }
+
+        if (named.Count == 1)
+        {
+            return named[0];
+        }
+
+        // Fleet name missing — discover without selecting arbitrarily.
+        if (v2Instances.Count == 1)
+        {
+            return v2Instances[0];
+        }
+
+        List<OspfAreaRow> backboneAreas = areas
+            .Where(a =>
+                string.Equals(
+                    string.IsNullOrWhiteSpace(a.AreaId) ? OspfFleetNaming.BackboneAreaId : a.AreaId.Trim(),
+                    OspfFleetNaming.BackboneAreaId,
+                    StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(a.Instance))
+            .ToList();
+        List<string> owners = backboneAreas
+            .Select(static a => a.Instance!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (owners.Count == 1)
+        {
+            OspfInstanceRow? owner = v2Instances.FirstOrDefault(i =>
+                string.Equals(i.Name, owners[0], StringComparison.OrdinalIgnoreCase));
+            if (owner is not null)
+            {
+                return owner;
+            }
+        }
+
+        // Prefer unique instance whose literal RID already equals the loopback (post-normalisation case).
+        List<OspfInstanceRow> byRid = v2Instances
+            .Where(i => OspfLoopbackRouterId.EqualsRouterId(i.RouterId, derivedRid))
+            .ToList();
+        if (byRid.Count == 1)
+        {
+            return byRid[0];
+        }
+
+        errors.Add(
+            $"Expected ROS7 OSPFv2 instance '{expectedInstance}' is missing and "
+            + $"{v2Instances.Count} OSPFv2 instance(s) remain without unique backbone/RID ownership; refusing.");
+        return null;
     }
 
     /// <summary>
@@ -244,6 +316,7 @@ internal static class OspfLiveIdentityResolver
             ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
             IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
             DerivedManagementCidr = plan.DerivedManagementCidr,
+            DerivedManagementCidrs = OspfMigrationPlanner.GetDerivedManagementCidrs(plan),
             Areas = plan.Areas
                 .Select(a => new OspfPlanArea
                 {
@@ -376,14 +449,32 @@ internal static class OspfLiveIdentityResolver
                 errors.Add(
                     $"Expected {role} area '{expectedName}' belongs to instance '{foreign[0].Instance}', "
                     + $"not '{liveInstanceName}'.");
-            }
-            else
-            {
-                errors.Add(
-                    $"Expected ROS7 {role} area '{expectedName}' (area-id={expectedAreaId}) is missing "
-                    + $"under instance '{liveInstanceName}'.");
+                return null;
             }
 
+            // Fallback: unique area-id under the live instance (legacy names without -v2 suffix).
+            List<OspfAreaRow> byAreaIdFallback = underInstance
+                .Where(a =>
+                    string.Equals(
+                        string.IsNullOrWhiteSpace(a.AreaId) ? OspfFleetNaming.BackboneAreaId : a.AreaId.Trim(),
+                        expectedAreaId,
+                        StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (byAreaIdFallback.Count == 1)
+            {
+                return byAreaIdFallback[0];
+            }
+
+            if (byAreaIdFallback.Count > 1)
+            {
+                errors.Add(
+                    $"Multiple live areas share area-id '{expectedAreaId}' under instance '{liveInstanceName}'.");
+                return null;
+            }
+
+            errors.Add(
+                $"Expected ROS7 {role} area '{expectedName}' (area-id={expectedAreaId}) is missing "
+                + $"under instance '{liveInstanceName}'.");
             return null;
         }
 

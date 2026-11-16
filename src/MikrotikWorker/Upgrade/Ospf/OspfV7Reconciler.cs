@@ -84,6 +84,43 @@ internal sealed class OspfV7Reconciler(
                 identity.Binding.Areas.Values.Select(static a => $"{a.LogicalName}->{a.LiveName}")),
             livePlan.SupersededTemplates.Count);
 
+        string targetInstanceName = string.IsNullOrWhiteSpace(livePlan.TargetInstanceName)
+            ? OspfFleetNaming.Ros7InstanceName
+            : livePlan.TargetInstanceName;
+        string? legacyRouterIdReference = identity.Binding.LiveRouterId;
+
+        // Validate mandatory OSPFv3 removal selection against the pre-mutation inventory. Fail closed
+        // before any RouterOS write when selection is ambiguous (e.g. colliding area names).
+        OspfV3RemovalSelection.Result v3Selection = OspfV3RemovalSelection.Build(liveInventory);
+        if (!v3Selection.Succeeded)
+        {
+            throw new InvalidOperationException(
+                "OSPFv3 removal selection failed before mutation: "
+                + (v3Selection.FailureDetail ?? "unspecified selection failure."));
+        }
+
+        if (v3Selection.InstanceIds.Count > 0)
+        {
+            logger.LogInformation(
+                "OSPFv3 removal selection validated before mutation (templates={Templates}, ranges={Ranges}, areas={Areas}, instances={Instances})",
+                v3Selection.TemplateIds.Count,
+                v3Selection.RangeIds.Count,
+                v3Selection.AreaIds.Count,
+                v3Selection.InstanceIds.Count);
+        }
+
+        // Mutation phase (caller must already have completed the verified central backup gate).
+        await ops.EnsureOspfInstanceNameAsync(
+                connection,
+                identity.Binding.LiveInstanceName,
+                targetInstanceName,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.Equals(livePlan.InstanceName, targetInstanceName, StringComparison.OrdinalIgnoreCase))
+        {
+            livePlan = ClonePlanWithInstanceName(livePlan, targetInstanceName);
+        }
+
         OspfManagementPlaneBaseline baseline = await ops
             .CaptureManagementPlaneBaselineAsync(
                 connection,
@@ -118,6 +155,21 @@ internal sealed class OspfV7Reconciler(
             .ConfigureAwait(false);
         await ops.SetInstanceRouterIdAsync(connection, livePlan.InstanceName, livePlan.RouterId, cancellationToken)
             .ConfigureAwait(false);
+        // Conservative /routing/id cleanup — retains entries when non-OSPF consumers cannot be ruled out.
+        await ops.TryRemoveUnusedRoutingIdAsync(connection, legacyRouterIdReference, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Mandatory OSPFv3 removal BEFORE any OSPFv2 area/template reconciliation that could collide
+        // with same-named OSPFv3 areas via name/area-id lookup.
+        await ops.RemoveOspfV3Async(connection, livePlan, cancellationToken).ConfigureAwait(false);
+        await AssertOspfV3FullyRemovedAsync(connection, cancellationToken).ConfigureAwait(false);
+        await ops.AssertBackboneStillActiveAsync(
+                connection,
+                livePlan,
+                baseline,
+                cancellationToken,
+                requireFleetCost: false)
+            .ConfigureAwait(false);
 
         foreach (OspfPlanArea area in livePlan.Areas)
         {
@@ -138,11 +190,28 @@ internal sealed class OspfV7Reconciler(
         }
 
         // Active backhauls first — never allow later passive operations to touch them.
+        // Mid-mutation backbone asserts omit fleet-cost conformity until every backhaul is ensured.
         foreach (OspfPlanBackhaulTemplate backhaul in livePlan.ActiveBackhauls)
         {
+            string? priorCost = backhaul.SourceCost;
             await ops.EnsureBackhaulTemplateAsync(connection, backhaul, cancellationToken)
                 .ConfigureAwait(false);
-            await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
+            if (!string.IsNullOrWhiteSpace(priorCost)
+                && priorCost != OspfMigrationPlanner.FleetBackhaulCost.ToString())
+            {
+                logger.LogInformation(
+                    "Backhaul '{Interface}' cost normalised {From} → {To}",
+                    backhaul.Interface,
+                    priorCost,
+                    OspfMigrationPlanner.FleetBackhaulCost);
+            }
+
+            await ops.AssertBackboneStillActiveAsync(
+                    connection,
+                    livePlan,
+                    baseline,
+                    cancellationToken,
+                    requireFleetCost: false)
                 .ConfigureAwait(false);
         }
 
@@ -150,7 +219,12 @@ internal sealed class OspfV7Reconciler(
         {
             await ops.EnsureLoopbackTemplateAsync(connection, loopback, livePlan.ActiveBackhauls, cancellationToken)
                 .ConfigureAwait(false);
-            await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
+            await ops.AssertBackboneStillActiveAsync(
+                    connection,
+                    livePlan,
+                    baseline,
+                    cancellationToken,
+                    requireFleetCost: false)
                 .ConfigureAwait(false);
         }
 
@@ -168,7 +242,12 @@ internal sealed class OspfV7Reconciler(
                 .ConfigureAwait(false);
         }
 
-        await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
+        await ops.AssertBackboneStillActiveAsync(
+                connection,
+                livePlan,
+                baseline,
+                cancellationToken,
+                requireFleetCost: true)
             .ConfigureAwait(false);
 
         await ops.RemoveObsoleteTemplatesAsync(connection, livePlan, cancellationToken)
@@ -180,11 +259,12 @@ internal sealed class OspfV7Reconciler(
                 .ConfigureAwait(false);
         }
 
-        await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
-            .ConfigureAwait(false);
-
-        await ops.RemoveOspfV3Async(connection, livePlan, cancellationToken).ConfigureAwait(false);
-        await ops.AssertBackboneStillActiveAsync(connection, livePlan, baseline, cancellationToken)
+        await ops.AssertBackboneStillActiveAsync(
+                connection,
+                livePlan,
+                baseline,
+                cancellationToken,
+                requireFleetCost: true)
             .ConfigureAwait(false);
 
         using (DeviceLogging.BeginServiceSummary())
@@ -194,6 +274,69 @@ internal sealed class OspfV7Reconciler(
 
         return baseline;
     }
+
+    /// <summary>
+    /// Re-reads live inventory and fails closed when any OSPFv3 or OSPFv3-orphan residual remains.
+    /// </summary>
+    private async Task AssertOspfV3FullyRemovedAsync(
+        ITikConnection connection,
+        CancellationToken cancellationToken)
+    {
+        OspfV7Inventory afterRemoval = await ops.ReadV7InventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+        OspfV3ResidualDetector.Result residual = OspfV3ResidualDetector.Evaluate(afterRemoval);
+        if (!residual.IsClean)
+        {
+            string prefix = residual.InventoryIncomplete
+                ? "Incomplete OSPF inventory after mandatory OSPFv3 removal; refusing OSPFv2 "
+                  + "area/template reconciliation. "
+                : "OSPFv3 residual configuration remains after mandatory removal; refusing OSPFv2 "
+                  + "area/template reconciliation. ";
+            throw new InvalidOperationException(prefix + residual.Detail);
+        }
+    }
+
+    /// <summary>
+    /// Returns a copy of <paramref name="plan"/> whose <see cref="OspfMigrationPlan.InstanceName"/> is
+    /// <paramref name="instanceName"/> (used after a live instance rename to <c>default-v2</c>).
+    /// </summary>
+    private static OspfMigrationPlan ClonePlanWithInstanceName(OspfMigrationPlan plan, string instanceName) =>
+        new()
+        {
+            ImportId = plan.ImportId,
+            JobId = plan.JobId,
+            RouterIp = plan.RouterIp,
+            Identity = plan.Identity,
+            SourceRouterOsVersion = plan.SourceRouterOsVersion,
+            Architecture = plan.Architecture,
+            SourceKind = plan.SourceKind,
+            ContentHash = plan.ContentHash,
+            InstanceName = instanceName,
+            RouterId = plan.RouterId,
+            TargetInstanceName = plan.TargetInstanceName,
+            TargetBackboneAreaName = plan.TargetBackboneAreaName,
+            TargetSiteAreaName = plan.TargetSiteAreaName,
+            LoopbackInterfaceName = plan.LoopbackInterfaceName,
+            LoopbackCidr = plan.LoopbackCidr,
+            ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
+            IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
+            DerivedManagementCidr = plan.DerivedManagementCidr,
+            DerivedManagementCidrs = OspfMigrationPlanner.GetDerivedManagementCidrs(plan),
+            Areas = plan.Areas,
+            AreaRanges = plan.AreaRanges,
+            ActiveBackhauls = plan.ActiveBackhauls,
+            PassiveLoopbacks = plan.PassiveLoopbacks,
+            PassiveSiteNetworks = plan.PassiveSiteNetworks,
+            SupersededTemplates = plan.SupersededTemplates,
+            RemoveAllRoutingFilters = plan.RemoveAllRoutingFilters,
+            ClearAllRedistribution = plan.ClearAllRedistribution,
+            RemoveAllOspfV3 = plan.RemoveAllOspfV3,
+            OspfV3ToRemove = plan.OspfV3ToRemove,
+            NormalisationNotes = plan.NormalisationNotes
+                .Append($"OSPFv2 instance normalised to fleet name '{instanceName}'.")
+                .ToList(),
+            ValidationErrors = plan.ValidationErrors,
+        };
 }
 
 /// <summary>
@@ -260,6 +403,53 @@ internal sealed class OspfV7MigrationVerifier(
             };
         }
 
+        string expectedInstanceName = string.IsNullOrWhiteSpace(plan.TargetInstanceName)
+            ? OspfFleetNaming.Ros7InstanceName
+            : plan.TargetInstanceName.Trim();
+        if (!string.Equals(
+                identity.Binding.LiveInstanceName,
+                expectedInstanceName,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return new OspfVerificationResult
+            {
+                Succeeded = false,
+                Errors =
+                [
+                    $"Live OSPFv2 instance name is '{identity.Binding.LiveInstanceName}', "
+                    + $"expected fleet name '{expectedInstanceName}'.",
+                ],
+            };
+        }
+
+        OspfInstanceRow? verifiedInstance = inventory.Instances.FirstOrDefault(i =>
+            string.Equals(i.Name, identity.Binding.LiveInstanceName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(i.Id, identity.Binding.LiveInstanceId, StringComparison.Ordinal));
+        verifiedInstance ??= inventory.Instances.FirstOrDefault(i =>
+            string.Equals(i.Name, expectedInstanceName, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(i.Version, "3", StringComparison.OrdinalIgnoreCase));
+        if (verifiedInstance is null)
+        {
+            return new OspfVerificationResult
+            {
+                Succeeded = false,
+                Errors = [$"Fleet OSPFv2 instance '{expectedInstanceName}' is missing from live inventory."],
+            };
+        }
+
+        if (string.Equals(verifiedInstance.Version, "3", StringComparison.OrdinalIgnoreCase))
+        {
+            return new OspfVerificationResult
+            {
+                Succeeded = false,
+                Errors =
+                [
+                    $"Live instance '{verifiedInstance.Name}' is OSPFv3 (version=3); "
+                    + "OSPFv2 migration target verification failed.",
+                ],
+            };
+        }
+
         OspfMigrationPlan livePlan = OspfLiveIdentityResolver.RemapPlan(plan, identity.Binding);
 
         int filters = await ops.CountRoutingFiltersAsync(connection, cancellationToken)
@@ -296,11 +486,13 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
-        if (inventory.OspfV3Objects.Count > 0
-            || inventory.Instances.Any(static i =>
-                string.Equals(i.Version, "3", StringComparison.OrdinalIgnoreCase)))
+        OspfV3ResidualDetector.Result v3Residual = OspfV3ResidualDetector.Evaluate(inventory);
+        if (!v3Residual.IsClean)
         {
-            errors.Add("OSPFv3 configuration remains after removal.");
+            errors.Add(
+                v3Residual.InventoryIncomplete
+                    ? "Incomplete OSPF inventory cannot prove OSPFv3 removal: " + v3Residual.Detail
+                    : "OSPFv3 residual configuration remains after removal: " + v3Residual.Detail);
         }
 
         foreach (OspfAreaRow area in inventory.Areas)
@@ -379,9 +571,13 @@ internal sealed class OspfV7MigrationVerifier(
 
         errors.AddRange(VerifyManagementSummarisationPostconditions(livePlan, inventory));
 
-        // Final acceptance requires exactly the planned templates — disabled clutter also fails.
+        // Final acceptance compares the eligible OSPFv2 decision inventory against planned roles
+        // plus explicitly preserved unmanaged residuals. Disabled OSPFv2 templates are invisible
+        // to migration decisions and must not affect equality/count. Unknown admin state fails closed.
         IReadOnlyList<OspfInterfaceTemplateRow> allTemplates = inventory.Templates;
-        List<OspfInterfaceTemplateRow> enabled = allTemplates.Where(static t => !t.Disabled).ToList();
+        List<OspfInterfaceTemplateRow> enabled =
+            allTemplates.Where(OspfInventoryEligibility.IsEligible).ToList();
+        Dictionary<string, string> areaInstances = BuildAreaInstanceMap(inventory);
 
         foreach (OspfPlanBackhaulTemplate bh in livePlan.ActiveBackhauls)
         {
@@ -396,7 +592,7 @@ internal sealed class OspfV7MigrationVerifier(
             if (matches.Count == 0)
             {
                 bool disabledOnly = allTemplates.Any(t =>
-                    t.Disabled
+                    (t.Disabled || t.AdminState == OspfAdminState.Disabled)
                     && string.Equals(t.Interfaces, bh.Interface, StringComparison.Ordinal)
                     && string.Equals(Normalize(t.Networks), bh.NetworkCidr, StringComparison.Ordinal));
                 errors.Add(
@@ -504,16 +700,38 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
+        int preservedUnmanagedCount = 0;
+        int disabledExcludedCount = 0;
         foreach (OspfInterfaceTemplateRow template in allTemplates)
         {
+            if (template.AdminState == OspfAdminState.Unknown)
+            {
+                errors.Add(
+                    $"Unplanned template with unknown disabled-state remains interfaces={template.Interfaces} networks={template.Networks}; refuse to treat as enabled.");
+                continue;
+            }
+
+            if (template.AdminState == OspfAdminState.Disabled || template.Disabled)
+            {
+                // Disabled OSPFv2 objects are invisible to migration decisions; do not delete or
+                // fail verification solely because they remain in raw inventory.
+                disabledExcludedCount++;
+                continue;
+            }
+
+            if (!OspfInventoryEligibility.IsEligible(template))
+            {
+                errors.Add(
+                    $"Template interfaces={template.Interfaces} networks={template.Networks} is not eligible for OSPFv2 verification; refuse to treat as enabled.");
+                continue;
+            }
+
             bool plannedBackhaul = livePlan.ActiveBackhauls.Any(b =>
-                !template.Disabled
-                && !template.Passive
+                !template.Passive
                 && string.Equals(b.Interface, template.Interfaces, StringComparison.Ordinal)
                 && string.Equals(Normalize(template.Networks), b.NetworkCidr, StringComparison.Ordinal));
             bool plannedLoopback = livePlan.PassiveLoopbacks.Any(l =>
-                !template.Disabled
-                && template.Passive
+                template.Passive
                 && string.Equals(Normalize(template.Networks), l.NetworkCidr, StringComparison.Ordinal)
                 && (string.IsNullOrWhiteSpace(l.Interface)
                     || string.IsNullOrWhiteSpace(template.Interfaces)
@@ -532,30 +750,53 @@ internal sealed class OspfV7MigrationVerifier(
                 continue;
             }
 
-            if (template.Disabled)
+            OspfTemplateInventoryRow residualRow = ToCleanupInventoryRow(template, areaInstances);
+            OspfTemplateClassification residualClass = OspfTemplateCleanupClassifier.ClassifyUnplannedResidual(
+                residualRow,
+                livePlan,
+                out string residualReason);
+
+            if (residualClass == OspfTemplateClassification.PreservedUnmanaged)
             {
-                errors.Add(
-                    $"Disabled unplanned template remains interfaces={template.Interfaces} networks={template.Networks}; final inventory must contain exactly the planned templates.");
+                preservedUnmanagedCount++;
+                logger.LogInformation(
+                    "Preserved unmanaged OSPF template remains interfaces={Interfaces} networks={Networks} ({Reason})",
+                    template.Interfaces,
+                    template.Networks,
+                    residualReason);
+                continue;
             }
-            else if (!template.Passive)
+
+            if (residualClass == OspfTemplateClassification.KnownLegacy)
             {
                 errors.Add(
-                    $"Unclassified active template remains interfaces={template.Interfaces} networks={template.Networks}.");
+                    $"Unexpected superseded/legacy template remains interfaces={template.Interfaces} networks={template.Networks}; {residualReason}");
+                continue;
+            }
+
+            if (!template.Passive)
+            {
+                errors.Add(
+                    $"Unclassified active template remains interfaces={template.Interfaces} networks={template.Networks}; {residualReason}");
             }
             else
             {
                 errors.Add(
-                    $"Unexpected template remains interfaces={template.Interfaces} networks={template.Networks}.");
+                    $"Unexpected template remains interfaces={template.Interfaces} networks={template.Networks}; {residualReason}");
             }
         }
 
-        int expectedTemplateCount = livePlan.ActiveBackhauls.Count
-            + livePlan.PassiveLoopbacks.Count
-            + livePlan.PassiveSiteNetworks.Count;
-        if (allTemplates.Count != expectedTemplateCount)
+        int expectedEligibleTemplateCount = livePlan.ActiveBackhauls.Count
+                                            + livePlan.PassiveLoopbacks.Count
+                                            + livePlan.PassiveSiteNetworks.Count
+                                            + preservedUnmanagedCount;
+        if (enabled.Count != expectedEligibleTemplateCount)
         {
             errors.Add(
-                $"Template inventory count is {allTemplates.Count}, expected exactly {expectedTemplateCount} (disabled leftovers are not allowed).");
+                $"Eligible OSPFv2 template inventory count is {enabled.Count}, expected exactly {expectedEligibleTemplateCount} "
+                + $"(planned={livePlan.ActiveBackhauls.Count + livePlan.PassiveLoopbacks.Count + livePlan.PassiveSiteNetworks.Count}, "
+                + $"preserved-unmanaged={preservedUnmanagedCount}; "
+                + $"raw-total={allTemplates.Count}, disabled-excluded={disabledExcludedCount}).");
         }
 
         using (DeviceLogging.BeginServiceSummary())
@@ -576,11 +817,7 @@ internal sealed class OspfV7MigrationVerifier(
             }
         }
 
-        return new OspfVerificationResult
-        {
-            Succeeded = errors.Count == 0,
-            Errors = errors,
-        };
+        return new OspfVerificationResult { Succeeded = errors.Count == 0, Errors = errors, };
     }
 
     /// <summary>
@@ -595,89 +832,100 @@ internal sealed class OspfV7MigrationVerifier(
         OspfV7Inventory inventory)
     {
         List<string> errors = [];
-        if (string.IsNullOrWhiteSpace(livePlan.DerivedManagementCidr)
-            || !OspfIpPrefix.TryParse(livePlan.DerivedManagementCidr, out OspfIpPrefix mgmt))
+        IReadOnlyList<string> derivedSet = OspfMigrationPlanner.GetDerivedManagementCidrs(livePlan);
+        if (derivedSet.Count == 0)
         {
             errors.Add(
                 "OSPF management summarisation postcondition failed: plan is missing DerivedManagementCidr.");
             return errors;
         }
 
-        OspfPlanSiteNetworkTemplate? siteWithMgmt = livePlan.PassiveSiteNetworks.FirstOrDefault(s =>
-            OspfNetworkList.TryParseAll(s.NetworkCidr, out List<OspfIpPrefix> nets, out _)
-            && nets.Any(n => n.Equals(mgmt) || n.Contains(mgmt)));
-        if (siteWithMgmt is null)
+        foreach (string derivedCidr in derivedSet)
         {
-            errors.Add(
-                $"OSPF management summarisation postcondition failed: planned site matchers do not cover "
-                + $"derived management summary '{livePlan.DerivedManagementCidr}'.");
-        }
-        else if (!OspfSiteMatcherConsolidation.IsAllInterfaces(siteWithMgmt.Interfaces))
-        {
-            errors.Add(
-                $"OSPF management summarisation postcondition failed: management coverage "
-                + $"'{livePlan.DerivedManagementCidr}' is not on interfaces=all "
-                + $"(interfaces='{siteWithMgmt.Interfaces}').");
-        }
-
-        OspfPlanAreaRange? plannedMgmtRange = livePlan.AreaRanges.FirstOrDefault(r =>
-            string.Equals(Normalize(r.RangeCidr), mgmt.ToCidrString(), StringComparison.Ordinal)
-            && (string.Equals(r.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase)
-                || string.IsNullOrWhiteSpace(r.Comment)));
-        OspfAreaRangeRow? liveMgmtRange = inventory.AreaRanges.FirstOrDefault(r =>
-            string.Equals(Normalize(r.Range), mgmt.ToCidrString(), StringComparison.Ordinal)
-            && (string.IsNullOrWhiteSpace(r.Area)
-                || siteWithMgmt is null
-                || string.Equals(r.Area, siteWithMgmt.AreaName, StringComparison.OrdinalIgnoreCase)));
-        if (plannedMgmtRange is null || liveMgmtRange is null)
-        {
-            errors.Add(
-                $"OSPF management summarisation postcondition failed: MGMT area range "
-                + $"'{livePlan.DerivedManagementCidr}' is missing "
-                + $"(plan-range={plannedMgmtRange is not null}, live-range={liveMgmtRange is not null}).");
-        }
-        else if (liveMgmtRange.Advertise == false)
-        {
-            errors.Add(
-                $"OSPF management summarisation postcondition failed: MGMT area range "
-                + $"'{livePlan.DerivedManagementCidr}' has advertise=no.");
-        }
-
-        foreach (OspfInterfaceTemplateRow template in inventory.Templates.Where(static t => !t.Disabled))
-        {
-            if (siteWithMgmt is not null
-                && OspfSiteMatcherConsolidation.MatchesPlannedSite(
-                    template.Area,
-                    template.Interfaces,
-                    template.Networks,
-                    template.Passive,
-                    template.Disabled,
-                    siteWithMgmt))
+            if (!OspfIpPrefix.TryParse(derivedCidr, out OspfIpPrefix mgmt))
             {
+                errors.Add(
+                    $"OSPF management summarisation postcondition failed: derived management CIDR '{derivedCidr}' is invalid.");
                 continue;
             }
 
-            if (!OspfNetworkList.TryParseAll(template.Networks, out List<OspfIpPrefix> liveNets, out _))
+            OspfPlanSiteNetworkTemplate? siteWithMgmt = livePlan.PassiveSiteNetworks.FirstOrDefault(s =>
+                OspfNetworkList.TryParseAll(s.NetworkCidr, out List<OspfIpPrefix> nets, out _)
+                && nets.Any(n => n.Equals(mgmt) || n.Contains(mgmt)));
+            if (siteWithMgmt is null)
             {
-                continue;
+                errors.Add(
+                    $"OSPF management summarisation postcondition failed: planned site matchers do not cover "
+                    + $"derived management summary '{derivedCidr}'.");
+            }
+            else if (!OspfSiteMatcherConsolidation.IsAllInterfaces(siteWithMgmt.Interfaces))
+            {
+                errors.Add(
+                    $"OSPF management summarisation postcondition failed: management coverage "
+                    + $"'{derivedCidr}' is not on interfaces=all "
+                    + $"(interfaces='{siteWithMgmt.Interfaces}').");
             }
 
-            bool conflicts = liveNets.Any(n => mgmt.Contains(n) && !n.Equals(mgmt));
-            if (!conflicts)
+            OspfPlanAreaRange? plannedMgmtRange = livePlan.AreaRanges.FirstOrDefault(r =>
+                string.Equals(Normalize(r.RangeCidr), mgmt.ToCidrString(), StringComparison.Ordinal)
+                && (string.Equals(r.Comment, OspfFleetNaming.ManagementRangeComment, StringComparison.OrdinalIgnoreCase)
+                    || string.IsNullOrWhiteSpace(r.Comment)));
+            OspfAreaRangeRow? liveMgmtRange = inventory.AreaRanges.FirstOrDefault(r =>
+                string.Equals(Normalize(r.Range), mgmt.ToCidrString(), StringComparison.Ordinal)
+                && (string.IsNullOrWhiteSpace(r.Area)
+                    || siteWithMgmt is null
+                    || string.Equals(r.Area, siteWithMgmt.AreaName, StringComparison.OrdinalIgnoreCase)));
+            if (plannedMgmtRange is null || liveMgmtRange is null)
             {
-                continue;
+                errors.Add(
+                    $"OSPF management summarisation postcondition failed: MGMT area range "
+                    + $"'{derivedCidr}' is missing "
+                    + $"(plan-range={plannedMgmtRange is not null}, live-range={liveMgmtRange is not null}).");
+            }
+            else if (liveMgmtRange.Advertise == false)
+            {
+                errors.Add(
+                    $"OSPF management summarisation postcondition failed: MGMT area range "
+                    + $"'{derivedCidr}' has advertise=no.");
             }
 
-            if (siteWithMgmt is not null
-                && !string.Equals(template.Area, siteWithMgmt.AreaName, StringComparison.OrdinalIgnoreCase))
+            foreach (OspfInterfaceTemplateRow template in
+                     inventory.Templates.Where(OspfInventoryEligibility.IsEligible))
             {
-                continue;
-            }
+                if (siteWithMgmt is not null
+                    && OspfSiteMatcherConsolidation.MatchesPlannedSite(
+                        template.Area,
+                        template.Interfaces,
+                        template.Networks,
+                        template.Passive,
+                        template.Disabled,
+                        siteWithMgmt))
+                {
+                    continue;
+                }
 
-            errors.Add(
-                $"OSPF management summarisation postcondition failed: obsolete more-specific management "
-                + $"template remains area={template.Area} interfaces={template.Interfaces} "
-                + $"networks={template.Networks} under summary '{livePlan.DerivedManagementCidr}'.");
+                if (!OspfNetworkList.TryParseAll(template.Networks, out List<OspfIpPrefix> liveNets, out _))
+                {
+                    continue;
+                }
+
+                bool conflicts = liveNets.Any(n => mgmt.Contains(n) && !n.Equals(mgmt));
+                if (!conflicts)
+                {
+                    continue;
+                }
+
+                if (siteWithMgmt is not null
+                    && !string.Equals(template.Area, siteWithMgmt.AreaName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                errors.Add(
+                    $"OSPF management summarisation postcondition failed: obsolete more-specific management "
+                    + $"template remains area={template.Area} interfaces={template.Interfaces} "
+                    + $"networks={template.Networks} under summary '{derivedCidr}'.");
+            }
         }
 
         return errors;
@@ -690,6 +938,71 @@ internal sealed class OspfV7MigrationVerifier(
     /// <returns>The normalised CIDR, or an empty string for null.</returns>
     private static string Normalize(string? cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p) ? p.ToCidrString() : cidr?.Trim() ?? string.Empty;
+
+    /// <summary>Maps area name → owning instance name from the fresh verification inventory.</summary>
+    private static Dictionary<string, string> BuildAreaInstanceMap(OspfV7Inventory inventory)
+    {
+        Dictionary<string, string> map = new(StringComparer.OrdinalIgnoreCase);
+        foreach (OspfAreaRow area in inventory.Areas)
+        {
+            if (string.IsNullOrWhiteSpace(area.Name) || string.IsNullOrWhiteSpace(area.Instance))
+            {
+                continue;
+            }
+
+            map[area.Name] = area.Instance;
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Projects an interface-template inventory row into the cleanup classifier's sanitised shape.
+    /// </summary>
+    private static OspfTemplateInventoryRow ToCleanupInventoryRow(
+        OspfInterfaceTemplateRow template,
+        IReadOnlyDictionary<string, string> areaInstances)
+    {
+        string? areaInstance = null;
+        if (!string.IsNullOrWhiteSpace(template.Area)
+            && areaInstances.TryGetValue(template.Area, out string? resolved))
+        {
+            areaInstance = resolved;
+        }
+
+        OspfTemplateSemanticIdentity.AuthKeyResolution authKey =
+            OspfTemplateSemanticIdentity.ResolveAuthKey(template.AuthKey, template.AuthenticationKey);
+
+        return new OspfTemplateInventoryRow
+        {
+            Id = string.IsNullOrWhiteSpace(template.Id) ? "<verify>" : template.Id,
+            Area = template.Area,
+            Interfaces = template.Interfaces,
+            Networks = template.Networks,
+            Type = template.Type,
+            Cost = template.Cost,
+            Passive = template.Passive,
+            Disabled = template.Disabled,
+            AdminState = template.AdminState,
+            Auth = template.Auth,
+            AuthId = template.AuthId,
+            AuthKeyPresent = authKey.Present,
+            AuthKeyFingerprint = authKey.Fingerprint,
+            AuthKeyAmbiguous = authKey.Ambiguous,
+            Priority = template.Priority,
+            UseBfd = template.UseBfd,
+            HelloInterval = template.HelloInterval,
+            DeadInterval = template.DeadInterval,
+            RetransmitInterval = template.RetransmitInterval,
+            TransmitDelay = template.TransmitDelay,
+            InstanceId = template.InstanceId,
+            AreaInstanceName = areaInstance,
+            PrefixList = template.PrefixList,
+            VlinkNeighborId = template.VlinkNeighborId,
+            VlinkTransitArea = template.VlinkTransitArea,
+            Comment = OspfTemplateSemanticIdentity.NormalizeComment(template.Comment),
+        };
+    }
 }
 
 /// <summary>
@@ -701,12 +1014,14 @@ internal sealed class OspfVerificationResult
     /// Gets a value indicating whether verification found no problems.
     /// </summary>
     public required bool Succeeded { get; init; }
+
     /// <summary>
     /// One message per mismatch between the live ROS7 OSPF configuration and the migration plan
     /// (identity, areas, templates, backhaul cost and similar). Empty when <see cref="Succeeded"/> is
     /// <see langword="true"/>.
     /// </summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
+
     /// <summary>
     /// Single-line failure message built by joining <see cref="Errors"/> with <c>"; "</c>, suitable for
     /// logs and gate failures. <see langword="null"/> when verification succeeded.

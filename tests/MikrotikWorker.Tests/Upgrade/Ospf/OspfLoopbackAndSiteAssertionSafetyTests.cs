@@ -938,7 +938,11 @@ public sealed class OspfLoopbackAndSiteAssertionSafetyTests
         /// No-op backbone guard: this fake never reports a dropped adjacency or a changed
         /// management route.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) => Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
 
         /// <summary>
         /// Returns no neighbours; the adjacency guard is not exercised by this scenario.

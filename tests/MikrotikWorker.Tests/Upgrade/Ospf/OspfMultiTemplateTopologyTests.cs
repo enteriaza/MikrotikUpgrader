@@ -153,28 +153,48 @@ public sealed class OspfMultiTemplateTopologyTests
     }
 
     /// <summary>
-    /// Scenario: an extra active ptp template for ether99 (10.255.0.0/30) exists in backbone-v2 but is not in the plan.
+    /// Scenario: an extra active ptp template for the planned backhaul interface eth-BH0 (different network, 10.255.0.0/30) exists in backbone-v2 but is not in the plan.
     /// Expected: InvalidOperationException ('No deletion was attempted') and no removals.
-    /// Invariant: an unknown active template is never deleted automatically and halts cleanup.
+    /// Invariant: a conflicting active unmanaged template on a target interface is Unknown, is never deleted automatically and halts cleanup.
     /// </summary>
     [Fact]
     public async Task UnexpectedActiveTemplate_AbortsWithZeroDeletes()
     {
         OspfMigrationPlan plan = MultiBackhaulPlan(1, 1);
         MutableStore store = MutableStore.WithPlan(plan);
-        store.Templates.Add(Row("*U", "backbone-v2", "ether99", "10.255.0.0/30", passive: false, type: "ptp", cost: "10"));
+        store.Templates.Add(Row("*U", "backbone-v2", "eth-BH0", "10.255.0.0/30", passive: false, type: "ptp", cost: "10"));
         CapturingConnection capturing = store.Connect();
 
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
         Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Empty(capturing.RemovedIds);
+        Assert.Contains(store.Templates, t => t[".id"] == "*U");
+    }
+
+    /// <summary>
+    /// Scenario: an extra active ptp template for ether99 (10.255.0.0/30) exists in backbone-v2, on an interface that is not part of the plan.
+    /// Expected: cleanup succeeds, nothing is removed and *U is preserved.
+    /// Invariant: a non-conflicting unmanaged template is PreservedUnmanaged rather than Unknown.
+    /// </summary>
+    [Fact]
+    public async Task UnrelatedActiveTemplate_IsPreservedWithZeroDeletes()
+    {
+        OspfMigrationPlan plan = MultiBackhaulPlan(1, 1);
+        MutableStore store = MutableStore.WithPlan(plan);
+        store.Templates.Add(Row("*U", "backbone-v2", "ether99", "10.255.0.0/30", passive: false, type: "ptp", cost: "10"));
+        CapturingConnection capturing = store.Connect();
+
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
+
+        Assert.Empty(capturing.RemovedIds);
+        Assert.Contains(store.Templates, t => t[".id"] == "*U");
     }
 
     /// <summary>
     /// Scenario: the plan records vlan-legacy 10.16.11.0/27 as superseded, while the router also holds an unrelated passive VLAN-200 template for 192.0.2.0/24.
-    /// Expected: InvalidOperationException ('No deletion was attempted'), nothing removed, and both *L and *OP remain.
-    /// Invariant: a legacy template matching provenance is only deleted when no unrelated template blocks cleanup, and the unrelated one is never deleted.
+    /// Expected: cleanup succeeds, only *L is removed, and *OP is preserved.
+    /// Invariant: a legacy template matching provenance is deleted, and an unrelated passive template neither blocks cleanup nor is ever deleted.
     /// </summary>
     [Fact]
     public async Task ProvenanceLegacy_Deleted_UnrelatedPrefix_NotDeleted()
@@ -196,24 +216,22 @@ public sealed class OspfMultiTemplateTopologyTests
         store.Templates.Add(LegacyRow("*OP", "VLAN-200", "192.0.2.0/24"));
         CapturingConnection capturing = store.Connect();
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Empty(capturing.RemovedIds);
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
+        Assert.Equal(["*L"], capturing.RemovedIds);
         Assert.Contains(store.Templates, t => t[".id"] == "*OP");
-        Assert.Contains(store.Templates, t => t[".id"] == "*L");
+        Assert.DoesNotContain(store.Templates, t => t[".id"] == "*L");
     }
 
     /// <summary>
     /// Scenario: Cleanup runs once against a plan with one superseded legacy template (vlan10, 10.16.11.0/27). An
     /// unknown operator template (192.0.2.0/24 in area site) then appears, outside the management boundary and
     /// outside planned site membership, and cleanup runs again.
-    /// Expected: The first run removes only the legacy template. The second run throws InvalidOperationException
-    /// saying no deletion was attempted, and removes nothing.
-    /// Invariant: An unknown template aborts cleanup before any delete is issued.
+    /// Expected: The first run removes only the legacy template. The second run succeeds, removes nothing and
+    /// preserves the unrelated operator template.
+    /// Invariant: A non-conflicting unmanaged template is preserved, never deleted, and does not abort cleanup.
     /// </summary>
     [Fact]
-    public async Task UnknownAppearsOnSubsequentRun_AbortsWithoutDelete()
+    public async Task UnrelatedTemplateAppearsOnSubsequentRun_IsPreservedWithoutDelete()
     {
         OspfMigrationPlan plan = ClonePlan(
             MultiBackhaulPlan(1, 1),
@@ -233,12 +251,11 @@ public sealed class OspfMultiTemplateTopologyTests
         Assert.Equal(["*L"], capturing.RemovedIds);
 
         capturing.RemovedIds.Clear();
-        // Outside management boundary and outside planned site membership — must abort.
+        // Outside management boundary and outside planned site membership, but passive and non-conflicting — preserved.
         store.Templates.Add(Row("*U", "site", "operator", "192.0.2.0/24", passive: true));
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None));
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
+        await CreateOps().RemoveObsoleteTemplatesAsync(capturing, plan, CancellationToken.None);
         Assert.Empty(capturing.RemovedIds);
+        Assert.Contains(store.Templates, t => t[".id"] == "*U");
     }
 
     /// <summary>
@@ -258,16 +275,16 @@ public sealed class OspfMultiTemplateTopologyTests
             RouterOsVersion = "6.49.23",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV6,
-            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.0.0.11", Version = "2" }],
+            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.16.0.11", Version = "2" }],
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                new OspfAreaRow { Name = "site", AreaId = "10.0.0.11", Type = "stub", DefaultCost = "1" },
+                new OspfAreaRow { Name = "site", AreaId = "10.16.0.11", Type = "stub", DefaultCost = "1" },
             ],
             Networks =
             [
                 new OspfNetworkRow { Area = "backbone", Network = "10.0.0.0/30" },
-                new OspfNetworkRow { Area = "backbone", Network = "10.0.0.11/32" },
+                new OspfNetworkRow { Area = "backbone", Network = "10.16.0.11/32" },
                 new OspfNetworkRow { Area = "site", Network = "10.16.11.0/27", Comment = "mgmt" },
                 new OspfNetworkRow { Area = "site", Network = "100.64.1.0/24" },
             ],
@@ -278,7 +295,7 @@ public sealed class OspfMultiTemplateTopologyTests
             IpAddresses =
             [
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
-                new OspfIpAddressRow { Address = "10.0.0.11/32", Network = "10.0.0.11", Interface = "Loopback" },
+                new OspfIpAddressRow { Address = "10.16.0.11/32", Network = "10.16.0.11", Interface = "Loopback" },
                 new OspfIpAddressRow { Address = "10.16.11.30/27", Network = "10.16.11.0", Interface = "Bridge-VLAN-99" },
             ],
             AreaRanges =
@@ -793,8 +810,14 @@ public sealed class OspfMultiTemplateTopologyTests
         /// No-op backbone guard: this fake never reports a dropped adjacency or a changed
         /// management route.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) =>
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) =>
             Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) =>
+            real.EnsureOspfInstanceNameAsync(connection, currentName, targetName, cancellationToken);
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) =>
+            real.TryRemoveUnusedRoutingIdAsync(connection, routingIdName, cancellationToken);
+
 
         /// <summary>
         /// No-op: routing-filter removal is outside this scenario, so the fake completes without

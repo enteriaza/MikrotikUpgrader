@@ -232,7 +232,9 @@ public sealed class OspfStaticSummaryRedistributionTests
         Assert.Equal(3, store.Routes.Count);
         Assert.All(store.Routes, r =>
         {
-            Assert.Equal("yes", r["blackhole"]);
+            // RouterOS prints the blackhole () flag as a present empty word.
+            Assert.True(r.ContainsKey("blackhole"));
+            Assert.Equal(string.Empty, r["blackhole"]);
             Assert.Equal("250", r["distance"]);
         });
         Assert.Equal(4, store.FilterRules.Count(r => r["chain"] == "ospf-v2-out"));
@@ -314,6 +316,174 @@ public sealed class OspfStaticSummaryRedistributionTests
         Assert.False(result.Succeeded);
         Assert.Contains("Conflicting", result.Detail, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(fake.MutatingCommands, c => c.Contains("redistribute", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Scenario: live print returns the RouterOS <c>blackhole</c> () flag as a present empty word with distance 250.
+    /// Expected: treated as the managed blackhole; no add; stage succeeds.
+    /// </summary>
+    [Fact]
+    public async Task Enabled_BlackholeFlagPresentEmpty_Distance250_IsValidExisting()
+    {
+        MutableStore store = MutableStore.WithIdentity();
+        store.Routes.Add(new Dictionary<string, string>
+        {
+            [".id"] = "*bh",
+            ["dst-address"] = "10.16.103.0/24",
+            ["blackhole"] = "",
+            ["distance"] = "250",
+            ["static"] = "",
+        });
+        CommandRecordingConnection fake = store.Connect();
+
+        OspfStaticSummaryRedistributionResult result = await CreateService(enabled: true)
+            .ApplyAndVerifyAsync(fake, PlanWithRanges("10.16.103.0/24"), CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.DoesNotContain(fake.MutatingCommands, c => c.StartsWith("/ip/route/add", StringComparison.Ordinal));
+        Assert.Single(store.Routes);
+    }
+
+    /// <summary>
+    /// Scenario: a connect route for the management /24 (distance 0, blackhole absent) already exists.
+    /// Expected: managed blackhole is added alongside it; connect route is not treated as a conflict.
+    /// </summary>
+    [Fact]
+    public async Task Enabled_ConnectRouteSameDestination_AllowsManagedBlackhole()
+    {
+        MutableStore store = MutableStore.WithIdentity();
+        store.Routes.Add(new Dictionary<string, string>
+        {
+            [".id"] = "*conn",
+            ["dst-address"] = "10.16.103.0/24",
+            ["distance"] = "0",
+            ["connect"] = "",
+            ["gateway"] = "Bridge-VLAN-99_MGMT",
+        });
+        CommandRecordingConnection fake = store.Connect();
+
+        OspfStaticSummaryRedistributionResult result = await CreateService(enabled: true)
+            .ApplyAndVerifyAsync(fake, PlanWithRanges("10.16.103.0/24"), CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.Equal(2, store.Routes.Count);
+        Assert.Contains(
+            store.Routes,
+            r => r.ContainsKey("blackhole")
+                 && r["blackhole"] == string.Empty
+                 && r["distance"] == "250");
+        Assert.Contains(store.Routes, r => r[".id"] == "*conn");
+    }
+
+    /// <summary>
+    /// Scenario: distance 250 static without a blackhole flag.
+    /// Expected: conflict; not treated as the managed blackhole.
+    /// </summary>
+    [Fact]
+    public async Task Enabled_BlackholeFlagAbsent_Distance250_IsNotManagedBlackhole()
+    {
+        MutableStore store = MutableStore.WithIdentity();
+        store.Routes.Add(new Dictionary<string, string>
+        {
+            [".id"] = "*s",
+            ["dst-address"] = "10.16.103.0/24",
+            ["distance"] = "250",
+            ["static"] = "",
+            ["gateway"] = "10.16.248.9",
+        });
+        CommandRecordingConnection fake = store.Connect();
+
+        OspfStaticSummaryRedistributionResult result = await CreateService(enabled: true)
+            .ApplyAndVerifyAsync(fake, PlanWithRanges("10.16.103.0/24"), CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Conflicting", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("blackhole=<absent>", result.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Scenario: blackhole flag present (empty) but distance is not 250.
+    /// Expected: conflict.
+    /// </summary>
+    [Fact]
+    public async Task Enabled_BlackholeFlagPresent_WrongDistance_Conflicts()
+    {
+        MutableStore store = MutableStore.WithIdentity();
+        store.Routes.Add(new Dictionary<string, string>
+        {
+            [".id"] = "*bh",
+            ["dst-address"] = "10.16.103.0/24",
+            ["blackhole"] = "",
+            ["distance"] = "1",
+            ["static"] = "",
+        });
+        CommandRecordingConnection fake = store.Connect();
+
+        OspfStaticSummaryRedistributionResult result = await CreateService(enabled: true)
+            .ApplyAndVerifyAsync(fake, PlanWithRanges("10.16.103.0/24"), CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Conflicting", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("blackhole=<flag>", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("distance='1'", result.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Scenario: two managed blackholes for the same destination.
+    /// Expected: fail closed on duplicate.
+    /// </summary>
+    [Fact]
+    public async Task Enabled_DuplicateManagedBlackholes_FailsClosed()
+    {
+        MutableStore store = MutableStore.WithIdentity();
+        store.Routes.Add(new Dictionary<string, string>
+        {
+            [".id"] = "*a",
+            ["dst-address"] = "10.16.103.0/24",
+            ["blackhole"] = "",
+            ["distance"] = "250",
+            ["static"] = "",
+        });
+        store.Routes.Add(new Dictionary<string, string>
+        {
+            [".id"] = "*b",
+            ["dst-address"] = "10.16.103.0/24",
+            ["blackhole"] = "yes",
+            ["distance"] = "250",
+            ["static"] = "",
+        });
+        CommandRecordingConnection fake = store.Connect();
+
+        OspfStaticSummaryRedistributionResult result = await CreateService(enabled: true)
+            .ApplyAndVerifyAsync(fake, PlanWithRanges("10.16.103.0/24"), CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Duplicate managed blackhole", result.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Scenario: blackhole property present with an unrecognised value.
+    /// Expected: fail closed as ambiguous flag representation.
+    /// </summary>
+    [Fact]
+    public async Task Enabled_AmbiguousBlackholeFlag_FailsClosed()
+    {
+        MutableStore store = MutableStore.WithIdentity();
+        store.Routes.Add(new Dictionary<string, string>
+        {
+            [".id"] = "*amb",
+            ["dst-address"] = "10.16.103.0/24",
+            ["blackhole"] = "maybe",
+            ["distance"] = "250",
+        });
+        CommandRecordingConnection fake = store.Connect();
+
+        OspfStaticSummaryRedistributionResult result = await CreateService(enabled: true)
+            .ApplyAndVerifyAsync(fake, PlanWithRanges("10.16.103.0/24"), CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Ambiguous", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("blackhole", result.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -686,7 +856,9 @@ public sealed class OspfStaticSummaryRedistributionTests
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new OspfV7Inventory
             {
-                Instances =
+                
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances =
                 [
                     new OspfInstanceRow
                     {
@@ -817,7 +989,11 @@ public sealed class OspfStaticSummaryRedistributionTests
         /// No-op backbone guard: this fake never reports a dropped adjacency or a changed
         /// management route.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) => Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
 
         /// <summary>
         /// Returns no neighbours; the adjacency guard is not exercised by this scenario.
@@ -1008,7 +1184,8 @@ public sealed class OspfStaticSummaryRedistributionTests
                         };
                         if (Param("blackhole") is not null)
                         {
-                            row["blackhole"] = Param("blackhole")!;
+                            // Simulate live RouterOS print: () flag present with empty value.
+                            row["blackhole"] = string.Empty;
                         }
 
                         _store.Routes.Add(row);

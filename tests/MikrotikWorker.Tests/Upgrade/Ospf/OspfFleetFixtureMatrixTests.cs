@@ -132,22 +132,22 @@ public sealed class OspfFleetFixtureMatrixTests
     }
 
     /// <summary>
-    /// Scenario: a RouterOS 7 Loopback holding 172.16.150.253, 102.66.242.100 and 10.16.254.1.
-    /// Expected: router-id 10.16.254.1 is chosen, two outside-range addresses are recorded as ignored, and the v2 naming helpers return default-v2, backbone-v2 and '&lt;identity&gt;-v2'.
-    /// Invariant: only the in-scope 10/8 loopback address can become the router-id; extras are ignored rather than fatal.
+    /// Scenario: a RouterOS 7 Loopback holding 172.16.150.253, 102.66.242.100 and 10.16.0.254.
+    /// Expected: router-id 10.16.0.254 is chosen, two outside-range addresses are recorded as ignored, and the v2 naming helpers return default-v2, backbone-v2 and '&lt;identity&gt;-v2'.
+    /// Invariant: only the in-scope 10.16.0.0/24 loopback address can become the router-id; extras are ignored rather than fatal.
     /// </summary>
     [Fact]
     public void RustenburgRos7_MultipleLoopbackAddresses_SelectsInScopeIdentity()
     {
-        // ROS7 naming reference fixture — outside-range Loopbacks are ignored; sole 10/8 wins.
+        // ROS7 naming reference fixture — outside-range Loopbacks are ignored; sole 10.16.0.0/24 address wins.
         OspfLoopbackRouterIdResult rid = OspfLoopbackRouterId.Derive(
         [
             new OspfIpAddressRow { Address = "172.16.150.253", Network = "172.16.150.253", Interface = "Loopback" },
             new OspfIpAddressRow { Address = "102.66.242.100", Network = "102.66.242.100", Interface = "Loopback" },
-            new OspfIpAddressRow { Address = "10.16.254.1", Network = "10.16.254.1", Interface = "Loopback" },
+            new OspfIpAddressRow { Address = "10.16.0.254", Network = "10.16.0.254", Interface = "Loopback" },
         ]);
         Assert.True(rid.Succeeded, rid.Detail);
-        Assert.Equal("10.16.254.1", rid.RouterId);
+        Assert.Equal("10.16.0.254", rid.RouterId);
         Assert.Equal(2, rid.IgnoredOutsideRangeAddresses.Count);
 
         Assert.Equal("default-v2", OspfFleetNaming.Ros7InstanceName);
@@ -158,8 +158,8 @@ public sealed class OspfFleetFixtureMatrixTests
     }
 
     /// <summary>
-    /// Scenario: plan the Rustenburg fixture whose Loopback carries out-of-range addresses besides 10.16.254.1.
-    /// Expected: the plan succeeds with router-id 10.16.254.1, loopback 10.16.254.1/32, instance default-v2, target area BR01.POP001.016.RustenburgKantoorServers-v2, two ignored addresses and an 'Ignored outside-range Loopback' note.
+    /// Scenario: plan the Rustenburg fixture whose Loopback carries out-of-range addresses besides 10.16.0.254.
+    /// Expected: the plan succeeds with router-id 10.16.0.254, loopback 10.16.0.254/32, instance default-v2, target area BR01.POP001.016.RustenburgKantoorServers-v2, two ignored addresses and an 'Ignored outside-range Loopback' note.
     /// Invariant: extra loopback addresses are noted but do not fail planning.
     /// </summary>
     [Fact]
@@ -168,8 +168,8 @@ public sealed class OspfFleetFixtureMatrixTests
         OspfPlanValidationResult result = OspfMigrationPlanner.Build(RustenburgSnapshot());
         Assert.True(result.Succeeded, string.Join("; ", result.Plan.ValidationErrors));
         Assert.Equal("BR01.POP001.016.RustenburgKantoorServers", result.Plan.Identity);
-        Assert.Equal("10.16.254.1", result.Plan.RouterId);
-        Assert.Equal("10.16.254.1/32", result.Plan.LoopbackCidr);
+        Assert.Equal("10.16.0.254", result.Plan.RouterId);
+        Assert.Equal("10.16.0.254/32", result.Plan.LoopbackCidr);
         Assert.Equal("default-v2", result.Plan.InstanceName);
         Assert.Equal("BR01.POP001.016.RustenburgKantoorServers-v2", result.Plan.TargetSiteAreaName);
         Assert.Equal(2, result.Plan.IgnoredOutsideRangeLoopbackAddresses.Count);
@@ -493,7 +493,7 @@ public sealed class OspfFleetFixtureMatrixTests
                 new OspfInstanceRow
                 {
                     Name = "default-v2",
-                    RouterId = "10.16.254.1",
+                    RouterId = "10.16.0.254",
                     Version = "2",
                     IsDefault = true,
                 },
@@ -510,7 +510,7 @@ public sealed class OspfFleetFixtureMatrixTests
                 new OspfAreaRow
                 {
                     Name = "BR01.POP001.016.RustenburgKantoorServers-v2",
-                    AreaId = "10.16.254.1",
+                    AreaId = "10.16.0.254",
                     Type = "stub",
                     DefaultCost = "1",
                     Instance = "default-v2",
@@ -540,7 +540,7 @@ public sealed class OspfFleetFixtureMatrixTests
                 {
                     Interfaces = "all",
                     Area = "backbone-v2",
-                    Networks = "10.16.254.1/32",
+                    Networks = "10.16.0.254/32",
                     Passive = true,
                 },
                 new OspfInterfaceTemplateRow
@@ -555,7 +555,7 @@ public sealed class OspfFleetFixtureMatrixTests
             [
                 Addr("172.16.150.253", "172.16.150.253", "Loopback"),
                 Addr("102.66.242.100", "102.66.242.100", "Loopback"),
-                Addr("10.16.254.1", "10.16.254.1", "Loopback"),
+                Addr("10.16.0.254", "10.16.0.254", "Loopback"),
                 Addr("10.16.248.6/30", "10.16.248.4", "eth-bh"),
                 Addr("10.16.254.30/27", "10.16.254.0", "Bridge-VLAN-199_MGMT"),
             ],

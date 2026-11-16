@@ -17,7 +17,7 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 public sealed class OspfMigrationPlannerTests
 {
     /// <summary>
-    /// Scenario: a baseline RouterOS 6 snapshot with an ether1 /30 backbone link, a 10.255.0.1/32 loopback and a 10.10.0.0/16 site network.
+    /// Scenario: a baseline RouterOS 6 snapshot with an ether1 /30 backbone link, a 10.16.0.1/32 loopback and a 10.10.0.0/16 site network.
     /// Expected: the plan succeeds with one active ptp backhaul (ether1, 10.0.0.0/30, cost 10), one passive loopback, no /32 among the backhauls, one passive 'all' site template for 10.10.0.0/16, stub site areas without no-summaries, and the 10.10.0.0/16 area range kept.
     /// Invariant: the loopback stays passive and is never forced to PTP or counted as a backhaul.
     /// </summary>
@@ -29,7 +29,7 @@ public sealed class OspfMigrationPlannerTests
 
         Assert.True(result.Succeeded, string.Join("; ", result.Plan.ValidationErrors));
         Assert.Equal(OspfCaptureSourceKind.RouterOsV6, result.Plan.SourceKind);
-        Assert.Equal("10.255.0.1", result.Plan.RouterId);
+        Assert.Equal("10.16.0.1", result.Plan.RouterId);
         Assert.Single(result.Plan.ActiveBackhauls);
         Assert.Equal("ether1", result.Plan.ActiveBackhauls[0].Interface);
         Assert.Equal("10.0.0.0/30", result.Plan.ActiveBackhauls[0].NetworkCidr);
@@ -38,7 +38,7 @@ public sealed class OspfMigrationPlannerTests
         Assert.False(result.Plan.ActiveBackhauls[0].Passive);
 
         Assert.Single(result.Plan.PassiveLoopbacks);
-        Assert.Equal("10.255.0.1/32", result.Plan.PassiveLoopbacks[0].NetworkCidr);
+        Assert.Equal("10.16.0.1/32", result.Plan.PassiveLoopbacks[0].NetworkCidr);
         Assert.True(result.Plan.PassiveLoopbacks[0].Passive);
         // Loopback must stay passive without forced PTP.
         Assert.DoesNotContain(result.Plan.ActiveBackhauls, b => b.NetworkCidr.EndsWith("/32", StringComparison.Ordinal));
@@ -66,7 +66,7 @@ public sealed class OspfMigrationPlannerTests
         OspfCaptureSnapshot snapshot = CreateV6Baseline(
             networks:
             [
-                Net("backbone", "10.255.0.1/32"),
+                Net("backbone", "10.16.0.1/32"),
                 Net("backbone", "10.0.0.0/30"),
                 Net("site", "10.10.0.0/16"),
                 Net("site", "100.99.0.0/16"),
@@ -100,7 +100,7 @@ public sealed class OspfMigrationPlannerTests
             RouterOsVersion = "7.23.8",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV7,
-            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.255.0.1", Version = "2" }],
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.1", Version = "2" }],
             Areas = [Backbone(), SiteArea(defaultCost: "1")],
             AreaRanges = [new OspfAreaRangeRow { Area = "site", Range = "10.10.0.0/16" }],
             InterfaceTemplates =
@@ -118,7 +118,7 @@ public sealed class OspfMigrationPlannerTests
                 {
                     Area = "backbone",
                     Interfaces = "lo",
-                    Networks = "10.255.0.1/32",
+                    Networks = "10.16.0.1/32",
                     Passive = true,
                 },
                 new OspfInterfaceTemplateRow
@@ -146,7 +146,7 @@ public sealed class OspfMigrationPlannerTests
             ],
             IpAddresses =
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.10.0.1/27", "10.10.0.0", "Bridge-VLAN-99"),
             ],
@@ -182,7 +182,7 @@ public sealed class OspfMigrationPlannerTests
             new OspfAreaRow
             {
                 Name = "site",
-                AreaId = "10.255.0.1",
+                AreaId = "10.16.0.1",
                 Type = "stub",
                 DefaultCost = "20",
                 InjectSummaryLsas = "yes",
@@ -227,7 +227,7 @@ public sealed class OspfMigrationPlannerTests
         OspfCaptureSnapshot snapshot = CreateV6Baseline(
             addresses:
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.0.1.1/30", "10.0.1.0", "ether2"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
@@ -239,7 +239,7 @@ public sealed class OspfMigrationPlannerTests
             ],
             networks:
             [
-                Net("backbone", "10.255.0.1/32"),
+                Net("backbone", "10.16.0.1/32"),
                 Net("backbone", "10.0.0.0/30"),
                 Net("backbone", "10.0.1.0/30"),
                 Net("site", "10.10.0.0/16"),
@@ -264,14 +264,14 @@ public sealed class OspfMigrationPlannerTests
         OspfCaptureSnapshot snapshot = CreateV6Baseline(
             addresses:
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/24", "10.0.0.0", "ether1"),
                 Addr("10.0.0.50/24", "10.0.0.0", "bridge-local"),
             ],
             interfaces: [Iface("ether1", "ptp", "10")],
             networks:
             [
-                Net("backbone", "10.255.0.1/32"),
+                Net("backbone", "10.16.0.1/32"),
                 Net("backbone", "10.0.0.0/24"),
                 Net("site", "10.10.0.0/16"),
             ]);
@@ -300,10 +300,10 @@ public sealed class OspfMigrationPlannerTests
             RouterOsVersion = "7.23.8",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV7,
-            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.255.0.1" }],
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.1" }],
             Areas = [Backbone(), SiteArea()],
             InterfaceTemplates = [],
-            IpAddresses = [Addr("10.255.0.1/32", "10.255.0.1", "lo")],
+            IpAddresses = [Addr("10.16.0.1/32", "10.16.0.1", "lo")],
         };
 
         OspfPlanValidationResult result = OspfMigrationPlanner.Build(emptyTemplates);
@@ -315,7 +315,7 @@ public sealed class OspfMigrationPlannerTests
 
     /// <summary>
     /// Scenario: a v7 snapshot whose loopback and site templates are active ptp (cost 1) instead of passive.
-    /// Expected: the plan succeeds with a passive 10.255.0.1/32 loopback and a passive 'all' 10.10.0.0/16 site template, and a note records the active-to-passive change.
+    /// Expected: the plan succeeds with a passive 10.16.0.1/32 loopback and a passive 'all' 10.10.0.0/16 site template, and a note records the active-to-passive change.
     /// Invariant: non-backhaul templates are always planned passive.
     /// </summary>
     [Fact]
@@ -330,7 +330,7 @@ public sealed class OspfMigrationPlannerTests
             RouterOsVersion = "7.23.8",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV7,
-            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.255.0.1", Version = "2" }],
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.1", Version = "2" }],
             Areas = [Backbone(), SiteArea()],
             InterfaceTemplates =
             [
@@ -347,7 +347,7 @@ public sealed class OspfMigrationPlannerTests
                 {
                     Area = "backbone",
                     Interfaces = "lo",
-                    Networks = "10.255.0.1",
+                    Networks = "10.16.0.1",
                     Type = "ptp",
                     Cost = "1",
                     Passive = false,
@@ -364,7 +364,7 @@ public sealed class OspfMigrationPlannerTests
             ],
             IpAddresses =
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ],
@@ -373,7 +373,7 @@ public sealed class OspfMigrationPlannerTests
         OspfPlanValidationResult result = OspfMigrationPlanner.Build(snapshot);
         Assert.True(result.Succeeded, string.Join("; ", result.Plan.ValidationErrors));
         Assert.True(Assert.Single(result.Plan.PassiveLoopbacks).Passive);
-        Assert.Equal("10.255.0.1/32", result.Plan.PassiveLoopbacks[0].NetworkCidr);
+        Assert.Equal("10.16.0.1/32", result.Plan.PassiveLoopbacks[0].NetworkCidr);
         OspfPlanSiteNetworkTemplate site = Assert.Single(result.Plan.PassiveSiteNetworks);
         Assert.Equal("10.10.0.0/16", site.NetworkCidr);
         Assert.Equal("all", site.Interfaces);
@@ -400,7 +400,7 @@ public sealed class OspfMigrationPlannerTests
             RouterOsVersion = "7.23.8",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV7,
-            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.255.0.1", Version = "2" }],
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.1", Version = "2" }],
             Areas = [Backbone(), SiteArea(defaultCost: "5")],
             AreaRanges = [new OspfAreaRangeRow { Area = "site", Range = "10.10.0.0/16" }],
             InterfaceTemplates =
@@ -417,7 +417,7 @@ public sealed class OspfMigrationPlannerTests
                 new OspfInterfaceTemplateRow
                 {
                     Area = "backbone",
-                    Networks = "10.255.0.1/32",
+                    Networks = "10.16.0.1/32",
                     Interfaces = "lo",
                     Passive = true,
                 },
@@ -430,7 +430,7 @@ public sealed class OspfMigrationPlannerTests
             ],
             IpAddresses =
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ],
@@ -490,19 +490,19 @@ public sealed class OspfMigrationPlannerTests
             RouterOsVersion = "6.49.23",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV6,
-            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.255.0.1", IsDefault = true }],
+            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.16.0.1", IsDefault = true }],
             Areas = [Backbone(), SiteArea()],
             AreaRanges = [new OspfAreaRangeRow { Area = "site", Range = "10.10.0.0/16" }],
             Networks = networks ??
             [
-                Net("backbone", "10.255.0.1/32"),
+                Net("backbone", "10.16.0.1/32"),
                 Net("backbone", "10.0.0.0/30"),
                 Net("site", "10.10.0.0/16"),
             ],
             Interfaces = interfaces ?? [Iface("ether1", "ptp", "100")],
             IpAddresses = addresses ??
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ],
@@ -547,7 +547,7 @@ public sealed class OspfMigrationPlannerTests
     private static OspfAreaRow SiteArea(string? defaultCost = null) => new()
     {
         Name = "site",
-        AreaId = "10.255.0.1",
+        AreaId = "10.16.0.1",
         Type = "stub",
         DefaultCost = defaultCost,
     };

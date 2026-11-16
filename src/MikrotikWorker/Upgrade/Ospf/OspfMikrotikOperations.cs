@@ -88,31 +88,21 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         List<OspfNetworkRow> networks = await PrintMappedAsync(
                 connection,
                 "/routing/ospf/network/print",
-                static row => new OspfNetworkRow
-                {
-                    Id = Field(row, ".id"),
-                    Area = Field(row, "area"),
-                    Network = Field(row, "network"),
-                    Comment = Field(row, "comment"),
-                },
+                MapNetwork,
                 cancellationToken)
             .ConfigureAwait(false);
 
         List<OspfInterfaceRow> interfaces = await PrintMappedAsync(
                 connection,
                 "/routing/ospf/interface/print",
-                static row => new OspfInterfaceRow
-                {
-                    Id = Field(row, ".id"),
-                    Interface = Field(row, "interface"),
-                    NetworkType = Field(row, "network-type"),
-                    Cost = Field(row, "cost"),
-                    Passive = IsTruthy(Field(row, "passive")),
-                },
+                MapInterfaceV6,
                 cancellationToken)
             .ConfigureAwait(false);
 
         List<OspfV3ObjectRef> v3 = await CaptureV6OspfV3Async(connection, cancellationToken)
+            .ConfigureAwait(false);
+
+        List<OspfNeighbourRow> neighbours = await CaptureNeighbourInventoryAsync(connection, cancellationToken)
             .ConfigureAwait(false);
 
         return new OspfCaptureSnapshot
@@ -130,6 +120,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             Networks = networks,
             Interfaces = interfaces,
             IpAddresses = addresses,
+            Neighbours = neighbours,
             RoutingFilters = filters,
             OspfV3Objects = v3,
         };
@@ -154,6 +145,11 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         OspfV7Inventory inventory = await ReadV7InventoryAsync(connection, cancellationToken)
             .ConfigureAwait(false);
 
+        List<OspfNeighbourRow> neighbours = await CaptureNeighbourInventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+        List<OspfRoutingIdRow> routingIds = await CaptureRoutingIdInventoryAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+
         return new OspfCaptureSnapshot
         {
             ImportId = request.ImportId,
@@ -169,6 +165,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             AreaRanges = inventory.AreaRanges,
             InterfaceTemplates = inventory.Templates,
             IpAddresses = addresses,
+            RoutingIds = routingIds,
+            Neighbours = neighbours,
             RoutingFilters = filters,
             OspfV3Objects = inventory.OspfV3Objects,
         };
@@ -235,57 +233,37 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         ITikConnection connection,
         CancellationToken cancellationToken = default)
     {
-        List<OspfInstanceRow> instances = await PrintMappedAsync(
+        // Each required OSPFv3 residual collection is captured independently. A failed query/parse
+        // must never surface as an empty successful collection (empty ≠ proven absent).
+        List<OspfInstanceRow> instances = await CaptureRequiredCollectionAsync(
                 connection,
+                "instances",
                 "/routing/ospf/instance/print",
                 MapInstance,
                 cancellationToken)
             .ConfigureAwait(false);
 
-        List<OspfAreaRow> areas = await PrintMappedAsync(
+        List<OspfAreaRow> areas = await CaptureRequiredCollectionAsync(
                 connection,
+                "areas",
                 "/routing/ospf/area/print",
                 MapAreaV7,
                 cancellationToken)
             .ConfigureAwait(false);
 
-        List<OspfAreaRangeRow> ranges = await PrintMappedAsync(
+        List<OspfAreaRangeRow> ranges = await CaptureRequiredCollectionAsync(
                 connection,
+                "area-ranges",
                 "/routing/ospf/area/range/print",
                 MapRange,
                 cancellationToken)
             .ConfigureAwait(false);
 
-        List<OspfInterfaceTemplateRow> templates = await PrintMappedAsync(
+        List<OspfInterfaceTemplateRow> templates = await CaptureRequiredCollectionAsync(
                 connection,
+                "interface-templates",
                 "/routing/ospf/interface-template/print",
-                static row => new OspfInterfaceTemplateRow
-                {
-                    Id = Field(row, ".id"),
-                    Area = Field(row, "area"),
-                    Interfaces = Field(row, "interfaces"),
-                    Networks = Field(row, "networks") ?? Field(row, "network"),
-                    Type = Field(row, "type"),
-                    Cost = Field(row, "cost"),
-                    // Match cleanup inventory mapping: ROS flag properties may print as present/empty.
-                    Passive = IsFlagPresent(Field(row, "passive")) || IsTruthy(Field(row, "passive")),
-                    Disabled = IsTruthy(Field(row, "disabled")),
-                    Comment = Field(row, "comment"),
-                    Auth = Field(row, "auth"),
-                    AuthId = Field(row, "auth-id"),
-                    AuthKey = Field(row, "auth-key"),
-                    AuthenticationKey = Field(row, "authentication-key"),
-                    Priority = Field(row, "priority"),
-                    UseBfd = Field(row, "use-bfd"),
-                    HelloInterval = Field(row, "hello-interval"),
-                    DeadInterval = Field(row, "dead-interval"),
-                    RetransmitInterval = Field(row, "retransmit-interval"),
-                    TransmitDelay = Field(row, "transmit-delay"),
-                    InstanceId = Field(row, "instance-id"),
-                    PrefixList = Field(row, "prefix-list"),
-                    VlinkNeighborId = Field(row, "vlink-neighbor-id"),
-                    VlinkTransitArea = Field(row, "vlink-transit-area"),
-                },
+                MapInterfaceTemplate,
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -303,6 +281,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
 
         return new OspfV7Inventory
         {
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
             Instances = instances,
             Areas = areas,
             AreaRanges = ranges,
@@ -508,15 +487,54 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return await PrintMappedAsync(
                 connection,
                 "/ip/address/print",
-                static row => new OspfIpAddressRow
-                {
-                    Id = Field(row, ".id"),
-                    Address = Field(row, "address"),
-                    Network = Field(row, "network"),
-                    Interface = Field(row, "interface"),
-                },
+                MapIpAddress,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>Captures OSPF neighbour rows for plan-time backbone adjacency evidence.</summary>
+    private async Task<List<OspfNeighbourRow>> CaptureNeighbourInventoryAsync(
+        ITikConnection connection,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<Dictionary<string, string>> rows =
+            await ReadOspfNeighboursAsync(connection, cancellationToken).ConfigureAwait(false);
+        return rows
+            .Select(static n => new OspfNeighbourRow
+            {
+                Address = GetDict(n, "address"),
+                RouterId = GetDict(n, "router-id"),
+                State = GetDict(n, "state"),
+                Interface = GetDict(n, "interface") ?? GetDict(n, "iface"),
+            })
+            .ToList();
+    }
+
+    /// <summary>Captures <c>/routing/id</c> rows used to resolve symbolic OSPF router-id references.</summary>
+    private async Task<List<OspfRoutingIdRow>> CaptureRoutingIdInventoryAsync(
+        ITikConnection connection,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await PrintMappedAsync(
+                    connection,
+                    "/routing/id/print",
+                    static row => new OspfRoutingIdRow
+                    {
+                        Id = Field(row, ".id"),
+                        Name = Field(row, "name"),
+                        Address = Field(row, "id") ?? Field(row, "address"),
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Menu absent on ROS6 / older builds — treat as empty rather than failing capture.
+            logger.LogDebug(ex, "OSPF capture: /routing/id inventory unavailable; treating as empty");
+            return [];
+        }
     }
 
     /// <inheritdoc />
@@ -534,9 +552,25 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             string.Equals(Field(r, "instance"), instanceName, StringComparison.OrdinalIgnoreCase)
             && (string.Equals(Field(r, "name"), area.Name, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(Field(r, "area-id"), area.AreaId, StringComparison.Ordinal)));
+        // Fallback only for dangling/empty instance ownership on the intended OSPFv2 instance path.
+        // Never adopt an area that already belongs to a different named instance (e.g. residual OSPFv3).
         existing ??= rows.FirstOrDefault(r =>
-            string.Equals(Field(r, "name"), area.Name, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(Field(r, "area-id"), area.AreaId, StringComparison.Ordinal));
+            (string.IsNullOrWhiteSpace(Field(r, "instance"))
+             || string.Equals(Field(r, "instance"), instanceName, StringComparison.OrdinalIgnoreCase))
+            && (string.Equals(Field(r, "name"), area.Name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Field(r, "area-id"), area.AreaId, StringComparison.Ordinal)));
+
+        ITikReSentence? foreignCollision = rows.FirstOrDefault(r =>
+            !string.IsNullOrWhiteSpace(Field(r, "instance"))
+            && !string.Equals(Field(r, "instance"), instanceName, StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(Field(r, "name"), area.Name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Field(r, "area-id"), area.AreaId, StringComparison.Ordinal)));
+        if (existing is null && foreignCollision is not null)
+        {
+            throw new InvalidOperationException(
+                $"Refusing OSPFv2 area ensure for '{area.Name}' (area-id={area.AreaId}): a live area "
+                + $"with the same name/area-id belongs to instance '{Field(foreignCollision, "instance")}'.");
+        }
 
         if (existing is null)
         {
@@ -563,6 +597,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         string areaId = Field(existing, ".id")!;
         ITikCommand set = connection.CreateCommand("/routing/ospf/area/set");
         set.AddParameter(".id", areaId);
+        // Keep area→instance association valid after instance rename (e.g. default → default-v2).
+        set.AddParameter("instance", instanceName);
         set.AddParameter("type", area.TargetType);
         if (area.DefaultCost is not null)
         {
@@ -1062,10 +1098,21 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         OspfMigrationPlan plan,
         CancellationToken cancellationToken = default)
     {
-        // 1–11: classify complete inventory and abort before ANY deletion if unknowns exist.
+        // Classify complete inventory and abort before ANY deletion if conflicting unknowns exist.
+        // Unrelated PreservedUnmanaged templates are retained and never deleted.
         List<OspfTemplateInventoryRow> initial = await PrintTemplateInventoryAsync(connection, cancellationToken)
             .ConfigureAwait(false);
         OspfTemplateClassificationReport initialReport = OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, initial);
+
+        if (initialReport.PreservedUnmanaged.Count > 0)
+        {
+            logger.LogInformation(
+                "Preserving {Count} unrelated OSPF template(s) during cleanup: {Detail}",
+                initialReport.PreservedUnmanaged.Count,
+                string.Join(
+                    " | ",
+                    initialReport.PreservedUnmanaged.Select(static p => p.Row.Describe())));
+        }
 
         List<string> legacyFingerprints = initialReport.KnownLegacy
             .Select(static l => OspfTemplateCleanupClassifier.LegacyFingerprint(l.Row))
@@ -1074,6 +1121,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
 
         HashSet<string> protectedIds = OspfTemplateCleanupClassifier.ProtectedIds(initialReport);
         int expectedPlannedCount = initialReport.PlannedProtectedCount;
+        int expectedPreservedCount = initialReport.PreservedUnmanaged.Count;
 
         foreach (string fingerprint in legacyFingerprints)
         {
@@ -1155,16 +1203,19 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         List<OspfTemplateInventoryRow> finalRows = await PrintTemplateInventoryAsync(connection, cancellationToken)
             .ConfigureAwait(false);
         OspfTemplateClassificationReport finalReport = OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, finalRows);
-        if (finalRows.Count != expectedPlannedCount
+        int expectedFinalCount = expectedPlannedCount + expectedPreservedCount;
+        if (finalRows.Count != expectedFinalCount
             || finalReport.KnownLegacy.Count != 0
             || finalReport.Unknown.Count != 0
-            || finalReport.PlannedProtectedCount != expectedPlannedCount)
+            || finalReport.PlannedProtectedCount != expectedPlannedCount
+            || finalReport.PreservedUnmanaged.Count != expectedPreservedCount)
         {
             throw new InvalidOperationException(
                 $"OSPF template cleanup final inventory invalid: count={finalRows.Count}, "
                 + $"planned-protected={finalReport.PlannedProtectedCount}, "
-                + $"legacy={finalReport.KnownLegacy.Count}, unknown={finalReport.Unknown.Count}, "
-                + $"expected planned count={expectedPlannedCount}.");
+                + $"preserved-unmanaged={finalReport.PreservedUnmanaged.Count}, "
+                + $"legacy={finalReport.KnownLegacy.Count}, conflicting-unknown={finalReport.Unknown.Count}, "
+                + $"expected planned={expectedPlannedCount}, expected preserved={expectedPreservedCount}.");
         }
     }
 
@@ -1226,6 +1277,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             areaInstance = resolved;
         }
 
+        (bool disabled, OspfAdminState adminState) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
         return new OspfTemplateInventoryRow
         {
             Id = Field(row, ".id"),
@@ -1235,7 +1287,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             Type = Field(row, "type"),
             Cost = Field(row, "cost"),
             Passive = IsFlagPresent(Field(row, "passive")) || IsTruthy(Field(row, "passive")),
-            Disabled = IsTruthy(Field(row, "disabled")),
+            Disabled = disabled,
+            AdminState = adminState,
             Auth = Field(row, "auth"),
             AuthId = Field(row, "auth-id"),
             AuthKeyPresent = authKey.Present,
@@ -1296,6 +1349,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         OspfMigrationPlan plan,
         CancellationToken cancellationToken = default)
     {
+        // Plan is retained for interface compatibility; OSPFv3 removal is mandatory and driven by
+        // live inventory selection (plan.RemoveAllOspfV3 cannot suppress removal).
         _ = plan;
         OspfV7Inventory inventory = await ReadV7InventoryAsync(connection, cancellationToken)
             .ConfigureAwait(false);
@@ -1514,15 +1569,23 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         ITikConnection connection,
         OspfMigrationPlan plan,
         OspfManagementPlaneBaseline baseline,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool requireFleetCost = true)
     {
         foreach (OspfPlanBackhaulTemplate bh in plan.ActiveBackhauls)
         {
-            // Apply/Verify remap logical ROS6 area names (e.g. backbone) onto live ROS7
-            // names (backbone-v2). Post-verify callers may still pass the unmapped plan;
-            // match the intended live backbone area rather than requiring the capture name.
-            OspfPlanBackhaulTemplate assertBh = RemapBackhaulAreaToLiveTarget(plan, bh);
-            await AssertBackhaulTemplateActiveAsync(connection, assertBh, expectedId: null, cancellationToken)
+            // Do not force TargetBackboneAreaName (backbone-v2) over the live-remapped area
+            // name. RemapPlan may bind logical backbone → live "backbone" (area-id 0.0.0.0
+            // fallback) while Target remains backbone-v2; mid-apply templates still say
+            // area=backbone. Post-verify may still pass an unmapped logical plan whose live
+            // rows already use backbone-v2. Assert matches acceptable backbone area names.
+            await AssertBackhaulTemplateActiveAsync(
+                    connection,
+                    bh,
+                    expectedId: null,
+                    cancellationToken,
+                    requireCostMatch: requireFleetCost,
+                    plan: plan)
                 .ConfigureAwait(false);
         }
 
@@ -1599,31 +1662,251 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             .ToList();
     }
 
-    /// <summary>Re-reads the interface-templates and asserts the planned backhaul is present, not passive, not disabled and still at the planned cost; throws <see cref="OspfBackboneMutationGuardException"/> otherwise.</summary>
+    /// <inheritdoc />
+    public async Task EnsureOspfInstanceNameAsync(
+        ITikConnection connection,
+        string currentName,
+        string targetName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(currentName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetName);
+        if (string.Equals(currentName, targetName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        IEnumerable<ITikReSentence> rows = await connection
+            .CreateCommand("/routing/ospf/instance/print")
+            .ExecuteListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        List<ITikReSentence> list = rows.ToList();
+
+        ITikReSentence? targetExisting = list.FirstOrDefault(r =>
+            string.Equals(Field(r, "name"), targetName, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(Field(r, "version"), "3", StringComparison.OrdinalIgnoreCase));
+        ITikReSentence? current = list.FirstOrDefault(r =>
+            string.Equals(Field(r, "name"), currentName, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(Field(r, "version"), "3", StringComparison.OrdinalIgnoreCase));
+
+        if (current is null)
+        {
+            throw new InvalidOperationException(
+                $"Cannot rename OSPFv2 instance '{currentName}' → '{targetName}': source instance is missing.");
+        }
+
+        if (targetExisting is not null
+            && !string.Equals(Field(targetExisting, ".id"), Field(current, ".id"), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Cannot rename OSPFv2 instance '{currentName}' → '{targetName}': target name already exists "
+                + $"on .id={Field(targetExisting, ".id")}.");
+        }
+
+        string id = Field(current, ".id")
+                    ?? throw new InvalidOperationException(
+                        $"OSPFv2 instance '{currentName}' has no .id; refusing rename.");
+        ITikCommand set = connection.CreateCommand("/routing/ospf/instance/set");
+        set.AddParameter(".id", id);
+        set.AddParameter("name", targetName);
+        await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        logger.LogInformation(
+            "Renamed OSPFv2 instance '{From}' → '{To}' (.id={Id})",
+            currentName,
+            targetName,
+            id);
+
+        // Verify live name.
+        IEnumerable<ITikReSentence> after = await connection
+            .CreateCommand("/routing/ospf/instance/print")
+            .ExecuteListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        ITikReSentence? renamed = after.FirstOrDefault(r =>
+            string.Equals(Field(r, ".id"), id, StringComparison.Ordinal));
+        if (renamed is null
+            || !string.Equals(Field(renamed, "name"), targetName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"OSPFv2 instance rename verification failed: expected name '{targetName}' on .id={id}.");
+        }
+
+        // Rebind only areas that already pointed at the previous OSPFv2 instance name. This uses the
+        // prior instance= string (not name/area-id fallback), so OSPFv3 areas are never selected.
+        await RebindOspfV2AreaInstanceReferencesAsync(
+                connection,
+                currentName,
+                targetName,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sets <c>instance=</c> to <paramref name="targetInstanceName"/> on every area whose current
+    /// <c>instance</c> equals <paramref name="previousInstanceName"/>, addressing each row by
+    /// <c>.id</c>. Does not match by area name or area-id.
+    /// </summary>
+    private async Task RebindOspfV2AreaInstanceReferencesAsync(
+        ITikConnection connection,
+        string previousInstanceName,
+        string targetInstanceName,
+        CancellationToken cancellationToken)
+    {
+        IEnumerable<ITikReSentence> areas = await connection
+            .CreateCommand("/routing/ospf/area/print")
+            .ExecuteListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        List<string> reboundIds = [];
+        foreach (ITikReSentence area in areas)
+        {
+            if (!string.Equals(Field(area, "instance"), previousInstanceName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string? areaId = Field(area, ".id");
+            if (string.IsNullOrWhiteSpace(areaId))
+            {
+                throw new InvalidOperationException(
+                    $"OSPFv2 area '{Field(area, "name")}' still references instance '{previousInstanceName}' "
+                    + "but has no .id; refusing ambiguous rebind after instance rename.");
+            }
+
+            ITikCommand set = connection.CreateCommand("/routing/ospf/area/set");
+            set.AddParameter(".id", areaId);
+            set.AddParameter("instance", targetInstanceName);
+            await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            reboundIds.Add(areaId);
+        }
+
+        if (reboundIds.Count > 0)
+        {
+            // Read-back: API acceptance alone is not proof the instance= ownership changed.
+            IEnumerable<ITikReSentence> after = await connection
+                .CreateCommand("/routing/ospf/area/print")
+                .ExecuteListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            Dictionary<string, ITikReSentence> byId = after
+                .Select(static r => (Id: Field(r, ".id"), Row: r))
+                .Where(static t => !string.IsNullOrWhiteSpace(t.Id))
+                .ToDictionary(static t => t.Id!, static t => t.Row, StringComparer.Ordinal);
+
+            foreach (string areaId in reboundIds)
+            {
+                if (!byId.TryGetValue(areaId, out ITikReSentence? row)
+                    || !string.Equals(Field(row, "instance"), targetInstanceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"OSPFv2 area rebind verification failed: expected instance '{targetInstanceName}' "
+                        + $"on .id={areaId} after rename from '{previousInstanceName}'.");
+                }
+            }
+
+            logger.LogInformation(
+                "Rebound {Count} OSPF area(s) from instance '{From}' → '{To}' after rename",
+                reboundIds.Count,
+                previousInstanceName,
+                targetInstanceName);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task TryRemoveUnusedRoutingIdAsync(
+        ITikConnection connection,
+        string? routingIdName,
+        CancellationToken cancellationToken = default)
+    {
+        // Conservative policy: the OSPF migration always writes a literal Loopback IPv4 router-id.
+        // Deleting a /routing/id object requires proving no non-OSPF consumer (e.g. BGP) still
+        // references it. This worker does not have a complete cross-protocol reference inventory,
+        // so obsolete entries are retained rather than risk deleting a live reference.
+        if (string.IsNullOrWhiteSpace(routingIdName)
+            || OspfLoopbackRouterId.IsDottedQuadIPv4(routingIdName))
+        {
+            return;
+        }
+
+        string name = routingIdName.Trim();
+        try
+        {
+            IEnumerable<ITikReSentence> instances = await connection
+                .CreateCommand("/routing/ospf/instance/print")
+                .ExecuteListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            bool stillReferencedByOspf = instances.Any(r =>
+                string.Equals(Field(r, "router-id"), name, StringComparison.OrdinalIgnoreCase));
+            if (stillReferencedByOspf)
+            {
+                logger.LogInformation(
+                    "Preserving /routing/id '{Name}' because an OSPF instance still references it",
+                    name);
+                return;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex,
+                "Skipping /routing/id cleanup for '{Name}'; cannot read OSPF instances to assess references",
+                name);
+            return;
+        }
+
+        logger.LogInformation(
+            "Retaining /routing/id '{Name}' after OSPF router-id normalisation: complete non-OSPF "
+            + "reference inventory is unavailable; deletion is skipped to protect BGP and other consumers",
+            name);
+    }
+
+    /// <summary>Re-reads the interface-templates and asserts the planned backhaul is present, not passive, not disabled and optionally still at the planned cost; throws <see cref="OspfBackboneMutationGuardException"/> otherwise.</summary>
     private async Task AssertBackhaulTemplateActiveAsync(
         ITikConnection connection,
         OspfPlanBackhaulTemplate template,
         string? expectedId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireCostMatch = true,
+        OspfMigrationPlan? plan = null)
     {
-        IEnumerable<ITikReSentence> rows = await connection
-            .CreateCommand("/routing/ospf/interface-template/print")
-            .ExecuteListAsync(cancellationToken)
-            .ConfigureAwait(false);
+        List<ITikReSentence> rows = (await connection
+                .CreateCommand("/routing/ospf/interface-template/print")
+                .ExecuteListAsync(cancellationToken)
+                .ConfigureAwait(false))
+            .ToList();
 
-        ITikReSentence? live = rows.FirstOrDefault(r =>
-            (expectedId is null || string.Equals(Field(r, ".id"), expectedId, StringComparison.Ordinal))
-            && string.Equals(Field(r, "area"), template.AreaName, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(Field(r, "interfaces"), template.Interface, StringComparison.Ordinal)
-            && string.Equals(
-                NormalizeCidr(ReadNetworksField(r)),
-                NormalizeCidr(template.NetworkCidr),
-                StringComparison.Ordinal));
+        List<ITikReSentence> matches = rows
+            .Where(r =>
+                (expectedId is null || string.Equals(Field(r, ".id"), expectedId, StringComparison.Ordinal))
+                && MatchesBackhaulArea(Field(r, "area"), template, plan)
+                && string.Equals(Field(r, "interfaces"), template.Interface, StringComparison.Ordinal)
+                && string.Equals(
+                    NormalizeCidr(ReadNetworksField(r)),
+                    NormalizeCidr(template.NetworkCidr),
+                    StringComparison.Ordinal))
+            .ToList();
 
-        if (live is null)
+        if (matches.Count > 1)
         {
             throw new OspfBackboneMutationGuardException(
-                $"Backhaul template '{template.Interface}' {template.NetworkCidr} missing after mutation.");
+                $"Ambiguous backhaul template match for '{template.Interface}' {template.NetworkCidr} "
+                + $"(count={matches.Count}); fail-closed.");
+        }
+
+        ITikReSentence? live = matches.Count == 1 ? matches[0] : null;
+        if (live is null)
+        {
+            string expectedAreas = plan is null
+                ? template.AreaName
+                : string.Join("|", EnumerateAcceptableBackboneAreaNames(plan, template));
+            string observed = string.Join(
+                "; ",
+                rows.Select(static r =>
+                    $"id={Field(r, ".id") ?? "<none>"} area={Field(r, "area") ?? "<none>"} "
+                    + $"if={Field(r, "interfaces") ?? "<none>"} "
+                    + $"net={ReadNetworksField(r) ?? "<none>"} "
+                    + $"disabled={Field(r, "disabled") ?? "<omit>"}"));
+            throw new OspfBackboneMutationGuardException(
+                $"Backhaul template '{template.Interface}' {template.NetworkCidr} missing after mutation. "
+                + $"Expected area in [{expectedAreas}]. Observed templates: {(observed.Length == 0 ? "<none>" : observed)}");
         }
 
         if (IsFlagPresent(Field(live, "passive")))
@@ -1632,22 +1915,117 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
                 $"Backbone safety failure: backhaul .id={Field(live, ".id")} is passive after ensure (RouterOS flag).");
         }
 
-        string? disabled = Field(live, "disabled");
-        bool isDisabled = disabled is not null
-                          && !string.Equals(disabled, "no", StringComparison.OrdinalIgnoreCase)
-                          && !string.Equals(disabled, "false", StringComparison.OrdinalIgnoreCase);
-        if (isDisabled)
+        OspfAdminState adminState = OspfInventoryEligibility.ParseAdminState(Field(live, "disabled"));
+        if (adminState != OspfAdminState.Enabled)
         {
             throw new OspfBackboneMutationGuardException(
-                $"Backbone safety failure: backhaul .id={Field(live, ".id")} is disabled after ensure.");
+                adminState == OspfAdminState.Unknown
+                    ? $"Backbone safety failure: backhaul .id={Field(live, ".id")} has unknown/malformed disabled state after ensure."
+                    : $"Backbone safety failure: backhaul .id={Field(live, ".id")} is disabled after ensure.");
         }
 
-        if (!string.Equals(Field(live, "cost"), template.Cost.ToString(CultureInfo.InvariantCulture),
+        if (requireCostMatch
+            && !string.Equals(
+                Field(live, "cost"),
+                template.Cost.ToString(CultureInfo.InvariantCulture),
                 StringComparison.Ordinal))
         {
             throw new OspfBackboneMutationGuardException(
                 $"Backbone safety failure: backhaul cost is '{Field(live, "cost")}', expected {template.Cost}.");
         }
+    }
+
+    /// <summary>
+    /// Exact area match, or — when a plan is supplied — any acceptable backbone area name for a
+    /// backbone-role backhaul (live remapped name and/or <see cref="OspfMigrationPlan.TargetBackboneAreaName"/>).
+    /// </summary>
+    private static bool MatchesBackhaulArea(
+        string? liveArea,
+        OspfPlanBackhaulTemplate template,
+        OspfMigrationPlan? plan)
+    {
+        if (string.Equals(liveArea, template.AreaName, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (plan is null || string.IsNullOrWhiteSpace(liveArea))
+        {
+            return false;
+        }
+
+        if (!IsBackboneRoleBackhaul(plan, template))
+        {
+            return false;
+        }
+
+        foreach (string acceptable in EnumerateAcceptableBackboneAreaNames(plan, template))
+        {
+            if (string.Equals(liveArea, acceptable, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when the planned backhaul is bound to the backbone role (live or logical name).
+    /// </summary>
+    private static bool IsBackboneRoleBackhaul(
+        OspfMigrationPlan plan,
+        OspfPlanBackhaulTemplate template)
+    {
+        if (plan.Areas.Any(a =>
+                a.IsBackbone
+                && string.Equals(a.Name, template.AreaName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        string target = string.IsNullOrWhiteSpace(plan.TargetBackboneAreaName)
+            ? OspfFleetNaming.Ros7BackboneAreaName
+            : plan.TargetBackboneAreaName;
+        if (string.Equals(template.AreaName, target, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Unmapped ROS6 logical capture name.
+        return string.Equals(template.AreaName, "backbone", StringComparison.OrdinalIgnoreCase)
+               && plan.Areas.Any(static a => a.IsBackbone);
+    }
+
+    /// <summary>
+    /// Acceptable live area names for a backbone backhaul: the template's own area, the
+    /// fleet target (<c>backbone-v2</c>), and any <see cref="OspfPlanArea.IsBackbone"/> name
+    /// already remapped onto the plan (often still <c>backbone</c> before a rename).
+    /// </summary>
+    private static IEnumerable<string> EnumerateAcceptableBackboneAreaNames(
+        OspfMigrationPlan plan,
+        OspfPlanBackhaulTemplate template)
+    {
+        HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(template.AreaName))
+        {
+            names.Add(template.AreaName);
+        }
+
+        string target = string.IsNullOrWhiteSpace(plan.TargetBackboneAreaName)
+            ? OspfFleetNaming.Ros7BackboneAreaName
+            : plan.TargetBackboneAreaName;
+        names.Add(target);
+
+        foreach (OspfPlanArea area in plan.Areas.Where(static a => a.IsBackbone))
+        {
+            if (!string.IsNullOrWhiteSpace(area.Name))
+            {
+                names.Add(area.Name);
+            }
+        }
+
+        return names;
     }
 
     /// <summary>Throws <see cref="OspfBackboneMutationGuardException"/> when the row matches a protected active backhaul (same interface and normalised network), preventing a site or cleanup operation from touching the backbone.</summary>
@@ -2122,14 +2500,20 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
     }
 
     /// <summary>Maps a routing-filter row to an inventory row; the name falls back through <c>chain</c>, <c>name</c>, <c>rule</c> and <c>.id</c>.</summary>
-    private static OspfRoutingFilterRow MapRoutingFilterRow(ITikReSentence row) => new()
+    private static OspfRoutingFilterRow MapRoutingFilterRow(ITikReSentence row)
     {
-        Id = Field(row, ".id"),
-        Name = Field(row, "chain")
-               ?? Field(row, "name")
-               ?? Field(row, "rule")
-               ?? Field(row, ".id"),
-    };
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new()
+        {
+            Id = Field(row, ".id"),
+            Name = Field(row, "chain")
+                   ?? Field(row, "name")
+                   ?? Field(row, "rule")
+                   ?? Field(row, ".id"),
+            Disabled = disabled,
+            AdminState = admin,
+        };
+    }
 
     /// <summary>
     /// Runs a RouterOS print command and maps each returned row.
@@ -2156,6 +2540,44 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         return rows.Select(map).ToList();
     }
 
+    /// <summary>
+    /// Captures one required OSPF inventory collection, failing closed on query or parse errors
+    /// so callers never treat a failed read as an empty successful inventory.
+    /// </summary>
+    private static async Task<List<T>> CaptureRequiredCollectionAsync<T>(
+        ITikConnection connection,
+        string collectionName,
+        string printCommand,
+        Func<ITikReSentence, T> map,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            IEnumerable<ITikReSentence> rows = await connection
+                .CreateCommand(printCommand)
+                .ExecuteListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            List<T> mapped = [];
+            foreach (ITikReSentence row in rows)
+            {
+                mapped.Add(map(row));
+            }
+
+            return mapped;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"OSPF {collectionName} inventory capture failed ({printCommand}); "
+                + "incomplete inventory cannot prove OSPFv3 removal.",
+                ex);
+        }
+    }
+
     /// <summary>Maps an OSPF instance row. Redistribution properties are collected when present, and the in/out filter fall back across the ROS7 chain and select property names.</summary>
     private static OspfInstanceRow MapInstance(ITikReSentence row)
     {
@@ -2172,6 +2594,7 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             }
         }
 
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
         return new OspfInstanceRow
         {
             Id = Field(row, ".id"),
@@ -2180,6 +2603,8 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
             Version = Field(row, "version"),
             IsDefault = IsTruthy(Field(row, "default")),
             RedistributeProperties = redistribute,
+            Disabled = disabled,
+            AdminState = admin,
             InFilter = NullIfWhiteSpace(Field(row, "in-filter"))
                        ?? NullIfWhiteSpace(Field(row, "in-filter-chain")),
             // ROS7 outbound filters are out-filter-chain / out-filter-select (not ambiguous "out-filter").
@@ -2189,43 +2614,141 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
         };
     }
 
+    /// <summary>Maps a v6 OSPF network statement including admin disabled state.</summary>
+    private static OspfNetworkRow MapNetwork(ITikReSentence row)
+    {
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new OspfNetworkRow
+        {
+            Id = Field(row, ".id"),
+            Area = Field(row, "area"),
+            Network = Field(row, "network"),
+            Comment = Field(row, "comment"),
+            Disabled = disabled,
+            AdminState = admin,
+        };
+    }
+
+    /// <summary>Maps a v6 OSPF interface row including admin disabled state.</summary>
+    private static OspfInterfaceRow MapInterfaceV6(ITikReSentence row)
+    {
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new OspfInterfaceRow
+        {
+            Id = Field(row, ".id"),
+            Interface = Field(row, "interface"),
+            NetworkType = Field(row, "network-type"),
+            Cost = Field(row, "cost"),
+            Passive = IsTruthy(Field(row, "passive")),
+            Disabled = disabled,
+            AdminState = admin,
+        };
+    }
+
+    /// <summary>Maps a v7 OSPF interface-template including admin disabled state.</summary>
+    private static OspfInterfaceTemplateRow MapInterfaceTemplate(ITikReSentence row)
+    {
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new OspfInterfaceTemplateRow
+        {
+            Id = Field(row, ".id"),
+            Area = Field(row, "area"),
+            Interfaces = Field(row, "interfaces"),
+            Networks = Field(row, "networks") ?? Field(row, "network"),
+            Type = Field(row, "type"),
+            Cost = Field(row, "cost"),
+            // Match cleanup inventory mapping: ROS flag properties may print as present/empty.
+            Passive = IsFlagPresent(Field(row, "passive")) || IsTruthy(Field(row, "passive")),
+            Disabled = disabled,
+            AdminState = admin,
+            Comment = Field(row, "comment"),
+            Auth = Field(row, "auth"),
+            AuthId = Field(row, "auth-id"),
+            AuthKey = Field(row, "auth-key"),
+            AuthenticationKey = Field(row, "authentication-key"),
+            Priority = Field(row, "priority"),
+            UseBfd = Field(row, "use-bfd"),
+            HelloInterval = Field(row, "hello-interval"),
+            DeadInterval = Field(row, "dead-interval"),
+            RetransmitInterval = Field(row, "retransmit-interval"),
+            TransmitDelay = Field(row, "transmit-delay"),
+            InstanceId = Field(row, "instance-id"),
+            PrefixList = Field(row, "prefix-list"),
+            VlinkNeighborId = Field(row, "vlink-neighbor-id"),
+            VlinkTransitArea = Field(row, "vlink-transit-area"),
+        };
+    }
+
+    /// <summary>Maps an <c>/ip/address</c> row including admin disabled state.</summary>
+    private static OspfIpAddressRow MapIpAddress(ITikReSentence row)
+    {
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new OspfIpAddressRow
+        {
+            Id = Field(row, ".id"),
+            Address = Field(row, "address"),
+            Network = Field(row, "network"),
+            Interface = Field(row, "interface"),
+            Disabled = disabled,
+            AdminState = admin,
+        };
+    }
+
     /// <summary>Trims the value, mapping null or whitespace to null.</summary>
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     /// <summary>Maps a RouterOS 6 OSPF area row, including <c>inject-summary-lsas</c>.</summary>
-    private static OspfAreaRow MapAreaV6(ITikReSentence row) => new()
+    private static OspfAreaRow MapAreaV6(ITikReSentence row)
     {
-        Id = Field(row, ".id"),
-        Name = Field(row, "name"),
-        AreaId = Field(row, "area-id"),
-        Instance = Field(row, "instance"),
-        Type = Field(row, "type"),
-        DefaultCost = Field(row, "default-cost"),
-        InjectSummaryLsas = Field(row, "inject-summary-lsas"),
-    };
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new()
+        {
+            Id = Field(row, ".id"),
+            Name = Field(row, "name"),
+            AreaId = Field(row, "area-id"),
+            Instance = Field(row, "instance"),
+            Type = Field(row, "type"),
+            DefaultCost = Field(row, "default-cost"),
+            InjectSummaryLsas = Field(row, "inject-summary-lsas"),
+            Disabled = disabled,
+            AdminState = admin,
+        };
+    }
 
     /// <summary>Maps a RouterOS 7 OSPF area row, including the <c>no-summaries</c> flag.</summary>
-    private static OspfAreaRow MapAreaV7(ITikReSentence row) => new()
+    private static OspfAreaRow MapAreaV7(ITikReSentence row)
     {
-        Id = Field(row, ".id"),
-        Name = Field(row, "name"),
-        AreaId = Field(row, "area-id"),
-        Instance = Field(row, "instance"),
-        Type = Field(row, "type"),
-        DefaultCost = Field(row, "default-cost"),
-        NoSummaries = IsTruthy(Field(row, "no-summaries")),
-    };
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new()
+        {
+            Id = Field(row, ".id"),
+            Name = Field(row, "name"),
+            AreaId = Field(row, "area-id"),
+            Instance = Field(row, "instance"),
+            Type = Field(row, "type"),
+            DefaultCost = Field(row, "default-cost"),
+            NoSummaries = IsTruthy(Field(row, "no-summaries")),
+            Disabled = disabled,
+            AdminState = admin,
+        };
+    }
 
     /// <summary>Maps an OSPF area-range row. <c>advertise</c> stays null when RouterOS did not report it.</summary>
-    private static OspfAreaRangeRow MapRange(ITikReSentence row) => new()
+    private static OspfAreaRangeRow MapRange(ITikReSentence row)
     {
-        Id = Field(row, ".id"),
-        Area = Field(row, "area"),
-        Range = ReadAreaRangePrefix(row),
-        Comment = Field(row, "comment"),
-        Advertise = Field(row, "advertise") is null ? null : IsTruthy(Field(row, "advertise")),
-    };
+        (bool disabled, OspfAdminState admin) = OspfInventoryEligibility.FromRaw(Field(row, "disabled"));
+        return new()
+        {
+            Id = Field(row, ".id"),
+            Area = Field(row, "area"),
+            Range = ReadAreaRangePrefix(row),
+            Comment = Field(row, "comment"),
+            Advertise = Field(row, "advertise") is null ? null : IsTruthy(Field(row, "advertise")),
+            Disabled = disabled,
+            AdminState = admin,
+        };
+    }
 
     /// <summary>ROS7 prints <c>prefix</c>; legacy/v6 export used <c>range</c>.</summary>
     private static string? ReadAreaRangePrefix(ITikReSentence row) =>
@@ -2236,43 +2759,6 @@ internal sealed class OspfMikrotikOperations(ILogger<OspfMikrotikOperations> log
     /// </summary>
     private static string? ReadNetworksField(ITikReSentence row) =>
         Field(row, "networks") ?? Field(row, "network");
-
-    /// <summary>
-    /// Maps a planned backhaul onto the live ROS7 backbone area name when the plan still
-    /// carries the logical capture name (e.g. <c>backbone</c> → <c>backbone-v2</c>).
-    /// Does not alter interface/network/cost — only the area identity used for lookup.
-    /// </summary>
-    private static OspfPlanBackhaulTemplate RemapBackhaulAreaToLiveTarget(
-        OspfMigrationPlan plan,
-        OspfPlanBackhaulTemplate backhaul)
-    {
-        string target = string.IsNullOrWhiteSpace(plan.TargetBackboneAreaName)
-            ? OspfFleetNaming.Ros7BackboneAreaName
-            : plan.TargetBackboneAreaName;
-        if (string.Equals(backhaul.AreaName, target, StringComparison.OrdinalIgnoreCase))
-        {
-            return backhaul;
-        }
-
-        bool plannedAsBackbone = plan.Areas.Any(a =>
-            a.IsBackbone
-            && string.Equals(a.Name, backhaul.AreaName, StringComparison.OrdinalIgnoreCase));
-        if (!plannedAsBackbone)
-        {
-            return backhaul;
-        }
-
-        return new OspfPlanBackhaulTemplate
-        {
-            AreaName = target,
-            Interface = backhaul.Interface,
-            NetworkCidr = backhaul.NetworkCidr,
-            Cost = backhaul.Cost,
-            Type = backhaul.Type,
-            Passive = backhaul.Passive,
-            SourceCost = backhaul.SourceCost,
-        };
-    }
 
     /// <summary>Reads a field from a RouterOS sentence, returning null when the row or field is absent.</summary>
     private static string? Field(ITikReSentence? row, string name) =>

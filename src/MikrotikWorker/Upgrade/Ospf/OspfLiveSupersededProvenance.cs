@@ -110,7 +110,9 @@ internal static class OspfLiveSupersededProvenance
 
         // Site supersession applies to passive (or disabled leftover) matchers only.
         // Active templates in a site area are fail-closed Unknown unless they match a planned backhaul.
-        if (!row.Passive && !row.Disabled)
+        // Active eligible templates in a site area are fail-closed Unknown unless planned backhaul.
+        // Explicitly disabled leftovers may still be superseded for cleanup; unknown is not "enabled".
+        if (!row.Passive && OspfInventoryEligibility.IsEligible(row))
         {
             return false;
         }
@@ -152,12 +154,8 @@ internal static class OspfLiveSupersededProvenance
             return false;
         }
 
-        OspfIpPrefix? derivedMgmt = null;
-        if (!string.IsNullOrWhiteSpace(livePlan.DerivedManagementCidr)
-            && OspfIpPrefix.TryParse(livePlan.DerivedManagementCidr, out OspfIpPrefix mgmtParsed))
-        {
-            derivedMgmt = mgmtParsed;
-        }
+        // Authoritative multi-prefix set; scalar DerivedManagementCidr is primary-only compatibility.
+        IReadOnlyList<OspfIpPrefix> derivedMgmtSet = ParseDerivedManagementBoundaries(livePlan);
 
         foreach (OspfPlanSiteNetworkTemplate planned in livePlan.PassiveSiteNetworks)
         {
@@ -196,7 +194,7 @@ internal static class OspfLiveSupersededProvenance
                     planned,
                     plannedNets,
                     row,
-                    derivedMgmt,
+                    derivedMgmtSet,
                     out string relationship))
             {
                 continue;
@@ -223,7 +221,7 @@ internal static class OspfLiveSupersededProvenance
         OspfPlanSiteNetworkTemplate planned,
         IReadOnlyList<OspfIpPrefix> plannedNets,
         OspfTemplateInventoryRow row,
-        OspfIpPrefix? derivedManagementCidr,
+        IReadOnlyList<OspfIpPrefix> derivedManagementCidrs,
         out string relationship)
     {
         relationship = string.Empty;
@@ -233,7 +231,7 @@ internal static class OspfLiveSupersededProvenance
                 planned,
                 plannedNets,
                 row,
-                derivedManagementCidr,
+                derivedManagementCidrs,
                 out string structural))
         {
             return false;
@@ -257,7 +255,7 @@ internal static class OspfLiveSupersededProvenance
         OspfPlanSiteNetworkTemplate planned,
         IReadOnlyList<OspfIpPrefix> plannedNets,
         OspfTemplateInventoryRow row,
-        OspfIpPrefix? derivedManagementCidr,
+        IReadOnlyList<OspfIpPrefix> derivedManagementCidrs,
         out string relationship)
     {
         relationship = string.Empty;
@@ -276,12 +274,11 @@ internal static class OspfLiveSupersededProvenance
             return false;
         }
 
-        // Management summarisation boundary: DerivedManagementCidr, or a planned prefix that is
-        // itself the explicit MGMT area-range / derived summary present in the planned networks.
+        // Management summarisation boundaries: full DerivedManagementCidrs set (primary and expansions).
         if (TryExplainManagementMembership(
                 liveNets,
                 plannedNets,
-                derivedManagementCidr,
+                derivedManagementCidrs,
                 liveIsSpecific,
                 out string mgmtRelationship))
         {
@@ -341,7 +338,7 @@ internal static class OspfLiveSupersededProvenance
 
         // Enabled leftovers must remain passive; disabled leftovers may still be removed when
         // remaining attributes match the planned site-role defaults / known conversions.
-        if (!row.Disabled && !row.Passive)
+        if (OspfInventoryEligibility.IsEligible(row) && !row.Passive)
         {
             return false;
         }
@@ -434,13 +431,14 @@ internal static class OspfLiveSupersededProvenance
     }
 
     /// <summary>
-    /// True when every live network belongs to the intended management summarisation boundary
-    /// represented by the planned consolidated site matcher (not incidental broader containment).
+    /// True when every live network belongs to one intended management summarisation boundary
+    /// from the authoritative derived set (or a planned <c>/24</c> fallback), represented by the
+    /// planned consolidated site matcher — not incidental broader containment.
     /// </summary>
     public static bool TryExplainManagementMembership(
         IReadOnlyList<OspfIpPrefix> liveNets,
         IReadOnlyList<OspfIpPrefix> plannedNets,
-        OspfIpPrefix? derivedManagementCidr,
+        IReadOnlyList<OspfIpPrefix> derivedManagementCidrs,
         bool liveIsSpecific,
         out string relationship)
     {
@@ -450,41 +448,60 @@ internal static class OspfLiveSupersededProvenance
             return false;
         }
 
-        OspfIpPrefix? mgmtBoundary = derivedManagementCidr;
-        if (mgmtBoundary is null)
+        List<OspfIpPrefix> boundaries = (derivedManagementCidrs ?? [])
+            .Where(static p => p.PrefixLength == 24)
+            .ToList();
+        if (boundaries.Count == 0)
         {
-            // Fall back to an exact planned /24 that covers every live net (fleet management shape).
+            // Fall back to exact planned /24s that cover every live net (fleet management shape).
             foreach (OspfIpPrefix planned in plannedNets.Where(static p => p.PrefixLength == 24))
             {
                 if (liveNets.All(n => planned.Equals(n) || planned.Contains(n)))
                 {
-                    mgmtBoundary = planned;
-                    break;
+                    boundaries.Add(planned);
                 }
             }
         }
 
-        if (mgmtBoundary is not OspfIpPrefix mgmt)
+        foreach (OspfIpPrefix mgmt in boundaries.OrderBy(static p => p.ToCidrString(), StringComparer.Ordinal))
         {
-            return false;
+            if (!liveNets.All(n => mgmt.Equals(n) || mgmt.Contains(n)))
+            {
+                continue;
+            }
+
+            // Require the planned site to actually represent that management boundary.
+            if (!plannedNets.Any(p => p.Equals(mgmt) || p.Contains(mgmt)))
+            {
+                continue;
+            }
+
+            relationship =
+                $"management summarisation: every live network is under management boundary "
+                + $"'{mgmt.ToCidrString()}' with {(liveIsSpecific ? "specific→all" : "interfaces=all")} "
+                + "interface replacement";
+            return true;
         }
 
-        if (!liveNets.All(n => mgmt.Equals(n) || mgmt.Contains(n)))
+        return false;
+    }
+
+    /// <summary>
+    /// Parses the authoritative derived management <c>/24</c> set from the plan
+    /// (<see cref="OspfMigrationPlan.DerivedManagementCidrs"/>, falling back to the scalar primary).
+    /// </summary>
+    internal static IReadOnlyList<OspfIpPrefix> ParseDerivedManagementBoundaries(OspfMigrationPlan livePlan)
+    {
+        List<OspfIpPrefix> parsed = [];
+        foreach (string cidr in OspfMigrationPlanner.GetDerivedManagementCidrs(livePlan))
         {
-            return false;
+            if (OspfIpPrefix.TryParse(cidr, out OspfIpPrefix prefix) && prefix.PrefixLength == 24)
+            {
+                parsed.Add(prefix);
+            }
         }
 
-        // Require the planned site to actually represent that management boundary.
-        if (!plannedNets.Any(p => p.Equals(mgmt) || p.Contains(mgmt)))
-        {
-            return false;
-        }
-
-        relationship =
-            $"management summarisation: every live network is under management boundary "
-            + $"'{mgmt.ToCidrString()}' with {(liveIsSpecific ? "specific→all" : "interfaces=all")} "
-            + "interface replacement";
-        return true;
+        return parsed;
     }
 
     /// <summary>
@@ -588,6 +605,7 @@ internal static class OspfLiveSupersededProvenance
             ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
             IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
             DerivedManagementCidr = plan.DerivedManagementCidr,
+            DerivedManagementCidrs = OspfMigrationPlanner.GetDerivedManagementCidrs(plan),
             Areas = plan.Areas,
             AreaRanges = plan.AreaRanges,
             ActiveBackhauls = plan.ActiveBackhauls,

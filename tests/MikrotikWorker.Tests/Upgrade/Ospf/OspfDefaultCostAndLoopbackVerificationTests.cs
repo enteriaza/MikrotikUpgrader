@@ -143,14 +143,14 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
             RouterOsVersion = "6.49.23",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV6,
-            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.255.0.1" }],
+            Instances = [new OspfInstanceRow { Name = "default", RouterId = "10.16.0.1" }],
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
                 new OspfAreaRow
                 {
                     Name = "site",
-                    AreaId = "10.255.0.1",
+                    AreaId = "10.16.0.1",
                     Type = "stub",
                     DefaultCost = defaultCost,
                     InjectSummaryLsas = "yes",
@@ -158,7 +158,7 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
             ],
             Networks =
             [
-                new OspfNetworkRow { Area = "backbone", Network = "10.255.0.1/32" },
+                new OspfNetworkRow { Area = "backbone", Network = "10.16.0.1/32" },
                 new OspfNetworkRow { Area = "backbone", Network = "10.0.0.0/30" },
                 new OspfNetworkRow { Area = "site", Network = "10.10.0.0/16" },
             ],
@@ -168,7 +168,7 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
             ],
             IpAddresses =
             [
-                new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
+                new OspfIpAddressRow { Address = "10.16.0.1/32", Network = "10.16.0.1", Interface = "lo" },
                 new OspfIpAddressRow { Address = "10.0.0.1/30", Network = "10.0.0.0", Interface = "ether1" },
                 new OspfIpAddressRow { Address = "10.10.1.1/24", Network = "10.10.1.0", Interface = "bridge-local" },
             ],
@@ -196,7 +196,9 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
         const string backbone = "backbone-v2";
         return new OspfV7Inventory
         {
-            Instances = [new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.255.0.1", Version = "2" }],
+            
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
+            Instances = [new OspfInstanceRow { Id = "*1", Name = "default-v2", RouterId = "10.16.0.1", Version = "2" }],
             Areas =
             [
                 new OspfAreaRow { Id = "*a0", Name = backbone, AreaId = "0.0.0.0", Type = "default", Instance = "default-v2" },
@@ -204,7 +206,7 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
                 {
                     Id = "*a1",
                     Name = site,
-                    AreaId = "10.255.0.1",
+                    AreaId = "10.16.0.1",
                     Type = "stub",
                     Instance = "default-v2",
                     DefaultCost = defaultCost,
@@ -232,7 +234,7 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
                 {
                     Id = "*l",
                     Area = backbone,
-                    Networks = "10.255.0.1/32",
+                    Networks = "10.16.0.1/32",
                     Type = loopbackType,
                     Passive = true,
                 },
@@ -338,7 +340,11 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
         /// <summary>
         /// No-op; the backbone guard is not under test.
         /// </summary>
-        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) => Task.CompletedTask;
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
         /// <summary>
         /// Reports no OSPF neighbours.
         /// </summary>
@@ -364,9 +370,9 @@ public sealed class OspfDefaultCostAndLoopbackVerificationTests
             Task.CompletedTask;
 
         /// <summary>
-        /// Returns a single loopback /32 address (10.255.0.1 on <c>lo</c>).
+        /// Returns a single loopback /32 address (10.16.0.1 on <c>lo</c>).
         /// </summary>
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(ITikConnection connection, CancellationToken cancellationToken = default) =>
-            Task.FromResult(OspfTestBaselines.LoopbackSlash32("10.255.0.1", "lo"));
+            Task.FromResult(OspfTestBaselines.LoopbackSlash32("10.16.0.1", "lo"));
     }
 }

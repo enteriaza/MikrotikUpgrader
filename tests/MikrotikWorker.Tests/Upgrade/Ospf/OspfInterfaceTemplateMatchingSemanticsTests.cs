@@ -36,12 +36,12 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             templates:
             [
                 Active("ether1", "10.0.0.0/24"), // broader than the /30 on ether1
-                PassiveLoop("10.255.0.1/32"),
+                PassiveLoop("10.16.0.1/32"),
                 PassiveSite("10.10.0.0/16"),
             ],
             addresses:
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ]);
@@ -66,12 +66,12 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             templates:
             [
                 Active("ether1", "10.0.0.0/24"),
-                PassiveLoop("10.255.0.1/32"),
+                PassiveLoop("10.16.0.1/32"),
                 PassiveSite("10.10.0.0/16"),
             ],
             addresses:
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/24", "10.0.0.0", "ether1"),
                 Addr("10.0.0.50/24", "10.0.0.0", "vlan10"),
             ]);
@@ -96,12 +96,12 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             [
                 Active("ether1", "10.0.0.0/30"),
                 Active("ether2", "10.0.1.0/30"),
-                PassiveLoop("10.255.0.1/32"),
+                PassiveLoop("10.16.0.1/32"),
                 PassiveSite("10.10.0.0/16"),
             ],
             addresses:
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.0.1.1/30", "10.0.1.0", "ether2"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
@@ -132,12 +132,12 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             templates:
             [
                 Active("ether1", "10.0.0.0/30"),
-                PassiveLoop("10.255.0.1/32"),
+                PassiveLoop("10.16.0.1/32"),
                 PassiveSite("0.0.0.0/0"),
             ],
             addresses:
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ]);
@@ -161,12 +161,12 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             templates:
             [
                 Active("ether1", "10.0.0.0/30"),
-                PassiveLoop("10.255.0.1/32"),
+                PassiveLoop("10.16.0.1/32"),
                 PassiveSite("10.10.0.0/16"),
             ],
             addresses:
             [
-                Addr("10.255.0.1/32", "10.255.0.1", "lo"),
+                Addr("10.16.0.1/32", "10.16.0.1", "lo"),
                 Addr("10.0.0.1/30", "10.0.0.0", "ether1"),
                 Addr("10.10.1.1/24", "10.10.1.0", "bridge-local"),
             ]);
@@ -196,11 +196,11 @@ public sealed class OspfInterfaceTemplateMatchingSemanticsTests
             RouterOsVersion = "7.23.8",
             Architecture = "mipsbe",
             SourceKind = OspfCaptureSourceKind.RouterOsV7,
-            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.255.0.1", Version = "2" }],
+            Instances = [new OspfInstanceRow { Name = "default-v2", RouterId = "10.16.0.1", Version = "2" }],
             Areas =
             [
                 new OspfAreaRow { Name = "backbone", AreaId = "0.0.0.0", Type = "default" },
-                new OspfAreaRow { Name = "site", AreaId = "10.255.0.1", Type = "stub" },
+                new OspfAreaRow { Name = "site", AreaId = "10.16.0.1", Type = "stub" },
             ],
             InterfaceTemplates = templates,
             IpAddresses = addresses,

@@ -40,7 +40,7 @@ public sealed class OspfBackhaulPostVerifyGuardTests
         Assert.Equal(OspfFleetNaming.Ros7BackboneAreaName, plan.TargetBackboneAreaName);
 
         // Live RouterOS only has the remapped area — never area=backbone.
-        // Without RemapBackhaulAreaToLiveTarget the final MigrationService assert fails closed.
+        // Acceptable-backbone-area matching must still map logical backbone → live backbone-v2.
         TikFakeConnection fake = LiveBackboneV2OnlyConnection(includeUnrelatedTemplate: true);
         OspfMikrotikOperations realOps = CreateOps();
         ApplyVerifySpyOps spy = new(realOps)
@@ -409,6 +409,8 @@ public sealed class OspfBackhaulPostVerifyGuardTests
         string site = logicalPlan.TargetSiteAreaName;
         return new OspfV7Inventory
         {
+            
+            CaptureStatus = OspfInventoryCaptureStatus.Complete,
             Instances =
             [
                 new OspfInstanceRow
@@ -807,7 +809,7 @@ public sealed class OspfBackhaulPostVerifyGuardTests
             ITikConnection connection,
             OspfMigrationPlan plan,
             OspfManagementPlaneBaseline baseline,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default, bool requireFleetCost = true)
         {
             foreach (OspfPlanBackhaulTemplate bh in plan.ActiveBackhauls)
             {
@@ -820,7 +822,7 @@ public sealed class OspfBackhaulPostVerifyGuardTests
                     string.Equals(b.AreaName, "backbone", StringComparison.OrdinalIgnoreCase)))
             {
                 FinalAssertUsedLogicalBackbone = true;
-                await real.AssertBackboneStillActiveAsync(connection, plan, baseline, cancellationToken)
+                await real.AssertBackboneStillActiveAsync(connection, plan, baseline, cancellationToken, requireFleetCost)
                     .ConfigureAwait(false);
                 FinalRealAssertCompleted = true;
                 return;
@@ -828,6 +830,12 @@ public sealed class OspfBackhaulPostVerifyGuardTests
 
             // Intermediate Apply asserts already remapped — accept without re-hitting the fake print.
         }
+
+        public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) =>
+            real.EnsureOspfInstanceNameAsync(connection, currentName, targetName, cancellationToken);
+        public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) =>
+            real.TryRemoveUnusedRoutingIdAsync(connection, routingIdName, cancellationToken);
+
 
         /// <summary>
         /// No-op; routing filter removal is not under test.

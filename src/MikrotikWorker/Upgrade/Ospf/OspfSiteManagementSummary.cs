@@ -2,9 +2,11 @@
 // File: OspfSiteManagementSummary.cs
 //
 // Description:
-// Derives the mandatory site management summary /24 from interface-assigned
-// addresses inside 10.0.0.0/8, excluding Loopback /32 and designated backhaul
-// /30s.
+// Derives site management summary /24 prefixes from interface-assigned
+// addresses inside 10.0.0.0/8, excluding Loopback /32, designated backhaul
+// /30s, all /30 transport addresses, disabled addresses, and PPPoE roles.
+// Multiple /24s on the same established *_MGMT interface are accepted as
+// intentional management expansion (never combined into a broader supernet).
 //
 // -----------------------------------------------------------------------------
 
@@ -14,8 +16,9 @@ using System.Net.Sockets;
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
-/// Derives the mandatory site management summary <c>/24</c> from interface-assigned addresses
-/// inside <c>10.0.0.0/8</c>, excluding Loopback <c>/32</c> and designated backhaul <c>/30</c>s.
+/// Derives site management summary <c>/24</c> prefixes from interface-assigned addresses
+/// inside <c>10.0.0.0/8</c>, excluding Loopback <c>/32</c>, designated backhaul <c>/30</c>s,
+/// all point-to-point <c>/30</c> addresses, disabled address rows, and PPPoE roles.
 /// </summary>
 internal static class OspfSiteManagementSummary
 {
@@ -25,15 +28,21 @@ internal static class OspfSiteManagementSummary
     private static readonly OspfIpPrefix TenDotZero = ParseRequired("10.0.0.0/8");
 
     /// <summary>
-    /// Derives the site management <c>/24</c> from interface addresses.
-    /// Loopback, PPPoE, backhaul, and out-of-scope addresses are excluded. When several candidates remain, one is chosen only if exactly one is corroborated by a hint.
+    /// Derives the site management <c>/24</c> prefix set from interface addresses.
     /// </summary>
-    /// <param name="ipAddresses">Captured <c>/ip/address</c> rows.</param>
-    /// <param name="loopback">Resolved Loopback Router ID result; must have succeeded.</param>
-    /// <param name="backhauls">Planned active backhauls whose <c>/30</c> subnets are excluded.</param>
-    /// <param name="corroboratingManagementCidrs">Optional management CIDR hints used to break ties.</param>
-    /// <returns>A successful result with the chosen <c>/24</c>, or a failed result describing why none could be chosen unambiguously.</returns>
-    /// <exception cref="ArgumentNullException">Thrown when a required argument is null.</exception>
+    /// <remarks>
+    /// Fleet rules:
+    /// <list type="bullet">
+    /// <item>Never derive management candidates from <c>/30</c> addresses.</item>
+    /// <item>Exclude disabled IP address entries entirely.</item>
+    /// <item><c>*_MGMT</c> interface names are strong management evidence.</item>
+    /// <item>Subdivided management <c>/26</c>/<c>/27</c> addresses collapse into their common <c>/24</c>.</item>
+    /// <item>
+    /// Distinct <c>/24</c>s on the same established management interface are accepted as intentional
+    /// expansion and must not be rejected as ambiguous or merged into a broader supernet.
+    /// </item>
+    /// </list>
+    /// </remarks>
     public static OspfSiteManagementSummaryResult Derive(
         IReadOnlyList<OspfIpAddressRow> ipAddresses,
         OspfLoopbackRouterIdResult loopback,
@@ -66,11 +75,16 @@ internal static class OspfSiteManagementSummary
             backhaulNets.Add(net);
         }
 
-        HashSet<string> mgmt24 = new(StringComparer.Ordinal);
-        List<string> contributing = [];
+        Dictionary<string, List<string>> contributorsByCidr = new(StringComparer.Ordinal);
+        Dictionary<string, HashSet<string>> interfacesByCidr = new(StringComparer.Ordinal);
         List<string> ignoredOutside = [];
         List<string> ignoredPppoe = [];
+        List<string> ignoredDisabled = [];
+        List<string> ignoredTransport30 = [];
+        List<string> diagnostics = [];
 
+        // Decision path uses only eligible (enabled) addresses. Disabled/unknown rows are
+        // diagnostic-only and must never enter contributorsByCidr.
         foreach (OspfIpAddressRow row in ipAddresses)
         {
             if (string.IsNullOrWhiteSpace(row.Interface) || string.IsNullOrWhiteSpace(row.Address))
@@ -78,92 +92,226 @@ internal static class OspfSiteManagementSummary
                 continue;
             }
 
+            if (!OspfInventoryEligibility.IsEligible(row))
+            {
+                string excluded = OspfInventoryEligibility.FormatExcludedAddress(row);
+                ignoredDisabled.Add(excluded);
+                diagnostics.Add(
+                    row.AdminState == OspfAdminState.Unknown
+                        ? $"Excluded unknown-disabled-state: {excluded}"
+                        : $"Excluded disabled: {excluded}");
+                continue;
+            }
+
             if (OspfLoopbackRouterId.IsSupportedLoopbackInterfaceName(row.Interface))
             {
+                diagnostics.Add($"excluded loopback {row.Interface}={row.Address}");
                 continue;
             }
 
             if (IsPppoeRoleInterface(row.Interface))
             {
                 ignoredPppoe.Add($"{row.Interface}={row.Address}");
+                diagnostics.Add($"excluded pppoe {row.Interface}={row.Address}");
                 continue;
             }
 
-            if (!TryParseAssignedHost(row, out uint host, out string? parseError))
+            if (!TryParseAssignedHost(row, out uint host, out int? prefixLength, out string? parseError))
             {
                 return Failed(
                     parseError
                     ?? $"Interface '{row.Interface}' address '{row.Address}' cannot be classified for management /24 derivation.");
             }
 
+            // Mandatory: never promote a /30 into a management /24 candidate.
+            if (prefixLength == 30)
+            {
+                ignoredTransport30.Add($"{row.Interface}={row.Address}");
+                diagnostics.Add($"excluded /30 transport {row.Interface}={row.Address}");
+                continue;
+            }
+
             if (!TenDotZero.ContainsHost(host))
             {
                 ignoredOutside.Add($"{row.Interface}={row.Address}");
+                diagnostics.Add($"excluded outside-10/8 {row.Interface}={row.Address}");
                 continue;
             }
 
             if (backhaulNets.Any(n => n.ContainsHost(host)))
             {
+                diagnostics.Add($"excluded planned-backhaul {row.Interface}={row.Address}");
                 continue;
             }
 
             uint masked = host & (uint.MaxValue << 8); // /24
             string cidr = FormatHost(masked) + "/24";
-            mgmt24.Add(cidr);
-            contributing.Add($"{row.Interface}={row.Address}->{cidr}");
+            if (!contributorsByCidr.TryGetValue(cidr, out List<string>? list))
+            {
+                list = [];
+                contributorsByCidr[cidr] = list;
+            }
+
+            if (!interfacesByCidr.TryGetValue(cidr, out HashSet<string>? ifaces))
+            {
+                ifaces = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                interfacesByCidr[cidr] = ifaces;
+            }
+
+            ifaces.Add(row.Interface.Trim());
+            string contributor = $"{row.Interface}={row.Address}->{cidr}";
+            list.Add(contributor);
+            diagnostics.Add(
+                IsMgmtInterfaceName(row.Interface)
+                    ? $"candidate MGMT {contributor}"
+                    : $"candidate {contributor}");
         }
 
-        if (mgmt24.Count == 0)
+        if (contributorsByCidr.Count == 0)
         {
             return Failed(
-                "No eligible site management /24 could be derived from interface-assigned addresses "
-                + "in 10.0.0.0/8 after excluding Loopback, backhaul, and PPPoE role interfaces.");
+                [
+                    "No eligible site management /24 could be derived from interface-assigned addresses "
+                    + "in 10.0.0.0/8 after excluding Loopback, disabled, /30 transport, backhaul, and PPPoE role interfaces. "
+                    + "Diagnostics: "
+                    + string.Join("; ", diagnostics),
+                ],
+                ignoredDisabled,
+                diagnostics);
         }
 
-        if (mgmt24.Count > 1)
+        if (contributorsByCidr.Count == 1)
         {
+            string summary = contributorsByCidr.Keys.Single();
+            diagnostics.Add($"selected existing management aggregate {summary}");
+            return Succeeded(
+                [summary],
+                contributorsByCidr[summary],
+                ignoredOutside,
+                ignoredPppoe,
+                ignoredDisabled,
+                ignoredTransport30,
+                diagnostics);
+        }
+
+        // Same-interface expansion only: distinct /24s co-resident on one established *_MGMT
+        // interface form a domain. Shared bridge prefixes must not transitively merge unrelated
+        // interface-local expansions — multiple inclusion-maximal iface sets fail closed.
+        List<HashSet<string>> mgmtComponents = SelectDirectSameInterfaceDomains(interfacesByCidr);
+        HashSet<string> mgmtBacked = new(
+            mgmtComponents.SelectMany(static c => c),
+            StringComparer.Ordinal);
+        List<string> nonMgmtOnly = contributorsByCidr.Keys
+            .Where(c => !mgmtBacked.Contains(c))
+            .OrderBy(static s => s, StringComparer.Ordinal)
+            .ToList();
+
+        if (mgmtComponents.Count == 1)
+        {
+            HashSet<string> accepted = mgmtComponents[0];
+            foreach (string dropped in nonMgmtOnly)
+            {
+                diagnostics.Add(
+                    $"excluded non-MGMT candidate {dropped} after established MGMT-interface domain selection");
+            }
+
+            NoteAcceptedExpansion(diagnostics, accepted, contributorsByCidr, interfacesByCidr);
+            return Succeeded(
+                accepted.OrderBy(static s => s, StringComparer.Ordinal).ToList(),
+                accepted.SelectMany(c => contributorsByCidr[c]).ToList(),
+                ignoredOutside,
+                ignoredPppoe,
+                ignoredDisabled,
+                ignoredTransport30,
+                diagnostics);
+        }
+
+        if (mgmtComponents.Count > 1)
+        {
+            // Prefer uniquely corroborated MGMT evidence over equal-weight disconnected domains.
             HashSet<string> hints = new(
                 (corroboratingManagementCidrs ?? [])
                 .Where(static s => !string.IsNullOrWhiteSpace(s))
                 .Select(static s => s.Trim()),
                 StringComparer.OrdinalIgnoreCase);
 
-            List<string> corroborated = mgmt24
-                .Where(c => hints.Contains(c))
-                .OrderBy(static s => s, StringComparer.Ordinal)
+            List<HashSet<string>> corroboratedComponents = mgmtComponents
+                .Where(component => component.Count(c => hints.Contains(c)) > 0)
                 .ToList();
-
-            if (corroborated.Count == 1)
+            if (corroboratedComponents.Count == 1)
             {
-                string chosen = corroborated[0];
-                return new OspfSiteManagementSummaryResult
-                {
-                    Succeeded = true,
-                    ManagementCidr = chosen,
-                    ContributingAddresses = contributing
-                        .Where(c => c.Contains(chosen, StringComparison.OrdinalIgnoreCase))
-                        .ToList(),
-                    IgnoredOutsideRangeAddresses = ignoredOutside,
-                    IgnoredPppoeAddresses = ignoredPppoe,
-                };
+                HashSet<string> accepted = corroboratedComponents[0];
+                NoteAcceptedExpansion(diagnostics, accepted, contributorsByCidr, interfacesByCidr);
+                diagnostics.Add(
+                    $"selected MGMT domain via area-range/network corroboration: "
+                    + string.Join(", ", accepted.OrderBy(static s => s, StringComparer.Ordinal)));
+                return Succeeded(
+                    accepted.OrderBy(static s => s, StringComparer.Ordinal).ToList(),
+                    accepted.SelectMany(c => contributorsByCidr[c]).ToList(),
+                    ignoredOutside,
+                    ignoredPppoe,
+                    ignoredDisabled,
+                    ignoredTransport30,
+                    diagnostics);
             }
 
             return Failed(
-                "Multiple distinct eligible site management /24 prefixes were derived ("
-                + string.Join(", ", mgmt24.OrderBy(static s => s, StringComparer.Ordinal))
-                + "); refusing to select without unambiguous corroborating MGMT evidence. Contributors: "
-                + string.Join("; ", contributing));
+                [
+                    "Multiple distinct eligible site management /24 domains were derived from unrelated "
+                    + "management interfaces ("
+                    + string.Join(
+                        " | ",
+                        mgmtComponents.Select(c =>
+                            string.Join(", ", c.OrderBy(static s => s, StringComparer.Ordinal))))
+                    + "); refusing to select without unambiguous corroborating MGMT evidence. Contributors: "
+                    + string.Join(
+                        "; ",
+                        contributorsByCidr.SelectMany(static kv => kv.Value))
+                    + ". Diagnostics: "
+                    + string.Join("; ", diagnostics),
+                ],
+                ignoredDisabled,
+                diagnostics);
         }
 
-        string summary = mgmt24.Single();
-        return new OspfSiteManagementSummaryResult
+        // No *_MGMT interfaces among candidates — retain prior corroboration / fail-closed behaviour.
+        HashSet<string> nonMgmtHints = new(
+            (corroboratingManagementCidrs ?? [])
+            .Where(static s => !string.IsNullOrWhiteSpace(s))
+            .Select(static s => s.Trim()),
+            StringComparer.OrdinalIgnoreCase);
+
+        List<string> corroborated = contributorsByCidr.Keys
+            .Where(c => nonMgmtHints.Contains(c))
+            .OrderBy(static s => s, StringComparer.Ordinal)
+            .ToList();
+        if (corroborated.Count == 1)
         {
-            Succeeded = true,
-            ManagementCidr = summary,
-            ContributingAddresses = contributing,
-            IgnoredOutsideRangeAddresses = ignoredOutside,
-            IgnoredPppoeAddresses = ignoredPppoe,
-        };
+            string chosen = corroborated[0];
+            diagnostics.Add($"selected {chosen} via MGMT area-range/network corroboration");
+            return Succeeded(
+                [chosen],
+                contributorsByCidr[chosen],
+                ignoredOutside,
+                ignoredPppoe,
+                ignoredDisabled,
+                ignoredTransport30,
+                diagnostics);
+        }
+
+        return Failed(
+            [
+                "Multiple distinct eligible site management /24 prefixes were derived ("
+                + string.Join(", ", contributorsByCidr.Keys.OrderBy(static s => s, StringComparer.Ordinal))
+                + "); refusing to select without unambiguous corroborating MGMT evidence. Contributors: "
+                + string.Join(
+                    "; ",
+                    contributorsByCidr.SelectMany(static kv => kv.Value))
+                + ". Diagnostics: "
+                + string.Join("; ", diagnostics),
+            ],
+            ignoredDisabled,
+            diagnostics);
     }
 
     /// <summary>
@@ -216,8 +364,6 @@ internal static class OspfSiteManagementSummary
     /// <summary>
     /// Determines whether an interface name denotes a PPPoE role interface, whose addresses never contribute to management.
     /// </summary>
-    /// <param name="interfaceName">Interface name from <c>/ip/address</c>.</param>
-    /// <returns><see langword="true"/> when the name contains <c>pppoe</c> or starts with <c>&lt;pppoe-</c>.</returns>
     internal static bool IsPppoeRoleInterface(string interfaceName)
     {
         string n = interfaceName.Trim();
@@ -225,16 +371,129 @@ internal static class OspfSiteManagementSummary
                || n.StartsWith("<pppoe-", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>True when the interface name ends with <c>_MGMT</c> or contains <c>MGMT</c> as a VLAN role marker.</summary>
+    internal static bool IsMgmtInterfaceName(string interfaceName)
+    {
+        string n = interfaceName.Trim();
+        return n.EndsWith("_MGMT", StringComparison.OrdinalIgnoreCase)
+               || n.Contains("_MGMT", StringComparison.OrdinalIgnoreCase)
+               || n.EndsWith(".MGMT", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>
-    /// Parses the IPv4 host address of an interface address row.
+    /// Selects management domains from direct same-interface evidence only.
     /// </summary>
-    /// <param name="row">Address row to parse.</param>
-    /// <param name="host">Receives the address as a 32-bit value on success.</param>
-    /// <param name="error">Receives the failure reason when parsing fails.</param>
-    /// <returns><see langword="true"/> when the address and any prefix length are valid.</returns>
-    private static bool TryParseAssignedHost(OspfIpAddressRow row, out uint host, out string? error)
+    /// <remarks>
+    /// Each established <c>*_MGMT</c> interface contributes the set of eligible <c>/24</c>s observed on
+    /// that interface. Domains are the inclusion-maximal among those per-interface sets.
+    /// A unique maximal set is accepted (Cashane-style expansion; subset-only interfaces are
+    /// corroborating evidence, not bridges). Multiple distinct maximals remain ambiguous —
+    /// shared bridge prefixes must not transitively merge unrelated expansions.
+    /// </remarks>
+    private static List<HashSet<string>> SelectDirectSameInterfaceDomains(
+        IReadOnlyDictionary<string, HashSet<string>> interfacesByCidr)
+    {
+        Dictionary<string, HashSet<string>> cidrsByMgmtIface = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string cidr, HashSet<string> ifaces) in interfacesByCidr)
+        {
+            foreach (string iface in ifaces.Where(IsMgmtInterfaceName))
+            {
+                if (!cidrsByMgmtIface.TryGetValue(iface, out HashSet<string>? set))
+                {
+                    set = new HashSet<string>(StringComparer.Ordinal);
+                    cidrsByMgmtIface[iface] = set;
+                }
+
+                set.Add(cidr);
+            }
+        }
+
+        if (cidrsByMgmtIface.Count == 0)
+        {
+            return [];
+        }
+
+        // Deterministic snapshot of per-interface sets (ordered by interface name).
+        List<HashSet<string>> ifaceSets = cidrsByMgmtIface
+            .OrderBy(static kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(static kv => new HashSet<string>(kv.Value, StringComparer.Ordinal))
+            .ToList();
+
+        List<HashSet<string>> maximals = [];
+        foreach (HashSet<string> candidate in ifaceSets.OrderByDescending(static s => s.Count)
+                     .ThenBy(static s => string.Join('\u001f', s.OrderBy(static x => x, StringComparer.Ordinal)), StringComparer.Ordinal))
+        {
+            bool properSubsetOfExisting = maximals.Any(m =>
+                candidate.IsProperSubsetOf(m));
+            if (properSubsetOfExisting)
+            {
+                continue;
+            }
+
+            // Drop any previously recorded maximal that this candidate properly contains.
+            maximals.RemoveAll(m => m.IsProperSubsetOf(candidate));
+
+            bool alreadyPresent = maximals.Any(m => m.SetEquals(candidate));
+            if (!alreadyPresent)
+            {
+                maximals.Add(new HashSet<string>(candidate, StringComparer.Ordinal));
+            }
+        }
+
+        // Stable order of domains for diagnostics / corroboration selection.
+        return maximals
+            .OrderBy(static m => string.Join(',', m.OrderBy(static s => s, StringComparer.Ordinal)), StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static void NoteAcceptedExpansion(
+        List<string> diagnostics,
+        HashSet<string> accepted,
+        IReadOnlyDictionary<string, List<string>> contributorsByCidr,
+        IReadOnlyDictionary<string, HashSet<string>> interfacesByCidr)
+    {
+        List<string> ordered = accepted.OrderBy(static s => s, StringComparer.Ordinal).ToList();
+        if (ordered.Count == 0)
+        {
+            return;
+        }
+
+        string primary = ChoosePrimary(ordered, contributorsByCidr);
+        diagnostics.Add($"selected existing management aggregate {primary}");
+
+        foreach (string cidr in ordered.Where(c => !string.Equals(c, primary, StringComparison.Ordinal)))
+        {
+            string ifaceEvidence = string.Join(
+                ", ",
+                interfacesByCidr[cidr]
+                    .Where(IsMgmtInterfaceName)
+                    .OrderBy(static s => s, StringComparer.OrdinalIgnoreCase));
+            diagnostics.Add(
+                $"accepted additional management expansion {cidr} on established management interface(s) "
+                + $"[{ifaceEvidence}]");
+        }
+    }
+
+    private static string ChoosePrimary(
+        IReadOnlyList<string> orderedCidrs,
+        IReadOnlyDictionary<string, List<string>> contributorsByCidr)
+    {
+        // Prefer the aggregate with the most address contributors (usually the subdivided base).
+        return orderedCidrs
+            .OrderByDescending(c =>
+                contributorsByCidr.TryGetValue(c, out List<string>? rows) ? rows.Count : 0)
+            .ThenBy(static c => c, StringComparer.Ordinal)
+            .First();
+    }
+
+    private static bool TryParseAssignedHost(
+        OspfIpAddressRow row,
+        out uint host,
+        out int? prefixLength,
+        out string? error)
     {
         host = 0;
+        prefixLength = null;
         error = null;
         string trimmed = row.Address!.Trim();
         int slash = trimmed.IndexOf('/');
@@ -246,6 +505,8 @@ internal static class OspfSiteManagementSummary
                 error = $"Interface '{row.Interface}' address '{row.Address}' has a malformed prefix.";
                 return false;
             }
+
+            prefixLength = len;
         }
 
         if (!IPAddress.TryParse(addrPart, out IPAddress? ip) || ip.AddressFamily != AddressFamily.InterNetwork)
@@ -259,11 +520,6 @@ internal static class OspfSiteManagementSummary
         return true;
     }
 
-    /// <summary>
-    /// Formats a 32-bit IPv4 value as dotted-quad text.
-    /// </summary>
-    /// <param name="host">IPv4 address as a 32-bit value.</param>
-    /// <returns>The dotted-quad address.</returns>
     private static string FormatHost(uint host)
     {
         byte[] bytes =
@@ -276,78 +532,109 @@ internal static class OspfSiteManagementSummary
         return new IPAddress(bytes).ToString();
     }
 
-    /// <summary>
-    /// Parses a compile-time constant CIDR, failing fast if it is invalid.
-    /// </summary>
-    /// <param name="cidr">CIDR text to parse.</param>
-    /// <returns>The parsed prefix.</returns>
-    /// <exception cref="InvalidOperationException">Thrown when <paramref name="cidr"/> cannot be parsed.</exception>
     private static OspfIpPrefix ParseRequired(string cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p)
             ? p
             : throw new InvalidOperationException(cidr);
 
-    /// <summary>
-    /// Creates a failed result carrying a single error.
-    /// </summary>
-    /// <param name="error">Description of why derivation failed.</param>
-    /// <returns>A failed result.</returns>
+    private static OspfSiteManagementSummaryResult Succeeded(
+        IReadOnlyList<string> cidrs,
+        IReadOnlyList<string> contributing,
+        IReadOnlyList<string> ignoredOutside,
+        IReadOnlyList<string> ignoredPppoe,
+        IReadOnlyList<string> ignoredDisabled,
+        IReadOnlyList<string> ignoredTransport30,
+        IReadOnlyList<string> diagnostics)
+    {
+        List<string> ordered = cidrs
+            .Where(static c => !string.IsNullOrWhiteSpace(c))
+            .Select(static c => c.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static s => s, StringComparer.Ordinal)
+            .ToList();
+
+        string? primary = ordered.Count == 0
+            ? null
+            : ordered[0];
+
+        // When expansion is present, prefer the aggregate that appeared first in diagnostics as primary
+        // if ChoosePrimary already recorded it; otherwise keep ordinal first for stable single-prefix cases.
+        string? selectedPrimary = diagnostics
+            .Select(static d =>
+            {
+                const string marker = "selected existing management aggregate ";
+                return d.StartsWith(marker, StringComparison.Ordinal)
+                    ? d[marker.Length..].Trim()
+                    : null;
+            })
+            .FirstOrDefault(static s => !string.IsNullOrWhiteSpace(s));
+        if (!string.IsNullOrWhiteSpace(selectedPrimary) && ordered.Contains(selectedPrimary, StringComparer.Ordinal))
+        {
+            primary = selectedPrimary;
+        }
+
+        return new()
+        {
+            Succeeded = true,
+            ManagementCidr = primary,
+            ManagementCidrs = ordered,
+            ContributingAddresses = contributing.ToList(),
+            IgnoredOutsideRangeAddresses = ignoredOutside.ToList(),
+            IgnoredPppoeAddresses = ignoredPppoe.ToList(),
+            IgnoredDisabledAddresses = ignoredDisabled.ToList(),
+            IgnoredTransportSlash30Addresses = ignoredTransport30.ToList(),
+            SelectionDiagnostics = diagnostics.ToList(),
+        };
+    }
+
     private static OspfSiteManagementSummaryResult Failed(string error) => Failed([error]);
 
-    /// <summary>
-    /// Creates a failed result carrying the supplied errors.
-    /// </summary>
-    /// <param name="errors">Reasons derivation failed.</param>
-    /// <returns>A failed result.</returns>
-    private static OspfSiteManagementSummaryResult Failed(IReadOnlyList<string> errors) =>
+    private static OspfSiteManagementSummaryResult Failed(
+        IReadOnlyList<string> errors,
+        IReadOnlyList<string>? ignoredDisabled = null,
+        IReadOnlyList<string>? diagnostics = null) =>
         new()
         {
             Succeeded = false,
             Errors = errors.ToList(),
+            // Preserve exclusion evidence on failure so diagnostics never contradict decision paths.
+            IgnoredDisabledAddresses = ignoredDisabled?.ToList() ?? [],
+            SelectionDiagnostics = diagnostics?.ToList() ?? [],
         };
 }
 
 /// <summary>
-/// Derived site management summary /24 and supporting details.
+/// Derived site management summary /24 set and supporting details.
 /// </summary>
 internal sealed class OspfSiteManagementSummaryResult
 {
-    /// <summary>
-    /// Gets a value indicating whether a single management <c>/24</c> was derived.
-    /// </summary>
     public required bool Succeeded { get; init; }
 
-    /// <summary>
-    /// The single site management <c>/24</c> in CIDR form (for example <c>10.20.30.0/24</c>) that the
-    /// in-scope interface addresses collapse into. <see langword="null"/> when derivation failed.
-    /// </summary>
+    /// <summary>Primary management aggregate (stable single-value view for callers).</summary>
     public string? ManagementCidr { get; init; }
 
     /// <summary>
-    /// Evidence trail of the addresses that produced <see cref="ManagementCidr"/>, one entry per address
-    /// formatted as <c>interface=address-&gt;cidr</c> (the interface, its address, and the <c>/24</c> it maps to).
+    /// Full set of required management <c>/24</c> aggregates, including same-interface expansions.
+    /// Never a broader supernet of distinct <c>/24</c>s.
     /// </summary>
+    public IReadOnlyList<string> ManagementCidrs { get; init; } = [];
+
     public IReadOnlyList<string> ContributingAddresses { get; init; } = [];
 
-    /// <summary>
-    /// Gets addresses outside <c>10.0.0.0/8</c> that were ignored.
-    /// </summary>
     public IReadOnlyList<string> IgnoredOutsideRangeAddresses { get; init; } = [];
 
-    /// <summary>
-    /// Gets PPPoE role interface addresses that were ignored.
-    /// </summary>
     public IReadOnlyList<string> IgnoredPppoeAddresses { get; init; } = [];
 
-    /// <summary>
-    /// Human-readable reasons no single management <c>/24</c> could be derived. Always empty when
-    /// <see cref="Succeeded"/> is <see langword="true"/>.
-    /// </summary>
+    /// <summary>Disabled address rows excluded from discovery.</summary>
+    public IReadOnlyList<string> IgnoredDisabledAddresses { get; init; } = [];
+
+    /// <summary>Point-to-point <c>/30</c> addresses excluded from management candidates.</summary>
+    public IReadOnlyList<string> IgnoredTransportSlash30Addresses { get; init; } = [];
+
+    /// <summary>Explainable include/exclude/select trail for diagnostics and logs.</summary>
+    public IReadOnlyList<string> SelectionDiagnostics { get; init; } = [];
+
     public IReadOnlyList<string> Errors { get; init; } = [];
 
-    /// <summary>
-    /// Single-line failure message built by joining <see cref="Errors"/> with <c>"; "</c>, suitable for
-    /// logs and gate failures. <see langword="null"/> when derivation succeeded.
-    /// </summary>
     public string? Detail => Succeeded ? null : string.Join("; ", Errors);
 }

@@ -13,8 +13,8 @@ using System.Net.Sockets;
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
-/// Authoritative OSPF Router ID derivation from the in-scope Loopback IPv4 <c>/32</c>
-/// inside <c>10.0.0.0/8</c>.
+/// Authoritative OSPF Router ID derivation from the dedicated Loopback IPv4 <c>/32</c>
+/// inside the BR identity range <c>10.16.0.0/24</c>.
 /// </summary>
 /// <remarks>
 /// Supported Loopback interface names from fleet fixtures (exact, case-insensitive):
@@ -22,7 +22,9 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// interface names — never backhaul, management, or PPPoE addresses.
 /// RouterOS export may omit <c>/32</c> for host addresses; those are normalised to <c>/32</c>.
 /// Multiple Loopback addresses are allowed: outside-range addresses are ignored for migration
-/// identity; only unambiguous in-scope (<c>10.0.0.0/8</c>) identity is selected.
+/// identity; only unambiguous in-scope (<c>10.16.0.0/24</c>) identity is selected.
+/// The selected host address is the literal target OSPF router-id (never a hostname or
+/// <c>/routing/id</c> symbolic name).
 /// </remarks>
 internal static class OspfLoopbackRouterId
 {
@@ -39,9 +41,9 @@ internal static class OspfLoopbackRouterId
     /// </summary>
     public const string InterfaceNameLoopbackOspf = "Loopback-OSPF";
     /// <summary>
-    /// CIDR of the infrastructure address space; only Loopback hosts inside it can supply the Router ID.
+    /// CIDR of the BR Loopback identity range; only Loopback hosts inside it can supply the Router ID.
     /// </summary>
-    public const string InfrastructureScopeCidr = "10.0.0.0/8";
+    public const string InfrastructureScopeCidr = "10.16.0.0/24";
 
     /// <summary>
     /// Parsed form of <see cref="InfrastructureScopeCidr"/> used for host containment checks.
@@ -106,9 +108,16 @@ internal static class OspfLoopbackRouterId
 
         List<(OspfIpAddressRow Row, string Host, string Interface)> parsed = [];
         List<string> ignoredOutside = [];
+        List<string> ignoredDisabled = [];
 
         foreach (OspfIpAddressRow row in ipAddresses.Where(static a => IsSupportedLoopbackInterfaceName(a.Interface)))
         {
+            if (!OspfInventoryEligibility.IsEligible(row))
+            {
+                ignoredDisabled.Add($"{row.Interface}={row.Address}");
+                continue;
+            }
+
             if (!TryParseLoopbackHostAddress(row.Address, row.Network, out string host, out string? parseError))
             {
                 return Failed(
@@ -127,13 +136,24 @@ internal static class OspfLoopbackRouterId
 
         if (parsed.Count == 0)
         {
+            if (ignoredDisabled.Count > 0 && ignoredOutside.Count == 0)
+            {
+                return Failed(
+                    "No eligible (enabled) in-scope (10.16.0.0/24) Loopback IPv4 address found for migration "
+                    + "identity. Disabled/unknown Loopback address(es) were excluded: "
+                    + string.Join(", ", ignoredDisabled)
+                    + ".");
+            }
+
             if (ignoredOutside.Count > 0)
             {
                 return Failed(
-                    "No in-scope (10.0.0.0/8) Loopback IPv4 address found for migration identity. "
+                    "No in-scope (10.16.0.0/24) Loopback IPv4 address found for migration identity. "
                     + "Ignored outside-range Loopback address(es): "
                     + string.Join(", ", ignoredOutside)
-                    + ".");
+                    + (ignoredDisabled.Count == 0
+                        ? "."
+                        : ". Excluded disabled/unknown: " + string.Join(", ", ignoredDisabled) + "."));
             }
 
             return Failed(
@@ -152,14 +172,17 @@ internal static class OspfLoopbackRouterId
             selectedHost = uniqueHosts[0];
         }
         else if (!string.IsNullOrWhiteSpace(corroboratingRouterId)
+                 && IsDottedQuadIPv4(corroboratingRouterId)
                  && uniqueHosts.Count(h => EqualsRouterId(h, corroboratingRouterId)) == 1)
         {
+            // Only a literal IPv4 corroborator may disambiguate. Hostname / symbolic /routing/id
+            // names never select among multiple loopback candidates.
             selectedHost = uniqueHosts.First(h => EqualsRouterId(h, corroboratingRouterId));
         }
         else
         {
             return Failed(
-                "Multiple distinct in-scope (10.0.0.0/8) Loopback addresses present ("
+                "Multiple distinct in-scope (10.16.0.0/24) Loopback addresses present ("
                 + string.Join(", ", uniqueHosts)
                 + "); refusing to select a Router ID without unambiguous corroborating OSPF router-id."
                 + (string.IsNullOrWhiteSpace(corroboratingRouterId)
@@ -200,6 +223,28 @@ internal static class OspfLoopbackRouterId
         !string.IsNullOrWhiteSpace(left)
         && !string.IsNullOrWhiteSpace(right)
         && string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Returns true when <paramref name="value"/> is a dotted-quad IPv4 address (no prefix).
+    /// </summary>
+    public static bool IsDottedQuadIPv4(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        string trimmed = value.Trim();
+        int slash = trimmed.IndexOf('/');
+        if (slash >= 0)
+        {
+            trimmed = trimmed[..slash];
+        }
+
+        return IPAddress.TryParse(trimmed, out IPAddress? ip)
+               && ip.AddressFamily == AddressFamily.InterNetwork
+               && trimmed.Count(static c => c == '.') == 3;
+    }
 
     /// <summary>
     /// Accepts explicit <c>/32</c>, or RouterOS host form without a prefix (optionally with

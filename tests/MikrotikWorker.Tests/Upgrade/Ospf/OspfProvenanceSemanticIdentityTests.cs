@@ -43,8 +43,8 @@ public sealed class OspfProvenanceSemanticIdentityTests
 
     /// <summary>
     /// Scenario: the live template matches provenance except for one property: cost, auth-id, priority, type, auth, hello/dead/retransmit interval, transmit-delay, instance-id, area-instance, prefix-list or either virtual-link field.
-    /// Expected: the template is classified unknown and classification refuses to proceed.
-    /// Invariant: any single semantic difference makes a template not safe to delete.
+    /// Expected: the template is classified PreservedUnmanaged (not Unknown) and classification succeeds.
+    /// Invariant: any single semantic difference makes a template not safe to delete, so it is preserved in place.
     /// </summary>
     [Theory]
     [InlineData("cost", "10")]
@@ -61,7 +61,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [InlineData("prefix-list", "plist1")]
     [InlineData("vlink-neighbor-id", "1.2.3.4")]
     [InlineData("vlink-transit-area", "transit")]
-    public void SinglePropertyDifference_IsUnknown(string property, string value)
+    public void SinglePropertyDifference_IsPreservedUnmanaged(string property, string value)
     {
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L");
@@ -84,16 +84,16 @@ public sealed class OspfProvenanceSemanticIdentityTests
             _ => live,
         };
 
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
     /// Scenario: the live template matches provenance except that an auth key (with fingerprint) is now present.
-    /// Expected: the template is classified unknown.
+    /// Expected: the template is classified PreservedUnmanaged.
     /// Invariant: the auth key is part of the identity, so adding one alone is enough to block deletion.
     /// </summary>
     [Fact]
-    public void AuthKeyOnlyDifference_IsUnknown()
+    public void AuthKeyOnlyDifference_IsPreservedUnmanaged()
     {
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with
@@ -102,33 +102,33 @@ public sealed class OspfProvenanceSemanticIdentityTests
             AuthKeyFingerprint = OspfTemplateSemanticIdentity.FingerprintAuthKey("secret-value"),
         };
 
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
     /// Scenario: the live template matches provenance except <c>use-bfd</c> is now "true".
-    /// Expected: the template is classified unknown.
+    /// Expected: the template is classified PreservedUnmanaged.
     /// Invariant: a BFD-only change blocks deletion.
     /// </summary>
     [Fact]
-    public void BfdOnlyDifference_IsUnknown()
+    public void BfdOnlyDifference_IsPreservedUnmanaged()
     {
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with { UseBfd = "true" };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
     /// Scenario: the live template matches provenance except <c>Passive</c> is now false.
-    /// Expected: the template is classified unknown.
+    /// Expected: the template is classified PreservedUnmanaged.
     /// Invariant: a passive-state change blocks deletion.
     /// </summary>
     [Fact]
-    public void PassiveStateDifference_IsUnknown()
+    public void PassiveStateDifference_IsPreservedUnmanaged()
     {
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L") with { Passive = false };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
@@ -232,30 +232,28 @@ public sealed class OspfProvenanceSemanticIdentityTests
 
     /// <summary>
     /// Scenario: the plan has no superseded identities, and the live inventory has an extra 192.0.2.0/24 template outside the consolidated prefix.
-    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "No deletion was attempted" and "consolidated-prefix replacement".
-    /// Invariant: without provenance, only templates contained in the consolidated prefix may be treated as obsolete.
+    /// Expected: classification succeeds, the extra row is a single PreservedUnmanaged template, and nothing is known-legacy or unknown.
+    /// Invariant: without provenance, only templates contained in the consolidated prefix may be treated as obsolete; unrelated passive templates are preserved.
     /// </summary>
     [Fact]
-    public void MissingProvenance_UnrelatedPrefix_IsUnknown()
+    public void MissingProvenance_UnrelatedPrefix_IsPreservedUnmanaged()
     {
         OspfMigrationPlan plan = BasePlan(superseded: []);
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(
-                plan,
-                [
-                    PlannedBackhaul(),
-                    PlannedLoopback(),
-                    PlannedSite(),
-                    LiveRow("*L", "site", "vlan10", "192.0.2.0/24", passive: true),
-                ]));
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("consolidated-prefix replacement", ex.Message, StringComparison.OrdinalIgnoreCase);
+        OspfTemplateClassificationReport report = OspfTemplateCleanupClassifier.ClassifyOrThrow(
+            plan,
+            [
+                PlannedBackhaul(),
+                PlannedLoopback(),
+                PlannedSite(),
+                LiveRow("*L", "site", "vlan10", "192.0.2.0/24", passive: true),
+            ]);
+        AssertPreservedUnmanaged(report);
     }
 
     /// <summary>
     /// Scenario: the live row carries an unparseable value for cost, priority, or a timer or instance-id property (for example "not-a-number" or "bogus").
-    /// Expected: the template is classified unknown.
-    /// Invariant: a malformed value is never normalised into a match.
+    /// Expected: the template is classified PreservedUnmanaged.
+    /// Invariant: a malformed value is never normalised into a match, so the template is preserved, not deleted.
     /// </summary>
     [Theory]
     [InlineData("cost", "not-a-number")]
@@ -265,7 +263,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [InlineData("retransmit-interval", "bogus")]
     [InlineData("transmit-delay", "??")]
     [InlineData("instance-id", "999")]
-    public void MalformedProperty_IsUnknown(string property, string value)
+    public void MalformedProperty_IsPreservedUnmanaged(string property, string value)
     {
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfTemplateInventoryRow live = LiveFrom(provenance, "*L");
@@ -280,7 +278,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
             "instance-id" => live with { InstanceId = value },
             _ => live,
         };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
@@ -299,11 +297,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
 
     /// <summary>
     /// Scenario: the legacy template's cost is changed to 10 after provenance was recorded, and <c>RemoveObsoleteTemplatesAsync</c> runs.
-    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
-    /// Invariant: a configuration drift after capture aborts cleanup before any deletion.
+    /// Expected: cleanup succeeds, the drifted row is preserved as PreservedUnmanaged, and zero <c>remove</c> commands were sent.
+    /// Invariant: a configuration drift after capture never makes the row deletable; it is preserved.
     /// </summary>
     [Fact]
-    public async Task ConfigurationModifiedAfterProvenance_AbortsCleanupWithZeroDeletes()
+    public async Task ConfigurationModifiedAfterProvenance_PreservesRowWithZeroDeletes()
     {
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfMigrationPlan plan = BasePlan([provenance]);
@@ -338,18 +336,17 @@ public sealed class OspfProvenanceSemanticIdentityTests
                     return [new TikFakeDoneSentence()];
                 });
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
-                .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None));
+        await new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
+            .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, removes);
+        Assert.Contains(store, static r => r[".id"] == "*L");
     }
 
     /// <summary>
     /// Scenario: one timer or instance-id property of the live legacy template is changed after provenance was recorded, and <c>RemoveObsoleteTemplatesAsync</c> runs.
-    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
-    /// Invariant: drift in timer or instance-id values aborts cleanup before any deletion.
+    /// Expected: cleanup succeeds, the drifted row is preserved as PreservedUnmanaged, and zero <c>remove</c> commands were sent.
+    /// Invariant: drift in timer or instance-id values never makes the row deletable; it is preserved.
     /// </summary>
     [Theory]
     [InlineData("hello-interval", "1s")]
@@ -357,7 +354,7 @@ public sealed class OspfProvenanceSemanticIdentityTests
     [InlineData("retransmit-interval", "2s")]
     [InlineData("transmit-delay", "2s")]
     [InlineData("instance-id", "7")]
-    public async Task TimerOrInstanceModifiedAfterProvenance_AbortsWithZeroDeletes(string property, string value)
+    public async Task TimerOrInstanceModifiedAfterProvenance_PreservesRowWithZeroDeletes(string property, string value)
     {
         OspfSupersededTemplateIdentity provenance = Provenance("vlan10", "10.99.99.0/27");
         OspfMigrationPlan plan = BasePlan([provenance]);
@@ -390,12 +387,11 @@ public sealed class OspfProvenanceSemanticIdentityTests
                     return [new TikFakeDoneSentence()];
                 });
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
-                .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None));
+        await new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
+            .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, removes);
+        Assert.Contains(store, static r => r[".id"] == "*L");
     }
 
     /// <summary>
@@ -470,22 +466,16 @@ public sealed class OspfProvenanceSemanticIdentityTests
     }
 
     /// <summary>
-    /// Asserts that the exception reports unknown templates and states that no deletion was attempted.
+    /// Asserts that the report holds exactly one PreservedUnmanaged row (<c>*L</c>) and no known-legacy or unknown rows.
     /// </summary>
-    private static void AssertUnknown(InvalidOperationException ex)
+    private static void AssertPreservedUnmanaged(OspfTemplateClassificationReport report)
     {
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("unknown", ex.Message, StringComparison.OrdinalIgnoreCase);
+        OspfClassifiedTemplate preserved = Assert.Single(report.PreservedUnmanaged);
+        Assert.Equal(OspfTemplateClassification.PreservedUnmanaged, preserved.Classification);
+        Assert.Equal("*L", preserved.Row.Id);
+        Assert.Empty(report.Unknown);
+        Assert.Empty(report.KnownLegacy);
     }
-
-    /// <summary>
-    /// Classifies the live template against the provenance and returns the <c>InvalidOperationException</c> that
-    /// classification is expected to throw.
-    /// </summary>
-    private static InvalidOperationException ClassifyExpectThrow(
-        OspfSupersededTemplateIdentity provenance,
-        OspfTemplateInventoryRow live) =>
-        Assert.Throws<InvalidOperationException>(() => Classify(provenance, live));
 
     /// <summary>
     /// Classifies the planned backhaul, loopback and site templates plus <paramref name="extras"/> against a single provenance record.

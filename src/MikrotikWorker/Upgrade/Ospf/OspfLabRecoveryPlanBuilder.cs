@@ -224,7 +224,7 @@ internal static class OspfLabRecoveryPlanBuilder
         // Include live auto-converted passive site templates so planner consolidation records
         // complete KnownLegacy provenance for cleanup (ROS7 conversion leaves per-VLAN matchers).
         int liveSiteImported = 0;
-        foreach (OspfInterfaceTemplateRow liveTemplate in live.Templates.Where(static t => !t.Disabled))
+        foreach (OspfInterfaceTemplateRow liveTemplate in live.Templates.Where(OspfInventoryEligibility.IsEligible))
         {
             string? areaName = liveTemplate.Area;
             if (string.IsNullOrWhiteSpace(areaName))
@@ -362,6 +362,7 @@ internal static class OspfLabRecoveryPlanBuilder
             ObservedInScopeLoopbackAddresses = plan.ObservedInScopeLoopbackAddresses,
             IgnoredOutsideRangeLoopbackAddresses = plan.IgnoredOutsideRangeLoopbackAddresses,
             DerivedManagementCidr = plan.DerivedManagementCidr,
+            DerivedManagementCidrs = OspfMigrationPlanner.GetDerivedManagementCidrs(plan),
             Areas = plan.Areas,
             AreaRanges = plan.AreaRanges,
             ActiveBackhauls = plan.ActiveBackhauls,

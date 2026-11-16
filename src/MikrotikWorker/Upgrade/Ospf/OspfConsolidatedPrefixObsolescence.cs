@@ -2,10 +2,10 @@
 // File: OspfConsolidatedPrefixObsolescence.cs
 //
 // Description:
-// Simple same-area consolidated-prefix obsolescence: a live template whose
-// every network is a strictly more-specific subnet of a planned consolidated
-// site prefix is obsolete and may be removed. No provenance fingerprints or
-// semantic attribute matching are required.
+// Same-area consolidated-prefix obsolescence: a live template whose every
+// network is either an exact member of, or a strictly more-specific subnet of,
+// a planned consolidated site prefix is obsolete and may be removed. No
+// provenance fingerprints or semantic attribute matching are required.
 //
 // -----------------------------------------------------------------------------
 
@@ -14,16 +14,23 @@ using System.Net;
 namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
-/// Simple same-area consolidated-prefix obsolescence: a live template whose every network is a
-/// strictly more-specific subnet of a planned consolidated site prefix is obsolete and may be
-/// removed. No provenance fingerprints or semantic attribute matching are required.
+/// Same-area consolidated-prefix obsolescence: a live template whose every network is either an
+/// exact member of, or a strictly more-specific subnet of, a planned consolidated site prefix is
+/// obsolete and may be removed. No provenance fingerprints or semantic attribute matching are
+/// required.
 /// </summary>
+/// <remarks>
+/// Exact-equal coverage is required for migration-owned consolidation sources whose prefixes are
+/// retained unchanged on the planned <c>interfaces=all</c> matcher (for example a retained public
+/// <c>/24</c> that did not fold into an aggregate or area-range). Strict containment continues to
+/// cover subdivided management prefixes under a summarised <c>/24</c>.
+/// </remarks>
 internal static class OspfConsolidatedPrefixObsolescence
 {
     /// <summary>
     /// True when <paramref name="row"/> belongs to the same area as a planned
-    /// <c>interfaces=all</c> site matcher and every live network is strictly contained by one of
-    /// that matcher's consolidated prefixes (IPv4 or IPv6).
+    /// <c>interfaces=all</c> site matcher and every live network is either exactly equal to, or
+    /// strictly contained by, one of that matcher's consolidated prefixes (IPv4 or IPv6).
     /// </summary>
     public static bool TryExplain(
         OspfTemplateInventoryRow row,
@@ -69,7 +76,7 @@ internal static class OspfConsolidatedPrefixObsolescence
                 continue;
             }
 
-            if (!AllLiveNetworksStrictlyContained(liveNets, plannedNets, out List<string> folds))
+            if (!AllLiveNetworksCoveredByConsolidated(liveNets, plannedNets, out List<string> folds))
             {
                 continue;
             }
@@ -106,6 +113,22 @@ internal static class OspfConsolidatedPrefixObsolescence
     }
 
     /// <summary>
+    /// True when <paramref name="live"/> is exactly equal to <paramref name="planned"/> (same
+    /// family, base and prefix length).
+    /// </summary>
+    public static bool IsExactMemberOf(IPNetwork live, IPNetwork planned) =>
+        live.BaseAddress.AddressFamily == planned.BaseAddress.AddressFamily
+        && live.PrefixLength == planned.PrefixLength
+        && live.Equals(planned);
+
+    /// <summary>
+    /// True when <paramref name="live"/> is either an exact member of <paramref name="planned"/>
+    /// or strictly contained by it.
+    /// </summary>
+    public static bool IsCoveredByConsolidated(IPNetwork live, IPNetwork planned) =>
+        IsExactMemberOf(live, planned) || IsStrictlyContainedBy(live, planned);
+
+    /// <summary>
     /// Parses a comma-separated list of networks.
     /// </summary>
     /// <param name="networks">Comma-separated CIDR list.</param>
@@ -136,13 +159,14 @@ internal static class OspfConsolidatedPrefixObsolescence
     }
 
     /// <summary>
-    /// Determines whether every live network is strictly contained in some planned network.
+    /// Determines whether every live network is an exact member of, or strictly contained in, some
+    /// planned consolidated network.
     /// </summary>
     /// <param name="liveNets">Networks currently on the router.</param>
     /// <param name="plannedNets">Networks in the plan.</param>
     /// <param name="folds">Receives a description of each live network and its covering planned network; empty on failure.</param>
     /// <returns><see langword="true"/> when all live networks are covered.</returns>
-    private static bool AllLiveNetworksStrictlyContained(
+    private static bool AllLiveNetworksCoveredByConsolidated(
         IReadOnlyList<IPNetwork> liveNets,
         IReadOnlyList<IPNetwork> plannedNets,
         out List<string> folds)
@@ -151,11 +175,20 @@ internal static class OspfConsolidatedPrefixObsolescence
         foreach (IPNetwork live in liveNets)
         {
             IPNetwork? cover = null;
+            bool exact = false;
             foreach (IPNetwork planned in plannedNets)
             {
+                if (IsExactMemberOf(live, planned))
+                {
+                    cover = planned;
+                    exact = true;
+                    break;
+                }
+
                 if (IsStrictlyContainedBy(live, planned))
                 {
                     cover = planned;
+                    exact = false;
                     break;
                 }
             }
@@ -166,7 +199,10 @@ internal static class OspfConsolidatedPrefixObsolescence
                 return false;
             }
 
-            folds.Add($"{Format(live)} ⊂ {Format(cover.Value)}");
+            folds.Add(
+                exact
+                    ? $"{Format(live)} = {Format(cover.Value)} (exact consolidated member)"
+                    : $"{Format(live)} ⊂ {Format(cover.Value)}");
         }
 
         return folds.Count > 0;

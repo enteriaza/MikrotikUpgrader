@@ -26,8 +26,17 @@ internal enum OspfTemplateClassification
     /// <summary>Live template identified as known-legacy and eligible for cleanup.</summary>
     KnownLegacy = 3,
 
-    /// <summary>Live template with no established replacement relationship (fail closed).</summary>
+    /// <summary>
+    /// Live template with no established replacement relationship that conflicts with the target
+    /// topology (active adjacency risk). Remains a hard cleanup blocker.
+    /// </summary>
     Unknown = 4,
+
+    /// <summary>
+    /// Unrelated/unmanaged template that does not conflict with planned roles; preserved in place
+    /// and never deleted by migration cleanup.
+    /// </summary>
+    PreservedUnmanaged = 5,
 }
 
 /// <summary>
@@ -51,6 +60,9 @@ internal sealed record OspfTemplateInventoryRow
     public bool Passive { get; init; }
     /// <summary>Whether the template is administratively disabled.</summary>
     public bool Disabled { get; init; }
+
+    /// <summary>Parsed admin enablement; unknown states are never migration-eligible.</summary>
+    public OspfAdminState AdminState { get; init; } = OspfAdminState.Enabled;
     /// <summary>Raw OSPF authentication method (<c>auth</c>); null when unset.</summary>
     public string? Auth { get; init; }
     /// <summary>Raw authentication key id (<c>auth-id</c>); null when unset.</summary>
@@ -138,9 +150,13 @@ internal sealed class OspfTemplateClassificationReport
     public IReadOnlyList<OspfClassifiedTemplate> KnownLegacy =>
         Items.Where(static i => i.Classification == OspfTemplateClassification.KnownLegacy).ToList();
 
-    /// <summary>Templates with no established ownership. Any entry here makes cleanup fail closed. Computed on each access.</summary>
+    /// <summary>Templates with no established ownership that conflict with the target topology. Any entry here makes cleanup fail closed. Computed on each access.</summary>
     public IReadOnlyList<OspfClassifiedTemplate> Unknown =>
         Items.Where(static i => i.Classification == OspfTemplateClassification.Unknown).ToList();
+
+    /// <summary>Unrelated templates preserved in place (not deleted). Computed on each access.</summary>
+    public IReadOnlyList<OspfClassifiedTemplate> PreservedUnmanaged =>
+        Items.Where(static i => i.Classification == OspfTemplateClassification.PreservedUnmanaged).ToList();
 
     /// <summary>Total number of live templates that must be preserved because the plan owns them (backhauls + loopbacks + site matchers).</summary>
     public int PlannedProtectedCount => Backhauls.Count + Loopbacks.Count + SiteMatchers.Count;
@@ -281,14 +297,25 @@ internal static class OspfTemplateCleanupClassifier
                 continue;
             }
 
+            if (TryExplainConflictWithTargetTopology(row, plan, out string conflictReason))
+            {
+                classified.Add(new OspfClassifiedTemplate
+                {
+                    Row = row,
+                    Classification = OspfTemplateClassification.Unknown,
+                    Reason = conflictReason,
+                });
+                continue;
+            }
+
             classified.Add(new OspfClassifiedTemplate
             {
                 Row = row,
-                Classification = OspfTemplateClassification.Unknown,
+                Classification = OspfTemplateClassification.PreservedUnmanaged,
                 Reason =
-                    "Not a planned template and no consolidated-prefix replacement "
-                    + "(same-area more-specific containment), desired-state relationship, "
-                    + "or recorded superseded provenance could be established.",
+                    "Unrelated/unmanaged template with no consolidated-prefix replacement, "
+                    + "desired-state relationship, or superseded provenance; preserved because it "
+                    + "does not conflict with planned active backhaul/loopback/site roles.",
             });
         }
 
@@ -323,12 +350,61 @@ internal static class OspfTemplateCleanupClassifier
                 " | ",
                 report.Unknown.Select(static u => $"{u.Row.Describe()}; reason={u.Reason}"));
             throw new InvalidOperationException(
-                $"Refusing OSPF template cleanup: {report.Unknown.Count} unknown/unrelated template(s) present. "
+                $"Refusing OSPF template cleanup: {report.Unknown.Count} conflicting unmanaged template(s) present. "
                 + "No deletion was attempted. "
                 + detail);
         }
 
         return report;
+    }
+
+    /// <summary>
+    /// True when an unmanaged template creates a demonstrable conflict with the planned topology
+    /// (active adjacency risk on a target interface or exact role collision that is not planned).
+    /// Passive unmanaged templates are preserved.
+    /// </summary>
+    private static bool TryExplainConflictWithTargetTopology(
+        OspfTemplateInventoryRow row,
+        OspfMigrationPlan plan,
+        out string reason)
+    {
+        reason = string.Empty;
+
+        // Active (non-passive) unmanaged templates that share an interface with a planned backhaul
+        // or planned site matcher can create unintended adjacencies.
+        // Explicitly disabled rows never create conflicts; unknown admin state still fails closed
+        // as potentially active (do not treat unknown as safely disabled).
+        if (row.AdminState != OspfAdminState.Disabled
+            && !row.Disabled
+            && !row.Passive
+            && !string.IsNullOrWhiteSpace(row.Interfaces))
+        {
+            foreach (OspfPlanBackhaulTemplate bh in plan.ActiveBackhauls)
+            {
+                if (string.Equals(row.Interfaces, bh.Interface, StringComparison.Ordinal))
+                {
+                    reason =
+                        $"Active unmanaged template on planned backhaul interface '{bh.Interface}' "
+                        + "creates an unresolved adjacency conflict with the target topology.";
+                    return true;
+                }
+            }
+
+            foreach (OspfPlanSiteNetworkTemplate site in plan.PassiveSiteNetworks)
+            {
+                if (!string.IsNullOrWhiteSpace(site.Interfaces)
+                    && !OspfSiteMatcherConsolidation.IsAllInterfaces(site.Interfaces)
+                    && OspfSiteMatcherConsolidation.InterfacesEqual(row.Interfaces, site.Interfaces))
+                {
+                    reason =
+                        $"Active unmanaged template on planned site interface(s) '{site.Interfaces}' "
+                        + "creates an unresolved adjacency conflict with the target topology.";
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Returns true when the row is the live template for the planned backhaul: same area (case-insensitive), exact interface name, and same normalised network CIDR.</summary>
@@ -339,7 +415,7 @@ internal static class OspfTemplateCleanupClassifier
 
     /// <summary>Returns true when the row is an enabled, passive template for the planned loopback: same area, same normalised CIDR, and a compatible interface (either side blank, or equal).</summary>
     public static bool MatchesLoopback(OspfTemplateInventoryRow row, OspfPlanLoopbackTemplate loop) =>
-        !row.Disabled
+        OspfInventoryEligibility.IsEligible(row)
         && row.Passive
         && string.Equals(row.Area, loop.AreaName, StringComparison.OrdinalIgnoreCase)
         && string.Equals(NormalizeCidr(row.Networks), NormalizeCidr(loop.NetworkCidr), StringComparison.Ordinal)
@@ -378,6 +454,36 @@ internal static class OspfTemplateCleanupClassifier
                     or OspfTemplateClassification.PlannedSiteMatcher)
             .Select(static i => i.Row.Id!)
             .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Classifies an eligible live template that is not a planned backhaul/loopback/site role for
+    /// final verification: known-legacy (should have been removed), conflicting unknown, or
+    /// preserved-unmanaged (explicitly retained).
+    /// </summary>
+    public static OspfTemplateClassification ClassifyUnplannedResidual(
+        OspfTemplateInventoryRow row,
+        OspfMigrationPlan plan,
+        out string reason)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        ArgumentNullException.ThrowIfNull(plan);
+
+        if (TryExplainKnownLegacy(row, plan, out reason))
+        {
+            return OspfTemplateClassification.KnownLegacy;
+        }
+
+        if (TryExplainConflictWithTargetTopology(row, plan, out reason))
+        {
+            return OspfTemplateClassification.Unknown;
+        }
+
+        reason =
+            "Unrelated/unmanaged template with no consolidated-prefix replacement, "
+            + "desired-state relationship, or superseded provenance; preserved because it "
+            + "does not conflict with planned active backhaul/loopback/site roles.";
+        return OspfTemplateClassification.PreservedUnmanaged;
+    }
 
     /// <summary>
     /// Decides whether a row not owned by the plan is positively identified as legacy, and explains why.

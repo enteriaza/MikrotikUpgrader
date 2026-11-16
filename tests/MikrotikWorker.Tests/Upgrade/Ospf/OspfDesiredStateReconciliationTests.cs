@@ -176,15 +176,15 @@ public sealed class OspfDesiredStateReconciliationTests
 
     /// <summary>
     /// Scenario: a live candidate that is not covered by the consolidated prefix: a different area, a network outside the management /24, an unrelated 192.0.2.0/24, or a /16 larger than the consolidated prefix.
-    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "unknown/unrelated" and "No deletion was attempted".
-    /// Invariant: only templates contained in the consolidated prefix and area can be treated as obsolete; anything else blocks cleanup.
+    /// Expected: classification preserves the candidate as <c>PreservedUnmanaged</c> with no unknowns.
+    /// Invariant: only templates contained in the consolidated prefix and area can be treated as obsolete; non-conflicting others are retained.
     /// </summary>
     [Theory]
     [InlineData("different_area")]
     [InlineData("outside_mgmt_24")]
     [InlineData("unknown_outside")]
     [InlineData("larger_than_consolidated")]
-    public void ConsolidatedPrefix_NegativeCases_RemainUnknown(string caseName)
+    public void ConsolidatedPrefix_NegativeCases_ArePreservedUnmanaged(string caseName)
     {
         OspfMigrationPlan plan = DesiredPlan(superseded: []);
         OspfTemplateInventoryRow candidate = caseName switch
@@ -197,10 +197,10 @@ public sealed class OspfDesiredStateReconciliationTests
         };
 
         List<OspfTemplateInventoryRow> inventory = PlannedRows(plan).Append(candidate).ToList();
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, inventory));
-        Assert.Contains("unknown/unrelated", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
+        OspfTemplateClassificationReport report = OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, inventory);
+        Assert.Equal("*U", Assert.Single(report.PreservedUnmanaged).Row.Id);
+        Assert.Empty(report.Unknown);
+        Assert.Empty(report.KnownLegacy);
     }
 
     /// <summary>
@@ -248,11 +248,11 @@ public sealed class OspfDesiredStateReconciliationTests
 
     /// <summary>
     /// Scenario: five valid management subdivisions plus one unrelated template (192.0.2.0/24 on Bridge-OTHER).
-    /// Expected: classification throws <c>InvalidOperationException</c> mentioning "No deletion was attempted" and 192.0.2.0/24.
-    /// Invariant: a single unknown template aborts cleanup entirely, even when other rows are valid legacy.
+    /// Expected: the five subdivisions are known legacy and the unrelated row is <c>PreservedUnmanaged</c>; nothing is unknown.
+    /// Invariant: a non-conflicting unmanaged template does not block cleanup of valid legacy rows.
     /// </summary>
     [Fact]
-    public void Safety_OneUnknownPreventsAllDeletion()
+    public void Safety_OnePreservedUnmanaged_DoesNotBlockLegacyClassification()
     {
         OspfMigrationPlan plan = DesiredPlan(superseded: []);
         List<OspfTemplateInventoryRow> inventory = PlannedRows(plan)
@@ -261,10 +261,11 @@ public sealed class OspfDesiredStateReconciliationTests
             .Append(SiteRow("*BAD", "site-v2", "Bridge-OTHER", "192.0.2.0/24"))
             .ToList();
 
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
-            OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, inventory));
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("192.0.2.0/24", ex.Message, StringComparison.Ordinal);
+        OspfTemplateClassificationReport report = OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, inventory);
+        Assert.Equal(5, report.KnownLegacy.Count);
+        Assert.Equal("*BAD", Assert.Single(report.PreservedUnmanaged).Row.Id);
+        Assert.Contains("192.0.2.0/24", report.PreservedUnmanaged[0].Row.Networks, StringComparison.Ordinal);
+        Assert.Empty(report.Unknown);
     }
 
     /// <summary>

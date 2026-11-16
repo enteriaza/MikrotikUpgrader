@@ -32,17 +32,17 @@ public sealed class OspfProvenanceCommentAuthBfdTests
 
     /// <summary>
     /// Scenario: the captured comment (null or "original") differs from the live comment ("added" or "changed").
-    /// Expected: the live template is classified unknown, and classification refuses to proceed.
+    /// Expected: the live template is classified PreservedUnmanaged (not Unknown), and classification succeeds.
     /// Invariant: a comment edited after capture means someone touched the template, so it is not safe to delete.
     /// </summary>
     [Theory]
     [InlineData(null, "added")]
     [InlineData("original", "changed")]
-    public void CommentMutation_AwayFromDesired_IsUnknown(string? captured, string? liveComment)
+    public void CommentMutation_AwayFromDesired_IsPreservedUnmanaged(string? captured, string? liveComment)
     {
         OspfSupersededTemplateIdentity provenance = Provenance(comment: captured);
         OspfTemplateInventoryRow live = LiveFrom(provenance) with { Comment = liveComment };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
@@ -110,11 +110,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
 
     /// <summary>
     /// Scenario: <c>auth-key</c> is "alpha" while <c>authentication-key</c> is "beta", and the live row is marked ambiguous.
-    /// Expected: the resolution is ambiguous and not present, and the template is classified unknown.
+    /// Expected: the resolution is ambiguous and not present, and the template is classified PreservedUnmanaged.
     /// Invariant: conflicting auth-key aliases are never resolved by guessing, and block deletion.
     /// </summary>
     [Fact]
-    public void ConflictingAuthKeyAliases_AreUnknown()
+    public void ConflictingAuthKeyAliases_ArePreservedUnmanaged()
     {
         OspfTemplateSemanticIdentity.AuthKeyResolution conflict =
             OspfTemplateSemanticIdentity.ResolveAuthKey("alpha", "beta");
@@ -128,18 +128,18 @@ public sealed class OspfProvenanceCommentAuthBfdTests
             AuthKeyFingerprint = null,
             AuthKeyAmbiguous = true,
         };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
     /// Scenario: the live row gains an auth key that provenance did not have ("add"), or carries a different key from the one captured ("change").
-    /// Expected: the template is classified unknown.
+    /// Expected: the template is classified PreservedUnmanaged.
     /// Invariant: an added or rotated auth key after capture marks a template as modified and not safe to delete.
     /// </summary>
     [Theory]
     [InlineData("add")]
     [InlineData("change")]
-    public void AuthKeyLifecycle_IsUnknown(string change)
+    public void AuthKeyLifecycle_IsPreservedUnmanaged(string change)
     {
         OspfSupersededTemplateIdentity provenance = change == "add"
             ? Provenance()
@@ -160,7 +160,7 @@ public sealed class OspfProvenanceCommentAuthBfdTests
             _ => throw new ArgumentOutOfRangeException(nameof(change)),
         };
 
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
@@ -183,15 +183,15 @@ public sealed class OspfProvenanceCommentAuthBfdTests
 
     /// <summary>
     /// Scenario: provenance recorded auth md5 with a key, and the live row now reports auth sha256.
-    /// Expected: the template is classified unknown.
+    /// Expected: the template is classified PreservedUnmanaged.
     /// Invariant: a changed authentication method means the template no longer matches what was captured.
     /// </summary>
     [Fact]
-    public void AuthMethodChanged_IsUnknown()
+    public void AuthMethodChanged_IsPreservedUnmanaged()
     {
         OspfSupersededTemplateIdentity provenance = Provenance(auth: "md5", authKey: "k");
         OspfTemplateInventoryRow live = LiveFrom(provenance) with { Auth = "sha256" };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
@@ -214,15 +214,15 @@ public sealed class OspfProvenanceCommentAuthBfdTests
 
     /// <summary>
     /// Scenario: the live <c>use-bfd</c> value is the unrecognised string "maybe".
-    /// Expected: the template is classified unknown.
+    /// Expected: the template is classified PreservedUnmanaged.
     /// Invariant: a value that cannot be normalised is never assumed to match the provenance.
     /// </summary>
     [Fact]
-    public void UseBfd_Malformed_IsUnknown()
+    public void UseBfd_Malformed_IsPreservedUnmanaged()
     {
         OspfSupersededTemplateIdentity provenance = Provenance();
         OspfTemplateInventoryRow live = LiveFrom(provenance) with { UseBfd = "maybe" };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
@@ -249,7 +249,7 @@ public sealed class OspfProvenanceCommentAuthBfdTests
 
     /// <summary>
     /// Scenario: provenance recorded type broadcast (the default), and the live row now has type nbma.
-    /// Expected: the template is classified unknown.
+    /// Expected: the template is classified PreservedUnmanaged.
     /// Invariant: nbma is never treated as equivalent to the broadcast default.
     /// </summary>
     [Fact]
@@ -257,7 +257,7 @@ public sealed class OspfProvenanceCommentAuthBfdTests
     {
         OspfSupersededTemplateIdentity provenance = Provenance(type: "broadcast");
         OspfTemplateInventoryRow live = LiveFrom(provenance) with { Type = "nbma" };
-        AssertUnknown(ClassifyExpectThrow(provenance, live));
+        AssertPreservedUnmanaged(Classify(provenance, live));
     }
 
     /// <summary>
@@ -282,11 +282,11 @@ public sealed class OspfProvenanceCommentAuthBfdTests
 
     /// <summary>
     /// Scenario: <c>RemoveObsoleteTemplatesAsync</c> runs against a live store where the legacy template's comment was changed to "changed" after capture.
-    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
-    /// Invariant: one modified template aborts cleanup before any deletion.
+    /// Expected: cleanup succeeds, the row is preserved as PreservedUnmanaged, and zero <c>remove</c> commands were sent.
+    /// Invariant: a modified template is never deleted; it is preserved in place.
     /// </summary>
     [Fact]
-    public async Task CommentChangedAfterCapture_AbortsWithZeroDeletes()
+    public async Task CommentChangedAfterCapture_PreservesRowWithZeroDeletes()
     {
         OspfSupersededTemplateIdentity provenance = Provenance(comment: "captured");
         OspfMigrationPlan plan = BasePlan([provenance]);
@@ -318,21 +318,19 @@ public sealed class OspfProvenanceCommentAuthBfdTests
                     return [new TikFakeDoneSentence()];
                 });
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
-                .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None));
+        await new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
+            .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, removes);
     }
 
     /// <summary>
     /// Scenario: the live legacy template has <c>auth-key</c>="alpha" and <c>authentication-key</c>="beta".
-    /// Expected: <c>InvalidOperationException</c> mentioning "No deletion was attempted", and zero <c>remove</c> commands were sent.
-    /// Invariant: ambiguous authentication aliases abort cleanup before any deletion.
+    /// Expected: cleanup succeeds, the row is preserved as PreservedUnmanaged, and zero <c>remove</c> commands were sent.
+    /// Invariant: ambiguous authentication aliases are never deleted; the row is preserved.
     /// </summary>
     [Fact]
-    public async Task ConflictingAuthAliases_AbortsWithZeroDeletes()
+    public async Task ConflictingAuthAliases_PreservesRowWithZeroDeletes()
     {
         OspfSupersededTemplateIdentity provenance = Provenance(authKey: "alpha");
         OspfMigrationPlan plan = BasePlan([provenance]);
@@ -363,11 +361,9 @@ public sealed class OspfProvenanceCommentAuthBfdTests
                     return [new TikFakeDoneSentence()];
                 });
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
-                .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None));
+        await new OspfMikrotikOperations(Microsoft.Extensions.Logging.Abstractions.NullLogger<OspfMikrotikOperations>.Instance)
+            .RemoveObsoleteTemplatesAsync(fake, plan, CancellationToken.None);
 
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, removes);
     }
 
@@ -381,22 +377,14 @@ public sealed class OspfProvenanceCommentAuthBfdTests
     }
 
     /// <summary>
-    /// Asserts that the exception reports unknown templates and states that no deletion was attempted.
+    /// Asserts that the report holds exactly one PreservedUnmanaged template and no known-legacy or unknown ones.
     /// </summary>
-    private static void AssertUnknown(InvalidOperationException ex)
+    private static void AssertPreservedUnmanaged(OspfTemplateClassificationReport report)
     {
-        Assert.Contains("No deletion was attempted", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("unknown", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(OspfTemplateClassification.PreservedUnmanaged, Assert.Single(report.PreservedUnmanaged).Classification);
+        Assert.Empty(report.Unknown);
+        Assert.Empty(report.KnownLegacy);
     }
-
-    /// <summary>
-    /// Classifies the live template against the provenance and returns the <c>InvalidOperationException</c> that
-    /// classification is expected to throw.
-    /// </summary>
-    private static InvalidOperationException ClassifyExpectThrow(
-        OspfSupersededTemplateIdentity provenance,
-        OspfTemplateInventoryRow live) =>
-        Assert.Throws<InvalidOperationException>(() => Classify(provenance, live));
 
     /// <summary>
     /// Classifies the planned backhaul, loopback and site templates plus <paramref name="extras"/> against a single provenance record, throwing when unknown templates remain.

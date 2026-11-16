@@ -1494,7 +1494,7 @@ internal sealed class RouterOsV6UpgradeExecutor(
     /// still qualifies — cleanup status must not block OSPF when central copies are good.
     /// </summary>
     internal static bool IsCentralBackupVerified(DeviceBackupResult backup) =>
-        backup.Succeeded || backup.RemoteCleanupFailed;
+        Ospf.OspfCentralBackupGate.IsCentralBackupVerified(backup);
 
     /// <summary>
     /// Whether a package stage outcome counts as verified success for continuing the workflow.

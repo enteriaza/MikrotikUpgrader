@@ -47,16 +47,22 @@ internal sealed class OspfStaticSummaryRedistributionResult
 {
     /// <summary>True when the stage completed successfully or was intentionally skipped.</summary>
     public bool Succeeded { get; private init; }
+
     /// <summary>True when the stage did nothing because <c>RedistributeSummaryviaStatics</c> is disabled.</summary>
     public bool Skipped { get; private init; }
+
     /// <summary>Upgrade outcome to report on failure; meaningful only when <see cref="Succeeded"/> is false.</summary>
     public UpgradeOutcome FailureOutcome { get; private init; }
+
     /// <summary>Human-readable result or failure text, including compensation information when compensation ran.</summary>
     public string? Detail { get; private init; }
+
     /// <summary>True when an in-process rollback of the OSPF instance was attempted after a post-enable failure.</summary>
     public bool CompensationAttempted { get; private init; }
+
     /// <summary>Whether the compensation restored the pre-stage instance state; null when no compensation was attempted.</summary>
     public bool? CompensationSucceeded { get; private init; }
+
     /// <summary>Compensation failure or success note (for example a read-back mismatch); null when compensation was not attempted.</summary>
     public string? CompensationDetail { get; private init; }
 
@@ -111,8 +117,10 @@ internal static class OspfStaticSummaryRedistributionConstants
 {
     /// <summary>Name of the managed routing-filter chain that gates which static routes are redistributed into OSPFv2.</summary>
     public const string OutFilterChainName = "ospf-v2-out";
+
     /// <summary>Administrative distance given to the managed blackhole routes; also used to recognise them (and distinguish them from unrelated routes).</summary>
     public const int BlackholeDistance = 250;
+
     /// <summary>Terminating rule of the managed chain; anything not explicitly accepted is rejected.</summary>
     public const string FinalRejectRule = "reject";
 
@@ -403,7 +411,12 @@ internal sealed class OspfStaticSummaryRedistributionService(
         }
     }
 
-    /// <summary>Ensures one managed blackhole static route exists per prefix: missing routes are added; an existing route that is not the managed blackhole, or duplicate managed routes, cause a fail-closed exception rather than an overwrite.</summary>
+    /// <summary>
+    /// Ensures one managed blackhole static route exists per prefix. Connected/dynamic protocol
+    /// routes for the same destination (for example a management <c>/24</c> connect route at
+    /// distance 0) are not conflicts. Static gateway routes and blackholes at the wrong distance
+    /// fail closed. Duplicate managed blackholes fail closed.
+    /// </summary>
     private async Task ReconcileBlackholeRoutesAsync(
         ITikConnection connection,
         IReadOnlyList<OspfIpPrefix> prefixes,
@@ -422,44 +435,52 @@ internal sealed class OspfStaticSummaryRedistributionService(
                 .Where(r => string.Equals(Field(r, "dst-address"), cidr, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            if (matches.Count == 0)
-            {
-                logger.LogInformation(
-                    "Adding blackhole static route dst={Dst} distance={Distance}",
-                    cidr,
-                    OspfStaticSummaryRedistributionConstants.BlackholeDistance);
-                ITikCommand add = connection.CreateCommand("/ip/route/add");
-                add.AddParameter("dst-address", cidr);
-                add.AddParameter("blackhole", "yes");
-                add.AddParameter(
-                    "distance",
-                    OspfStaticSummaryRedistributionConstants.BlackholeDistance.ToString(CultureInfo.InvariantCulture));
-                await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                continue;
-            }
-
+            List<ITikReSentence> managed = [];
             foreach (ITikReSentence match in matches)
             {
-                if (!IsManagedBlackhole(match))
+                if (IsManagedBlackhole(match))
+                {
+                    managed.Add(match);
+                    continue;
+                }
+
+                if (IsConflictingRouteForManagedBlackhole(match, out string conflictDetail))
                 {
                     throw new OspfStaticSummaryRedistributionException(
                         $"Conflicting /ip/route for dst-address={cidr}: expected blackhole distance "
                         + $"{OspfStaticSummaryRedistributionConstants.BlackholeDistance}, "
-                        + $"observed blackhole='{Field(match, "blackhole")}', distance='{Field(match, "distance")}', "
-                        + $".id='{Field(match, ".id")}'. Refusing to overwrite unrelated or incorrect route.");
+                        + conflictDetail
+                        + $" .id='{Field(match, ".id")}'. Refusing to overwrite unrelated or incorrect route.");
                 }
             }
 
-            if (matches.Count > 1)
+            if (managed.Count > 1)
             {
                 throw new OspfStaticSummaryRedistributionException(
-                    $"Duplicate managed blackhole routes for dst-address={cidr} (count={matches.Count}); fail-closed.");
+                    $"Duplicate managed blackhole routes for dst-address={cidr} (count={managed.Count}); fail-closed.");
+            }
+
+            if (managed.Count == 1)
+            {
+                logger.LogInformation(
+                    "Blackhole static route already correct dst={Dst} .id={Id}",
+                    cidr,
+                    Field(managed[0], ".id"));
+                continue;
             }
 
             logger.LogInformation(
-                "Blackhole static route already correct dst={Dst} .id={Id}",
+                "Adding blackhole static route dst={Dst} distance={Distance}",
                 cidr,
-                Field(matches[0], ".id"));
+                OspfStaticSummaryRedistributionConstants.BlackholeDistance);
+            ITikCommand add = connection.CreateCommand("/ip/route/add");
+            add.AddParameter("dst-address", cidr);
+            // RouterOS () flag datatype: presence enables the flag. Prefer empty value over yes/no.
+            add.AddParameter("blackhole", string.Empty);
+            add.AddParameter(
+                "distance",
+                OspfStaticSummaryRedistributionConstants.BlackholeDistance.ToString(CultureInfo.InvariantCulture));
+            await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -978,10 +999,24 @@ internal sealed class OspfStaticSummaryRedistributionService(
     private static string? NormalizeOptional(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    /// <summary>Returns true when the route row is a blackhole route at the managed distance.</summary>
+    /// <summary>
+    /// True when the route is the managed blackhole: RouterOS <c>blackhole</c> flag present/enabled
+    /// and administrative distance exactly <see cref="OspfStaticSummaryRedistributionConstants.BlackholeDistance"/>.
+    /// </summary>
     private static bool IsManagedBlackhole(ITikReSentence row)
     {
-        if (!IsTruthyFlag(Field(row, "blackhole")))
+        if (!TryReadRosFlag(row, "blackhole", out bool blackhole, out string? ambiguous))
+        {
+            if (ambiguous is not null)
+            {
+                throw new OspfStaticSummaryRedistributionException(
+                    $"Ambiguous /ip/route blackhole flag for .id='{Field(row, ".id")}': {ambiguous}");
+            }
+
+            return false;
+        }
+
+        if (!blackhole)
         {
             return false;
         }
@@ -993,13 +1028,143 @@ internal sealed class OspfStaticSummaryRedistributionService(
             StringComparison.Ordinal);
     }
 
-    /// <summary>Interprets a RouterOS boolean field; an empty value (flag present without value) counts as true, as do <c>true</c>, <c>yes</c> and <c>1</c>.</summary>
-    private static bool IsTruthyFlag(string? value) =>
-        value is not null
-        && (value.Length == 0
+    /// <summary>
+    /// True when an existing same-destination route must block creating/accepting the managed
+    /// blackhole: a blackhole at the wrong distance, or an ordinary static/gateway route.
+    /// Connected and dynamic protocol routes (distance-0 connect, OSPF, etc.) are not conflicts.
+    /// </summary>
+    private static bool IsConflictingRouteForManagedBlackhole(ITikReSentence row, out string detail)
+    {
+        if (!TryReadRosFlag(row, "blackhole", out bool blackhole, out string? ambiguousBlackhole))
+        {
+            if (ambiguousBlackhole is not null)
+            {
+                throw new OspfStaticSummaryRedistributionException(
+                    $"Ambiguous /ip/route blackhole flag for .id='{Field(row, ".id")}': {ambiguousBlackhole}");
+            }
+        }
+        else if (blackhole)
+        {
+            detail =
+                $"observed blackhole={FormatFlagObservation(row, "blackhole")}, "
+                + $"distance='{Field(row, "distance") ?? "<absent>"}'";
+            return true;
+        }
+
+        if (IsOrdinaryStaticOrGatewayRoute(row))
+        {
+            detail =
+                $"observed blackhole={FormatFlagObservation(row, "blackhole")}, "
+                + $"distance='{Field(row, "distance") ?? "<absent>"}', "
+                + $"gateway='{Field(row, "gateway") ?? "<absent>"}'";
+            return true;
+        }
+
+        detail = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// Ordinary static/gateway ownership: explicit <c>static</c> flag, or a gateway address without
+    /// connect/dynamic protocol flags. Pure connect/dynamic rows are ignored.
+    /// </summary>
+    private static bool IsOrdinaryStaticOrGatewayRoute(ITikReSentence row)
+    {
+        if (TryReadRosFlag(row, "static", out bool isStatic, out string? ambiguousStatic))
+        {
+            if (ambiguousStatic is not null)
+            {
+                throw new OspfStaticSummaryRedistributionException(
+                    $"Ambiguous /ip/route static flag for .id='{Field(row, ".id")}': {ambiguousStatic}");
+            }
+
+            if (isStatic)
+            {
+                return true;
+            }
+        }
+
+        if (HasProtocolOwnershipFlag(row, "connect")
+            || HasProtocolOwnershipFlag(row, "dynamic")
+            || HasProtocolOwnershipFlag(row, "ospf")
+            || HasProtocolOwnershipFlag(row, "bgp")
+            || HasProtocolOwnershipFlag(row, "rip"))
+        {
+            return false;
+        }
+
+        string? gateway = Field(row, "gateway");
+        return !string.IsNullOrWhiteSpace(gateway);
+    }
+
+    /// <summary>
+    /// Reads a RouterOS <c>()</c> flag via <see cref="ITikReSentence.TryGetResponseField"/>.
+    /// Property absent → not set. Property present with empty/<c>yes</c>/<c>true</c>/<c>1</c> → set.
+    /// Present <c>no</c>/<c>false</c>/<c>0</c> → cleared. Any other value is ambiguous.
+    /// </summary>
+    /// <returns>
+    /// <see langword="false"/> when the property is absent or the value is ambiguous
+    /// (<paramref name="ambiguousDetail"/> set only for the latter);
+    /// <see langword="true"/> when a definitive enabled/disabled value was read into <paramref name="enabled"/>.
+    /// </returns>
+    private static bool TryReadRosFlag(
+        ITikReSentence row,
+        string flagName,
+        out bool enabled,
+        out string? ambiguousDetail)
+    {
+        enabled = false;
+        ambiguousDetail = null;
+        if (!row.TryGetResponseField(flagName, out string? value))
+        {
+            return false;
+        }
+
+        // tik4net returns the word when RouterOS sent it. Empty string is the canonical flag-present form.
+        if (value is null || value.Length == 0)
+        {
+            enabled = true;
+            return true;
+        }
+
+        if (value.Equals("yes", StringComparison.OrdinalIgnoreCase)
             || value.Equals("true", StringComparison.OrdinalIgnoreCase)
-            || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
-            || value == "1");
+            || value == "1")
+        {
+            enabled = true;
+            return true;
+        }
+
+        if (value.Equals("no", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("false", StringComparison.OrdinalIgnoreCase)
+            || value == "0")
+        {
+            enabled = false;
+            return true;
+        }
+
+        ambiguousDetail = $"unsupported value '{value}'";
+        return false;
+    }
+
+    private static bool HasProtocolOwnershipFlag(ITikReSentence row, string flagName) =>
+        TryReadRosFlag(row, flagName, out bool enabled, out _) && enabled;
+
+    /// <summary>Diagnostic label distinguishing absent flags from empty-value flag presence.</summary>
+    private static string FormatFlagObservation(ITikReSentence row, string flagName)
+    {
+        if (!row.TryGetResponseField(flagName, out string? value))
+        {
+            return "<absent>";
+        }
+
+        if (value is null || value.Length == 0)
+        {
+            return "<flag>";
+        }
+
+        return "'" + value + "'";
+    }
 
     /// <summary>Collapses runs of whitespace to single spaces and trims, so rule texts compare independently of formatting.</summary>
     private static string NormalizeRule(string rule)
