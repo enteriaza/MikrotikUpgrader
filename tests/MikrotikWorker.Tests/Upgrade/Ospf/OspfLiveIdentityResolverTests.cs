@@ -1299,7 +1299,14 @@ public sealed class OspfLiveIdentityResolverTests
         public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: OSPF instance rename/rebind is not under test in this mutation-recording scenario.
+        /// </summary>
         public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: unused routing-id cleanup is not under test in this scenario.
+        /// </summary>
         public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
 
@@ -1451,7 +1458,14 @@ public sealed class OspfLiveIdentityResolverTests
         /// </summary>
         public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) => Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: OSPF instance rename/rebind is not under test in this stale-id scenario.
+        /// </summary>
         public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        /// <summary>
+        /// No-op: unused routing-id cleanup is not under test in this scenario.
+        /// </summary>
         public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
 

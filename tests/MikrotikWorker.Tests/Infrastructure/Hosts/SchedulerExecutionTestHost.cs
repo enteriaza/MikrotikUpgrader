@@ -196,9 +196,18 @@ internal static class SchedulerExecutionTestHost
 /// </summary>
 internal sealed class StubUpgradeExecutor : IRouterOsV6UpgradeExecutor
 {
+    /// <summary>Fixed outcome returned when no result factory is configured.</summary>
     private readonly UpgradeOutcome _outcome;
+
+    /// <summary>Optional detail string attached to the fixed-outcome result.</summary>
     private readonly string? _detail;
+
+    /// <summary>Optional exception attached to the fixed-outcome result.</summary>
     private readonly Exception? _failure;
+
+    /// <summary>
+    /// When set, builds each result from the 1-based attempt number instead of using the fixed outcome.
+    /// </summary>
     private readonly Func<int, UpgradeExecutionResult>? _resultFactory;
 
     /// <summary>Creates a stub that always returns <paramref name="outcome"/>.</summary>

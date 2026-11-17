@@ -97,11 +97,25 @@ internal sealed class UpgradePackageResolver(
     Microsoft.Extensions.Options.IOptions<FirmwareFilesOptions> firmwareFilesOptions)
     : IUpgradePackageResolver
 {
+    /// <summary>
+    /// Result of looking up a candidate package name in the on-disk target catalogue for the
+    /// selected architecture and version.
+    /// </summary>
     private enum CatalogMatchKind
     {
+        /// <summary>Exactly one catalogue entry matched the requested identity/architecture/version.</summary>
         Matched,
+
+        /// <summary>No package of that name/version exists in the target release catalogue at all.</summary>
         AbsentFromRelease,
+
+        /// <summary>
+        /// The package exists for the target version but not for the device architecture
+        /// (discontinued for this arch or never shipped).
+        /// </summary>
         AbsentForArchitecture,
+
+        /// <summary>Multiple catalogue entries matched; resolution fails closed.</summary>
         Ambiguous,
     }
 

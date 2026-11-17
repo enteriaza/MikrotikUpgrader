@@ -21,6 +21,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfManagementPrefixExpansionTests
 {
+    /// <summary>
+    /// Scenario: Cashane production addresses with 10.16.3.x/26s and 10.16.103.254/24 on Bridge-VLAN-99_MGMT.
+    /// Expected: Derive succeeds with both 10.16.3.0/24 and 10.16.103.0/24; no 10.16.0.0/x; diagnostics cite expansion.
+    /// Invariant: co-resident additional management prefixes on the same interface are accepted together.
+    /// </summary>
     [Fact]
     public void Cashane_BridgeVlan99_Accepts_10_16_3_And_10_16_103()
     {
@@ -41,6 +46,11 @@ public sealed class OspfManagementPrefixExpansionTests
                  && d.Contains("Bridge-VLAN-99_MGMT", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: planner build from the Cashane capture snapshot with dual management addresses.
+    /// Expected: both prefixes appear in DerivedManagementCidrs, MGMT area ranges, site matchers, and postconditions pass.
+    /// Invariant: planner output propagates the full multi-prefix management set into ranges and site templates.
+    /// </summary>
     [Fact]
     public void Cashane_Planner_IncludesBothPrefixes_InRangesMatchersAndNotes()
     {
@@ -73,6 +83,12 @@ public sealed class OspfManagementPrefixExpansionTests
                 InventoryCoveringPlan(result.Plan)));
     }
 
+    /// <summary>
+    /// Scenario: Cashane addresses under three input-order permutations (comments are not model inputs).
+    /// Expected: every permutation yields the same sorted dual-prefix management set.
+    /// Invariant: acceptance is interface co-residence, not RouterOS address comment text.
+    /// </summary>
+    /// <param name="permutation">Order permutation index (0=as-is, 1=reversed, 2=sorted by address).</param>
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
@@ -110,6 +126,11 @@ public sealed class OspfManagementPrefixExpansionTests
             result.ManagementCidrs.OrderBy(static s => s, StringComparer.Ordinal).ToList());
     }
 
+    /// <summary>
+    /// Scenario: three prefixes on one Bridge-VLAN-99_MGMT interface (two /26s under 10.16.5 and one /24).
+    /// Expected: Derive succeeds with 10.16.5.0/24 and 10.16.205.0/24.
+    /// Invariant: multiple enabled prefixes on the same management interface expand without ambiguity.
+    /// </summary>
     [Fact]
     public void DirectSameInterface_MultiplePrefixes_Accepted()
     {
@@ -128,6 +149,11 @@ public sealed class OspfManagementPrefixExpansionTests
             result.ManagementCidrs.OrderBy(static s => s, StringComparer.Ordinal).ToList());
     }
 
+    /// <summary>
+    /// Scenario: VLAN-A holds P1+P2 and VLAN-B holds P2+P3 sharing bridge prefix P2.
+    /// Expected: Derive fails closed with an unrelated-prefix error and empty management set.
+    /// Invariant: shared prefixes must not transitively merge distinct interface expansions.
+    /// </summary>
     [Fact]
     public void SharedBridgePrefix_AcrossInterfaces_DoesNotTransitivelyMergeDistinctExpansions()
     {
@@ -147,6 +173,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Empty(result.ManagementCidrs);
     }
 
+    /// <summary>
+    /// Scenario: three-interface chain A↔B↔C linked only by overlapping shared prefixes.
+    /// Expected: Derive fails closed with an empty management set.
+    /// Invariant: multi-hop transitive expansion across management interfaces is rejected.
+    /// </summary>
     [Fact]
     public void ThreeInterfaceTransitiveChain_FailsClosed()
     {
@@ -166,6 +197,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Empty(result.ManagementCidrs);
     }
 
+    /// <summary>
+    /// Scenario: VLAN-199 holds {7,107} while VLAN-197 only reinforces {7} as a subset.
+    /// Expected: Derive succeeds accepting the unique maximal set {10.16.7.0/24, 10.16.107.0/24}.
+    /// Invariant: a subset-only second interface does not block maximal same-interface expansion.
+    /// </summary>
     [Fact]
     public void SubsetOnlySecondInterface_DoesNotBlockMaximalSameInterfaceExpansion()
     {
@@ -184,6 +220,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Contains("10.16.107.0/24", result.ManagementCidrs);
     }
 
+    /// <summary>
+    /// Scenario: two unrelated management interfaces each holding a distinct prefix with no shared bridge.
+    /// Expected: Derive fails closed with empty management cidrs.
+    /// Invariant: genuine multi-interface ambiguity without a unique maximal set still fails closed.
+    /// </summary>
     [Fact]
     public void GenuineAmbiguity_UnrelatedMgmtInterfaces_StillFailsClosed()
     {
@@ -199,6 +240,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Empty(result.ManagementCidrs);
     }
 
+    /// <summary>
+    /// Scenario: identical Cashane-like address set evaluated forward and reversed.
+    /// Expected: both orders produce the same sorted dual-prefix result.
+    /// Invariant: Derive is order-independent for accepted management sets.
+    /// </summary>
     [Fact]
     public void InputOrdering_DoesNotChangeAcceptedSet()
     {
@@ -222,6 +268,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Equal(["10.16.103.0/24", "10.16.3.0/24"], forward);
     }
 
+    /// <summary>
+    /// Scenario: secondary 10.16.103 address on the mgmt interface is administratively disabled.
+    /// Expected: Derive succeeds with only 10.16.3.0/24 and records the disabled address as ignored.
+    /// Invariant: disabled additional addresses never contribute to management expansion.
+    /// </summary>
     [Fact]
     public void DisabledAdditionalManagementAddress_IsExcludedFromExpansion()
     {
@@ -242,6 +293,11 @@ public sealed class OspfManagementPrefixExpansionTests
             s => s.Contains("10.16.103.254/24", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: secondary address has AdminState=Unknown even though Disabled=false.
+    /// Expected: Derive succeeds with only the primary 10.16.3.0/24 expansion.
+    /// Invariant: unknown admin state is treated as ineligible and excluded from expansion.
+    /// </summary>
     [Fact]
     public void UnknownAdminStateAdditionalAddress_IsExcludedFromExpansion()
     {
@@ -264,6 +320,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Equal(["10.16.3.0/24"], result.ManagementCidrs.ToList());
     }
 
+    /// <summary>
+    /// Scenario: provenance membership checks for a live more-specific under the secondary aggregate.
+    /// Expected: primary-only boundaries reject it; full dual boundaries accept it; unrelated prefix still rejected.
+    /// Invariant: each DerivedManagementCidrs entry is an authoritative supersession boundary, not just the scalar primary.
+    /// </summary>
     [Fact]
     public void Provenance_SecondaryManagementPrefix_IsAuthoritativeBoundary()
     {
@@ -310,6 +371,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Contains(fromPlan, p => p.ToCidrString() == "10.16.3.0/24");
     }
 
+    /// <summary>
+    /// Scenario: dual-prefix plan verified against inventory missing the secondary area range, then against full inventory.
+    /// Expected: missing 10.16.103.0/24 yields a postcondition error; full covering inventory yields none.
+    /// Invariant: management summarisation postconditions require every DerivedManagementCidrs prefix independently.
+    /// </summary>
     [Fact]
     public void Verification_RequiresBothManagementPrefixes_Independently()
     {
@@ -333,6 +399,11 @@ public sealed class OspfManagementPrefixExpansionTests
                 InventoryCoveringPlan(plan)));
     }
 
+    /// <summary>
+    /// Scenario: plan cloned via GetDerivedManagementCidrs and content-hashed against the original.
+    /// Expected: cloned DerivedManagementCidrs retains both prefixes and content hashes match.
+    /// Invariant: plan-copy helpers must preserve the full multi-prefix set, not only the scalar primary.
+    /// </summary>
     [Fact]
     public void DualPrefix_PlanCopies_PreserveFullSet()
     {
@@ -379,6 +450,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Equal(hash1, hash2);
     }
 
+    /// <summary>
+    /// Scenario: dual-prefix postconditions on full inventory twice, then partial missing secondary, then unrelated template.
+    /// Expected: idempotent clean verifies; partial fails on 10.16.103; unrelated 10.99 is not flagged as mgmt obsolete.
+    /// Invariant: dual-prefix reconciliation is idempotent and does not treat unrelated site templates as management leftovers.
+    /// </summary>
     [Fact]
     public void DualPrefix_ReconciliationIdempotent_AndPreservesUnrelated()
     {
@@ -429,6 +505,11 @@ public sealed class OspfManagementPrefixExpansionTests
             e => e.Contains("10.99.0.0/16", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: transport /30 co-resident on a management-named interface alongside a real mgmt /26.
+    /// Expected: Derive succeeds with only 10.16.3.0/24 (the /30 is excluded).
+    /// Invariant: point-to-point transport prefixes are never accepted as management expansions.
+    /// </summary>
     [Fact]
     public void TransportSlash30_StillExcluded_WhenOnMgmtNamedInterface()
     {
@@ -444,6 +525,9 @@ public sealed class OspfManagementPrefixExpansionTests
         Assert.Equal(["10.16.3.0/24"], result.ManagementCidrs.ToList());
     }
 
+    /// <summary>
+    /// Cashane-shaped capture snapshot used by planner tests (single backhaul, dual mgmt addresses).
+    /// </summary>
     private static OspfCaptureSnapshot CashanePlannerSnapshot() =>
         new()
         {
@@ -517,6 +601,9 @@ public sealed class OspfManagementPrefixExpansionTests
             ],
         };
 
+    /// <summary>
+    /// Dual-prefix Cashane migration plan with both management area ranges and a consolidated site matcher.
+    /// </summary>
     private static OspfMigrationPlan DualMgmtPlan() =>
         new()
         {
@@ -606,6 +693,10 @@ public sealed class OspfManagementPrefixExpansionTests
             ],
         };
 
+    /// <summary>
+    /// Builds a v7 inventory whose instances, areas, ranges, and templates exactly cover <paramref name="plan"/>.
+    /// </summary>
+    /// <param name="plan">Plan to materialise as a clean covering inventory.</param>
     private static OspfV7Inventory InventoryCoveringPlan(OspfMigrationPlan plan) =>
         new()
         {
@@ -668,6 +759,9 @@ public sealed class OspfManagementPrefixExpansionTests
             ],
         };
 
+    /// <summary>
+    /// Cashane production IP inventory: loopback /32 plus three /26s and one /24 on Bridge-VLAN-99_MGMT.
+    /// </summary>
     private static IReadOnlyList<OspfIpAddressRow> CashaneProductionAddresses() =>
     [
         Addr("10.16.0.2/32", "10.16.0.2", "Loopback-OSPF"),
@@ -677,6 +771,11 @@ public sealed class OspfManagementPrefixExpansionTests
         Addr("10.16.103.254/24", "10.16.103.0", "Bridge-VLAN-99_MGMT"),
     ];
 
+    /// <summary>
+    /// Derives a loopback router-id result from a single /32 and asserts success.
+    /// </summary>
+    /// <param name="rid">Router-id / host address without mask.</param>
+    /// <param name="iface">Loopback interface name (defaults to Loopback-OSPF).</param>
     private static OspfLoopbackRouterIdResult RequireLoopback(string rid, string iface = "Loopback-OSPF")
     {
         OspfLoopbackRouterIdResult loopback = OspfLoopbackRouterId.Derive(
@@ -685,6 +784,13 @@ public sealed class OspfManagementPrefixExpansionTests
         return loopback;
     }
 
+    /// <summary>
+    /// Builds an <see cref="OspfIpAddressRow"/> with explicit admin state from <paramref name="disabled"/>.
+    /// </summary>
+    /// <param name="address">Address CIDR as printed by RouterOS.</param>
+    /// <param name="network">Network base address.</param>
+    /// <param name="iface">Interface name.</param>
+    /// <param name="disabled">When true, marks Disabled and AdminState=Disabled.</param>
     private static OspfIpAddressRow Addr(
         string address,
         string network,

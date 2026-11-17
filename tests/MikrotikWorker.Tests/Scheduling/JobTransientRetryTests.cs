@@ -676,10 +676,6 @@ public sealed class JobTransientRetryTests
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
-    /// <summary>
-    /// Always throws the supplied exception; counts CreateAsync attempts.
-    /// </summary>
-    /// <param name="exception">Exception thrown on every connection attempt.</param>
     /// <summary>Always returns a populated fake connection.</summary>
     private sealed class SucceedingConnectionFactory : IMikrotikConnectionFactory
     {
@@ -690,6 +686,11 @@ public sealed class JobTransientRetryTests
             Task.FromResult<ITikConnection>(FakeMikrotikConnections.CreateFullyPopulated());
     }
 
+    /// <summary>
+    /// Always throws the supplied exception; counts <see cref="CreateAsync"/> attempts so retry
+    /// tests can assert how many connects the executor tried.
+    /// </summary>
+    /// <param name="exception">Exception thrown on every connection attempt.</param>
     private sealed class CountingFailFactory(Exception exception) : IMikrotikConnectionFactory
     {
         /// <summary>

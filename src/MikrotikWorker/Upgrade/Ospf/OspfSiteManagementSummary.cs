@@ -446,6 +446,14 @@ internal static class OspfSiteManagementSummary
             .ToList();
     }
 
+    /// <summary>
+    /// Records diagnostic lines for the selected primary management aggregate and any additional
+    /// same-interface <c>/24</c> expansions that were accepted without merging into a supernet.
+    /// </summary>
+    /// <param name="diagnostics">Mutable selection trail.</param>
+    /// <param name="accepted">Distinct accepted management <c>/24</c> CIDRs.</param>
+    /// <param name="contributorsByCidr">Address rows that contributed to each CIDR (for primary choice).</param>
+    /// <param name="interfacesByCidr">Interfaces observed for each CIDR (for expansion evidence text).</param>
     private static void NoteAcceptedExpansion(
         List<string> diagnostics,
         HashSet<string> accepted,
@@ -474,6 +482,12 @@ internal static class OspfSiteManagementSummary
         }
     }
 
+    /// <summary>
+    /// Chooses the primary management aggregate: most contributing addresses, then ordinal CIDR order.
+    /// </summary>
+    /// <param name="orderedCidrs">Accepted management CIDRs in stable order.</param>
+    /// <param name="contributorsByCidr">Contributor lists used as the primary ranking key.</param>
+    /// <returns>The CIDR selected as <see cref="OspfSiteManagementSummaryResult.ManagementCidr"/>.</returns>
     private static string ChoosePrimary(
         IReadOnlyList<string> orderedCidrs,
         IReadOnlyDictionary<string, List<string>> contributorsByCidr)
@@ -486,6 +500,14 @@ internal static class OspfSiteManagementSummary
             .First();
     }
 
+    /// <summary>
+    /// Parses an inventory address row into a host integer and optional prefix length.
+    /// </summary>
+    /// <param name="row">Enabled <c>/ip/address</c> inventory row.</param>
+    /// <param name="host">Host IPv4 as a big-endian 32-bit value on success.</param>
+    /// <param name="prefixLength">Prefix length when the row includes <c>/n</c>; otherwise <see langword="null"/>.</param>
+    /// <param name="error">Human-readable parse failure when the method returns <see langword="false"/>.</param>
+    /// <returns><see langword="true"/> when the address is a valid IPv4 host assignment.</returns>
     private static bool TryParseAssignedHost(
         OspfIpAddressRow row,
         out uint host,
@@ -520,6 +542,9 @@ internal static class OspfSiteManagementSummary
         return true;
     }
 
+    /// <summary>Formats a big-endian host integer as a dotted IPv4 string for diagnostics.</summary>
+    /// <param name="host">Host address packed as used by containment checks.</param>
+    /// <returns>Dotted-quad representation.</returns>
     private static string FormatHost(uint host)
     {
         byte[] bytes =
@@ -532,11 +557,26 @@ internal static class OspfSiteManagementSummary
         return new IPAddress(bytes).ToString();
     }
 
+    /// <summary>Parses a hard-coded CIDR constant or throws if the constant is malformed.</summary>
+    /// <param name="cidr">CIDR text (for example <c>10.0.0.0/8</c>).</param>
+    /// <returns>Parsed prefix.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when <paramref name="cidr"/> cannot be parsed.</exception>
     private static OspfIpPrefix ParseRequired(string cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p)
             ? p
             : throw new InvalidOperationException(cidr);
 
+    /// <summary>
+    /// Builds a successful management-summary result with ordered CIDRs, exclusion evidence, and diagnostics.
+    /// </summary>
+    /// <param name="cidrs">Accepted management <c>/24</c> aggregates.</param>
+    /// <param name="contributing">Address rows that contributed to discovery.</param>
+    /// <param name="ignoredOutside">Hosts outside the intentional <c>10.0.0.0/8</c> management scope.</param>
+    /// <param name="ignoredPppoe">PPPoE-style addresses excluded from management candidates.</param>
+    /// <param name="ignoredDisabled">Disabled address rows retained only for diagnostics.</param>
+    /// <param name="ignoredTransport30">Exact <c>/30</c> transport addresses excluded from management.</param>
+    /// <param name="diagnostics">Selection trail (primary + expansions).</param>
+    /// <returns>Succeeded result with primary CIDR chosen from diagnostics when present.</returns>
     private static OspfSiteManagementSummaryResult Succeeded(
         IReadOnlyList<string> cidrs,
         IReadOnlyList<string> contributing,
@@ -587,8 +627,19 @@ internal static class OspfSiteManagementSummary
         };
     }
 
+    /// <summary>Builds a failed result from a single error string.</summary>
+    /// <param name="error">Fail-closed reason.</param>
+    /// <returns>Failed summary with empty optional exclusion lists.</returns>
     private static OspfSiteManagementSummaryResult Failed(string error) => Failed([error]);
 
+    /// <summary>
+    /// Builds a failed result while optionally preserving disabled-address and diagnostic evidence
+    /// so failure logs remain consistent with what was considered.
+    /// </summary>
+    /// <param name="errors">One or more fail-closed reasons.</param>
+    /// <param name="ignoredDisabled">Disabled rows observed before failure, when available.</param>
+    /// <param name="diagnostics">Partial selection trail, when available.</param>
+    /// <returns>Failed summary (<see cref="OspfSiteManagementSummaryResult.Succeeded"/> is <see langword="false"/>).</returns>
     private static OspfSiteManagementSummaryResult Failed(
         IReadOnlyList<string> errors,
         IReadOnlyList<string>? ignoredDisabled = null,
@@ -608,6 +659,8 @@ internal static class OspfSiteManagementSummary
 /// </summary>
 internal sealed class OspfSiteManagementSummaryResult
 {
+    /// <summary>Whether management discovery produced a usable required-prefix set.</summary>
+    /// <value><see langword="true"/> when <see cref="ManagementCidrs"/> may be used for planning.</value>
     public required bool Succeeded { get; init; }
 
     /// <summary>Primary management aggregate (stable single-value view for callers).</summary>
@@ -619,10 +672,13 @@ internal sealed class OspfSiteManagementSummaryResult
     /// </summary>
     public IReadOnlyList<string> ManagementCidrs { get; init; } = [];
 
+    /// <summary>Address rows that contributed to accepted management aggregates.</summary>
     public IReadOnlyList<string> ContributingAddresses { get; init; } = [];
 
+    /// <summary>Hosts ignored because they fall outside the intentional <c>10.0.0.0/8</c> management scope.</summary>
     public IReadOnlyList<string> IgnoredOutsideRangeAddresses { get; init; } = [];
 
+    /// <summary>PPPoE or similar customer-facing addresses excluded from management discovery.</summary>
     public IReadOnlyList<string> IgnoredPppoeAddresses { get; init; } = [];
 
     /// <summary>Disabled address rows excluded from discovery.</summary>
@@ -634,7 +690,9 @@ internal sealed class OspfSiteManagementSummaryResult
     /// <summary>Explainable include/exclude/select trail for diagnostics and logs.</summary>
     public IReadOnlyList<string> SelectionDiagnostics { get; init; } = [];
 
+    /// <summary>Fail-closed reasons when <see cref="Succeeded"/> is <see langword="false"/>.</summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
 
+    /// <summary>Joined <see cref="Errors"/> for logging; <see langword="null"/> on success.</summary>
     public string? Detail => Succeeded ? null : string.Join("; ", Errors);
 }

@@ -18,6 +18,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfProductionCompatibilityPolicyTests
 {
+    /// <summary>
+    /// Scenario: POP004-shaped capture whose OSPF instance router-id is a truncated hostname string.
+    /// Invariant: the plan remains valid, targets the loopback literal, and records a normalisation
+    /// note that the legacy hostname RID differs from Loopback.
+    /// </summary>
     [Fact]
     public void Planner_AllowsLegacyHostnameRouterId_AndTargetsLoopbackLiteral()
     {
@@ -44,6 +49,12 @@ public sealed class OspfProductionCompatibilityPolicyTests
                  && n.Contains("BR01.POP004.016.KobusV", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: POP007-shaped capture whose instance router-id is the legacy routing-id name
+    /// <c>main</c>.
+    /// Invariant: the plan remains valid, targets the loopback literal, and notes that
+    /// <c>main</c> will be normalised.
+    /// </summary>
     [Fact]
     public void Planner_AllowsLegacyMainRouterId()
     {
@@ -71,6 +82,12 @@ public sealed class OspfProductionCompatibilityPolicyTests
                  && n.Contains("normalise", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: sole live v2 instance named <c>default</c> with RID <c>main</c>, while the plan
+    /// expects <c>default-v2</c> and a loopback-derived RID.
+    /// Invariant: live identity resolution binds the sole instance without requiring a pre-matched
+    /// RID, and maps backbone by area-id.
+    /// </summary>
     [Fact]
     public void LiveResolve_BindsLegacyNamedSoleInstance_WithoutRequiringPreMatchRid()
     {
@@ -109,6 +126,11 @@ public sealed class OspfProductionCompatibilityPolicyTests
         Assert.Equal("backbone", result.Binding.Areas.Values.Single(a => a.AreaId == "0.0.0.0").LiveName);
     }
 
+    /// <summary>
+    /// Scenario: two live v2 instances with distinct names and RIDs (POP013-shaped ambiguity).
+    /// Invariant: live identity resolution fails closed and refuses to guess among ambiguous
+    /// instances.
+    /// </summary>
     [Fact]
     public void LiveResolve_Fails_WhenMultipleAmbiguousV2Instances()
     {
@@ -140,6 +162,12 @@ public sealed class OspfProductionCompatibilityPolicyTests
         Assert.Contains(result.Errors, e => e.Contains("refusing", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: POP008 inventory mixing transport /30s, management /27–/26s, and a disabled unused
+    /// bridge address.
+    /// Invariant: management derivation selects <c>10.16.8.0/24</c> and records ignored transport
+    /// /30s plus the disabled address.
+    /// </summary>
     [Fact]
     public void ManagementDerive_Pop008_ExcludesSlash30AndSelectsMgmtSlash24()
     {
@@ -168,6 +196,12 @@ public sealed class OspfProductionCompatibilityPolicyTests
         Assert.Contains(result.IgnoredDisabledAddresses, s => s.Contains("Bridge-UNUSED", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: POP012 plan inventory plus a passive unrelated dynamic backbone template
+    /// (<c>102.66.242.0/24</c>).
+    /// Invariant: cleanup classification preserves that unmanaged template and reports no unknown
+    /// or known-legacy rows among the authoritative plan templates.
+    /// </summary>
     [Fact]
     public void TemplateCleanup_PreservesPassiveUnrelatedDynamicTemplate_Pop012()
     {
@@ -287,6 +321,12 @@ public sealed class OspfProductionCompatibilityPolicyTests
         Assert.Empty(report.KnownLegacy);
     }
 
+    /// <summary>
+    /// Scenario: resolving <c>main</c> via a routing-id object, a hostname-shaped string with no
+    /// object, and an already-literal IP.
+    /// Invariant: named routing-id objects resolve to their address; unresolved hostname-shaped
+    /// values return null; literal IPs pass through.
+    /// </summary>
     [Fact]
     public void ResolveLegacyRouterId_ResolvesRoutingIdObjectToLiteralIp()
     {
@@ -299,6 +339,12 @@ public sealed class OspfProductionCompatibilityPolicyTests
         Assert.Equal("10.16.0.4", OspfMigrationPlanner.ResolveLegacyRouterIdValue("10.16.0.4", []));
     }
 
+    /// <summary>
+    /// Scenario: loopback /32s outside 10/8, at the former 10.16 boundary (10.255), and inside
+    /// fleet scope.
+    /// Invariant: derivation requires 10.0.0.0/8 scope (not a narrower 10.16 filter), rejecting
+    /// non-10 addresses while accepting both 10.255 and 10.16 loopbacks.
+    /// </summary>
     [Fact]
     public void LoopbackDerive_RequiresTenSlashEightScope()
     {
@@ -321,6 +367,19 @@ public sealed class OspfProductionCompatibilityPolicyTests
         Assert.Equal("10.16.0.14", inside.RouterId);
     }
 
+    /// <summary>
+    /// Builds a minimal ROS7 capture with one v2 instance, backbone + site areas, backhaul/
+    /// loopback/site templates, and optional Full neighbour on the backhaul interface.
+    /// </summary>
+    /// <param name="identity">Router identity / site area name.</param>
+    /// <param name="loopback">Loopback host used as router IP and /32.</param>
+    /// <param name="instanceName">Live OSPF instance name in the capture.</param>
+    /// <param name="instanceRouterId">Raw instance router-id (literal, hostname, or <c>main</c>).</param>
+    /// <param name="mgmtAddresses">Management IP rows included after the loopback.</param>
+    /// <param name="backhaulInterface">Backhaul interface name for template and address.</param>
+    /// <param name="backhaulCidr">Backhaul network CIDR.</param>
+    /// <param name="backhaulCost">Backhaul template cost string.</param>
+    /// <param name="neighbourInterface">When set, adds a Full neighbour on that interface.</param>
     private static OspfCaptureSnapshot BaselineV7(
         string identity,
         string loopback,
@@ -409,6 +468,12 @@ public sealed class OspfProductionCompatibilityPolicyTests
         };
     }
 
+    /// <summary>
+    /// Builds a minimal migration plan suitable for live-identity resolution tests.
+    /// </summary>
+    /// <param name="identity">Router / site identity.</param>
+    /// <param name="routerId">Planned loopback-derived router-id.</param>
+    /// <param name="instanceName">Logical instance name on the plan.</param>
     private static OspfMigrationPlan MinimalPlan(string identity, string routerId, string instanceName) =>
         new()
         {
@@ -472,6 +537,13 @@ public sealed class OspfProductionCompatibilityPolicyTests
             ],
         };
 
+    /// <summary>
+    /// Builds an IP address inventory row with admin state tied to the disabled flag.
+    /// </summary>
+    /// <param name="address">Address with prefix length.</param>
+    /// <param name="network">Network address.</param>
+    /// <param name="iface">Interface the address is assigned to.</param>
+    /// <param name="disabled">When true, marks the row disabled with <see cref="OspfAdminState.Disabled"/>.</param>
     private static OspfIpAddressRow Addr(string address, string network, string iface, bool disabled = false) =>
         new()
         {
@@ -482,6 +554,10 @@ public sealed class OspfProductionCompatibilityPolicyTests
             AdminState = disabled ? OspfAdminState.Disabled : OspfAdminState.Enabled,
         };
 
+    /// <summary>
+    /// Derives a /24 covering the host portion of an address CIDR (third-octet boundary).
+    /// </summary>
+    /// <param name="addressCidr">Host address, optionally with a prefix length.</param>
     private static string DeriveSlash24(string addressCidr)
     {
         string host = addressCidr.Split('/')[0];
@@ -489,9 +565,18 @@ public sealed class OspfProductionCompatibilityPolicyTests
         return $"{parts[0]}.{parts[1]}.{parts[2]}.0/24";
     }
 
+    /// <summary>
+    /// Returns the network address of a CIDR, or the original string when parsing fails.
+    /// </summary>
+    /// <param name="cidr">Prefix to parse.</param>
     private static string NetworkOf(string cidr) =>
         OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p) ? FormatHost(p.NetworkAddress) : cidr;
 
+    /// <summary>
+    /// Returns the first usable host inside a CIDR as <c>host/prefix</c>, or the original string
+    /// when parsing fails.
+    /// </summary>
+    /// <param name="cidr">Prefix to place a host into.</param>
     private static string HostInCidr(string cidr)
     {
         if (!OspfIpPrefix.TryParse(cidr, out OspfIpPrefix p))
@@ -502,6 +587,10 @@ public sealed class OspfProductionCompatibilityPolicyTests
         return FormatHost(p.NetworkAddress + 1) + "/" + p.PrefixLength;
     }
 
+    /// <summary>
+    /// Formats a 32-bit IPv4 host as dotted-quad.
+    /// </summary>
+    /// <param name="host">Host in network byte order as a uint.</param>
     private static string FormatHost(uint host) =>
         $"{(host >> 24) & 0xff}.{(host >> 16) & 0xff}.{(host >> 8) & 0xff}.{host & 0xff}";
 }

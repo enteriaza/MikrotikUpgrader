@@ -24,7 +24,14 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfExactEqualConsolidationCleanupTests
 {
+    /// <summary>
+    /// Public <c>/24</c> retained unchanged on the consolidated <c>interfaces=all</c> matcher and used as the exact-equal consolidation source under test.
+    /// </summary>
     private const string RetainedPublicPrefix = "102.66.242.0/24";
+
+    /// <summary>
+    /// Cashane-like multi-prefix site network list (management, CGNAT supernet, retained public) for the consolidated matcher.
+    /// </summary>
     private const string ConsolidatedNetworks =
         "10.16.2.0/24,10.16.22.0/24,100.64.0.0/10,102.66.242.0/24";
 
@@ -278,9 +285,17 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             covering));
     }
 
+    /// <summary>
+    /// Creates production <see cref="OspfMikrotikOperations"/> with a null logger for cleanup calls against the capturing connection.
+    /// </summary>
     private static OspfMikrotikOperations CreateOps() =>
         new(NullLogger<OspfMikrotikOperations>.Instance);
 
+    /// <summary>
+    /// Runs <see cref="OspfTemplateCleanupClassifier.ClassifyOrThrow"/> against the store's raw template rows mapped into inventory rows.
+    /// </summary>
+    /// <param name="plan">Plan whose target instance name is stamped onto each row for classification.</param>
+    /// <param name="store">Mutable template table representing current router state.</param>
     private static OspfTemplateClassificationReport Classify(OspfMigrationPlan plan, MutableStore store)
     {
         List<OspfTemplateInventoryRow> rows = store.Templates
@@ -304,6 +319,11 @@ public sealed class OspfExactEqualConsolidationCleanupTests
         return OspfTemplateCleanupClassifier.ClassifyOrThrow(plan, rows);
     }
 
+    /// <summary>
+    /// Builds a complete inventory from <paramref name="store"/> and runs <see cref="OspfV7MigrationVerifier.VerifyAsync"/> via <see cref="FakeVerifyOps"/>.
+    /// </summary>
+    /// <param name="plan">Migration plan under verification.</param>
+    /// <param name="store">Template table after cleanup (or residual state on failure paths).</param>
     private static async Task<OspfVerificationResult> VerifyFromStoreAsync(
         OspfMigrationPlan plan,
         MutableStore store)
@@ -314,6 +334,11 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             .VerifyAsync(FakeMikrotikConnections.CreateFullyPopulated(), plan, CancellationToken.None);
     }
 
+    /// <summary>
+    /// Builds a capture-complete v7 inventory mirroring the plan's instance, backbone/site/other areas, ranges, and the store's current templates.
+    /// </summary>
+    /// <param name="plan">Plan whose instance, areas and ranges are mirrored.</param>
+    /// <param name="store">Current interface-template table (planned plus any residual sources).</param>
     private static OspfV7Inventory InventoryFromStore(OspfMigrationPlan plan, MutableStore store) =>
         new()
         {
@@ -384,6 +409,11 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             Filters = [],
         };
 
+    /// <summary>
+    /// Cashane-shaped migration plan with five backbone backhauls, loopback, consolidated site matcher, and no superseded provenance.
+    /// </summary>
+    /// <param name="siteNetworks">Comma-separated networks for the planned <c>interfaces=all</c> site template; defaults to <see cref="ConsolidatedNetworks"/>.</param>
+    /// <param name="comment">Optional comment on the site template (e.g. <c>MGMT</c>) to exercise semantic mismatch paths; <see langword="null"/> omits it.</param>
     private static OspfMigrationPlan CashaneLikePlan(
         string siteNetworks = ConsolidatedNetworks,
         string? comment = "MGMT") =>
@@ -521,6 +551,18 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             ContentHash = "exact-equal-consolidation",
         };
 
+    /// <summary>
+    /// Builds a raw RouterOS interface-template row as returned by <c>print</c>, omitting optional properties that are not supplied.
+    /// </summary>
+    /// <param name="id">RouterOS <c>.id</c> of the row.</param>
+    /// <param name="area">Area name the template belongs to.</param>
+    /// <param name="interfaces">Interfaces property; omitted when blank.</param>
+    /// <param name="networks">Networks property.</param>
+    /// <param name="passive">Whether to emit the <c>passive</c> flag.</param>
+    /// <param name="type">Optional network type.</param>
+    /// <param name="cost">Optional cost.</param>
+    /// <param name="priority">Optional priority.</param>
+    /// <param name="comment">Optional comment (e.g. <c>MGMT</c>); omitted when <see langword="null"/>.</param>
     private static Dictionary<string, string> Row(
         string id,
         string area,
@@ -572,10 +614,22 @@ public sealed class OspfExactEqualConsolidationCleanupTests
         return d;
     }
 
+    /// <summary>
+    /// In-memory interface-template table that starts with the plan's backhauls, loopback and consolidated site
+    /// matcher and is mutated by the fake remove handler.
+    /// </summary>
     private sealed class MutableStore
     {
+        /// <summary>
+        /// Raw interface-template rows currently "on the router"; mutated as the fake processes removals.
+        /// </summary>
         public List<Dictionary<string, string>> Templates { get; } = [];
 
+        /// <summary>
+        /// Creates a store holding every planned backhaul, the loopback, and consolidated site template <c>*A</c>.
+        /// </summary>
+        /// <param name="plan">Plan whose templates are mirrored into the store.</param>
+        /// <param name="siteComment">Optional override for the site matcher comment (defaults to the plan's site comment).</param>
         public static MutableStore WithPlanned(OspfMigrationPlan plan, string? siteComment = null)
         {
             MutableStore store = new();
@@ -610,6 +664,9 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             return store;
         }
 
+        /// <summary>
+        /// Creates a <see cref="CapturingConnection"/> over this store with its fake RouterOS responses attached.
+        /// </summary>
         public CapturingConnection Connect()
         {
             CapturingConnection connection = new(this);
@@ -618,18 +675,46 @@ public sealed class OspfExactEqualConsolidationCleanupTests
         }
     }
 
+    /// <summary>
+    /// Connection fake that serves interface-template print and remove from a mutable store, records removed ids,
+    /// and can fail a chosen remove ordinal. Models the production cleanup RouterOS surface only.
+    /// </summary>
     private sealed class CapturingConnection : DisposeTrackingConnection
     {
+        /// <summary>
+        /// Router state backing the fake print/remove responses.
+        /// </summary>
         private readonly MutableStore _store;
+
+        /// <summary>
+        /// Underlying fake connection that serves scripted responses.
+        /// </summary>
         private readonly TikFakeConnection _fake;
+
+        /// <summary>
+        /// Most recent interface-template remove command, used to recover the <c>.id</c> being removed.
+        /// </summary>
         private ITikCommand? _pendingRemove;
+
+        /// <summary>
+        /// Number of remove calls handled so far, used to trigger <see cref="FailRemoveAtOrdinal"/>.
+        /// </summary>
         private int _removeOrdinal;
 
+        /// <summary>
+        /// Creates a connection over <paramref name="store"/> using a new fake RouterOS connection.
+        /// </summary>
+        /// <param name="store">Router state the connection reads from and mutates.</param>
         public CapturingConnection(MutableStore store)
             : this(store, new TikFakeConnection())
         {
         }
 
+        /// <summary>
+        /// Wraps the supplied fake so the same instance can be kept for registering responses.
+        /// </summary>
+        /// <param name="store">Router state the connection reads from and mutates.</param>
+        /// <param name="fake">Fake connection that serves scripted responses.</param>
         private CapturingConnection(MutableStore store, TikFakeConnection fake)
             : base(fake)
         {
@@ -637,10 +722,19 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             _fake = fake;
         }
 
+        /// <summary>
+        /// <c>.id</c> values successfully removed, in order.
+        /// </summary>
         public List<string> RemovedIds { get; } = [];
 
+        /// <summary>
+        /// 1-based ordinal of the remove call that should fail with an <see cref="InvalidOperationException"/>; <see langword="null"/> to never fail.
+        /// </summary>
         public int? FailRemoveAtOrdinal { get; set; }
 
+        /// <summary>
+        /// Registers scripted responses: template print/remove backed by <see cref="MutableStore"/>, Cashane-like instance and area inventory, empty area ranges and empty routing filters.
+        /// </summary>
         public void AttachFakeResponses()
         {
             _fake.WithResponse(
@@ -723,6 +817,11 @@ public sealed class OspfExactEqualConsolidationCleanupTests
                     static _ => [new TikFakeDoneSentence()]);
         }
 
+        /// <summary>
+        /// Creates the command and records it when it is an interface-template remove.
+        /// </summary>
+        /// <param name="commandText">RouterOS command path.</param>
+        /// <param name="parameters">Command parameters.</param>
         public override ITikCommand CreateCommand(string commandText, params ITikCommandParameter[] parameters)
         {
             ITikCommand cmd = base.CreateCommand(commandText, parameters);
@@ -730,6 +829,12 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Creates the command (with an explicit parameter format) and records it when it is an interface-template remove.
+        /// </summary>
+        /// <param name="commandText">RouterOS command path.</param>
+        /// <param name="defaultParameterFormat">Parameter encoding format.</param>
+        /// <param name="parameters">Command parameters.</param>
         public override ITikCommand CreateCommand(
             string commandText,
             TikCommandParameterFormat defaultParameterFormat,
@@ -740,6 +845,11 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Creates the command from parameter names/values and records it when it is an interface-template remove.
+        /// </summary>
+        /// <param name="commandTextOrEmpty">RouterOS command path.</param>
+        /// <param name="parameterNamesAndValues">Alternating parameter names and values.</param>
         public override ITikCommand CreateCommandAndParameters(
             string commandTextOrEmpty,
             params string[] parameterNamesAndValues)
@@ -749,6 +859,12 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Creates the command from parameter names/values (with an explicit parameter format) and records it when it is an interface-template remove.
+        /// </summary>
+        /// <param name="commandTextOrEmpty">RouterOS command path.</param>
+        /// <param name="defaultParameterFormat">Parameter encoding format.</param>
+        /// <param name="parameterNamesAndValues">Alternating parameter names and values.</param>
         public override ITikCommand CreateCommandAndParameters(
             string commandTextOrEmpty,
             TikCommandParameterFormat defaultParameterFormat,
@@ -762,6 +878,11 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             return cmd;
         }
 
+        /// <summary>
+        /// Remembers <paramref name="cmd"/> as the pending remove when <paramref name="commandText"/> is <c>/routing/ospf/interface-template/remove</c>.
+        /// </summary>
+        /// <param name="commandText">RouterOS command path being created.</param>
+        /// <param name="cmd">Command instance created for that path.</param>
         private void Track(string commandText, ITikCommand cmd)
         {
             if (commandText == "/routing/ospf/interface-template/remove")
@@ -771,13 +892,29 @@ public sealed class OspfExactEqualConsolidationCleanupTests
         }
     }
 
+    /// <summary>
+    /// Verify-only <see cref="IOspfMikrotikOperations"/> fake: returns a canned inventory and IP addresses derived from
+    /// the plan; mutation and capture APIs are no-ops or intentionally unsupported because the verifier never needs them here.
+    /// </summary>
+    /// <param name="inventory">Canned v7 inventory returned by <see cref="ReadV7InventoryAsync"/>.</param>
+    /// <param name="plan">Plan used to synthesize loopback, management and backhaul IP rows.</param>
     private sealed class FakeVerifyOps(OspfV7Inventory inventory, OspfMigrationPlan plan) : IOspfMikrotikOperations
     {
+        /// <summary>
+        /// Returns the canned inventory supplied at construction; ignores the connection.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<OspfV7Inventory> ReadV7InventoryAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(inventory);
 
+        /// <summary>
+        /// Synthesizes loopback, dual management and backhaul IP address rows from the plan so live-identity checks can resolve.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default)
@@ -818,34 +955,69 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             return Task.FromResult<IReadOnlyList<OspfIpAddressRow>>(rows);
         }
 
+        /// <summary>
+        /// Reports zero routing filters; the verifier only needs a non-blocking filter count.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<int> CountRoutingFiltersAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>
+        /// Intentionally unsupported; capture is never invoked on the verify-only path under test.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="request">Capture request (unused).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<OspfCaptureSnapshot> CaptureAsync(
             ITikConnection connection,
             OspfCaptureRequest request,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        /// <summary>
+        /// No-op stub for filter wipe; verify does not mutate filters.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task RemoveAllRoutingFiltersAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for redistribution clear; verify does not mutate instances.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="instanceName">Instance name (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task ClearOspfRedistributionAsync(
             ITikConnection connection,
             string instanceName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for instance filter-reference clear; verify does not mutate instances.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="instanceName">Instance name (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task ClearOspfInstanceFilterReferencesAsync(
             ITikConnection connection,
             string instanceName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for area ensure; verify does not create areas.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="instanceName">Instance name (ignored).</param>
+        /// <param name="area">Area plan (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task EnsureOspfAreaAsync(
             ITikConnection connection,
             string instanceName,
@@ -853,18 +1025,37 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for area-range ensure; verify does not create ranges.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="range">Area-range plan (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task EnsureOspfAreaRangeAsync(
             ITikConnection connection,
             OspfPlanAreaRange range,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for backhaul template ensure; verify does not create templates.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="template">Backhaul template (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task EnsureBackhaulTemplateAsync(
             ITikConnection connection,
             OspfPlanBackhaulTemplate template,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for loopback template ensure; verify does not create templates.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="template">Loopback template (ignored).</param>
+        /// <param name="protectedBackhauls">Protected backhauls (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task EnsureLoopbackTemplateAsync(
             ITikConnection connection,
             OspfPlanLoopbackTemplate template,
@@ -872,6 +1063,13 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for site-network template ensure; verify does not create templates.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="template">Site-network template (ignored).</param>
+        /// <param name="protectedBackhauls">Protected backhauls (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task EnsureSiteNetworkTemplateAsync(
             ITikConnection connection,
             OspfPlanSiteNetworkTemplate template,
@@ -879,18 +1077,37 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for site-network state assertion; inventory already encodes desired state for the verifier.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="template">Site-network template (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task AssertSiteNetworkTemplateStateAsync(
             ITikConnection connection,
             OspfPlanSiteNetworkTemplate template,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for obsolete-template cleanup; cleanup is exercised via production ops on the capturing connection instead.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="migrationPlan">Migration plan (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task RemoveObsoleteTemplatesAsync(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Intentionally unsupported; management-plane baseline capture is not part of the verify path under test.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="migrationPlan">Migration plan (ignored).</param>
+        /// <param name="managementHost">Management host (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
@@ -898,6 +1115,14 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        /// <summary>
+        /// No-op stub for backbone liveness assertion; verify tests do not exercise management-plane guards.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="migrationPlan">Migration plan (ignored).</param>
+        /// <param name="baseline">Management-plane baseline (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
+        /// <param name="requireFleetCost">Whether fleet cost is required (ignored).</param>
         public Task AssertBackboneStillActiveAsync(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
@@ -906,6 +1131,13 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             bool requireFleetCost = true) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for instance rename; verify does not rename instances.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="currentName">Current instance name (ignored).</param>
+        /// <param name="targetName">Target instance name (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task EnsureOspfInstanceNameAsync(
             ITikConnection connection,
             string currentName,
@@ -913,23 +1145,47 @@ public sealed class OspfExactEqualConsolidationCleanupTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for unused routing-id cleanup; verify does not mutate <c>/routing/id</c>.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="routingIdName">Routing-id name (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task TryRemoveUnusedRoutingIdAsync(
             ITikConnection connection,
             string? routingIdName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Returns an empty neighbour list; neighbour checks are not asserted in these consolidation tests.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<IReadOnlyList<Dictionary<string, string>>> ReadOspfNeighboursAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<Dictionary<string, string>>>([]);
 
+        /// <summary>
+        /// No-op stub for OSPFv3 removal; verify does not mutate OSPFv3 objects.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="migrationPlan">Migration plan (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task RemoveOspfV3Async(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op stub for router-id set; verify does not mutate the instance router-id.
+        /// </summary>
+        /// <param name="connection">Unused RouterOS connection.</param>
+        /// <param name="instanceName">Instance name (ignored).</param>
+        /// <param name="routerId">Router-id value (ignored).</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task SetInstanceRouterIdAsync(
             ITikConnection connection,
             string instanceName,

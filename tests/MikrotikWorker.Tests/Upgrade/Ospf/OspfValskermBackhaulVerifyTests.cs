@@ -20,12 +20,22 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfValskermBackhaulVerifyTests
 {
+    /// <summary>
+    /// Exact production sfpp backhaul interface name (spaces, brackets, monitor:1200) that must
+    /// match identity-sensitive verification.
+    /// </summary>
     private const string ValskermSfpp =
         "sfpp-01_BH01.Valskerm-RustenburgKantoor_sfpp-02 [monitor:1200]";
 
+    /// <summary>
+    /// Exact production eth backhaul interface name for the second Valskerm backbone template.
+    /// </summary>
     private const string ValskermEth =
         "eth-01_BH02.Valskerm-Shylock [monitor:980]";
 
+    /// <summary>
+    /// Near-miss sfpp name differing only in monitor suffix; must not satisfy the planned identity.
+    /// </summary>
     private const string SimilarButDistinctSfpp =
         "sfpp-01_BH01.Valskerm-RustenburgKantoor_sfpp-02 [monitor:1201]";
 
@@ -319,9 +329,16 @@ public sealed class OspfValskermBackhaulVerifyTests
             requireFleetCost: false);
     }
 
+    /// <summary>
+    /// Creates real <see cref="OspfMikrotikOperations"/> under a null logger for assert tests.
+    /// </summary>
     private static OspfMikrotikOperations CreateOps() =>
         new(NullLogger<OspfMikrotikOperations>.Instance);
 
+    /// <summary>
+    /// Minimal management-plane baseline anchored on the Valskerm sfpp template; neighbour and
+    /// management-route fields are unset so only template identity is exercised.
+    /// </summary>
     private static OspfManagementPlaneBaseline TemplateOnlyBaseline() => new()
     {
         ManagementHost = "10.16.0.3",
@@ -345,9 +362,19 @@ public sealed class OspfValskermBackhaulVerifyTests
         ManagementRouteDependsOnBackbone = false,
     };
 
+    /// <summary>
+    /// Fake connection whose interface-template print returns the standard Valskerm sfpp + eth rows
+    /// on the given area name.
+    /// </summary>
+    /// <param name="area">Area property written onto both template rows.</param>
     private static TikFakeConnection ValskermLiveTemplatesConnection(string area = "backbone") =>
         ConnectionFromTemplates(ValskermTemplateRows(area));
 
+    /// <summary>
+    /// Builds a fake connection that answers <c>/routing/ospf/interface-template/print</c> with the
+    /// supplied template property bags.
+    /// </summary>
+    /// <param name="templates">Raw RouterOS property dictionaries for each !re sentence.</param>
     private static TikFakeConnection ConnectionFromTemplates(IReadOnlyList<Dictionary<string, string>> templates) =>
         new TikFakeConnection()
             .WithResponse(
@@ -358,6 +385,11 @@ public sealed class OspfValskermBackhaulVerifyTests
                     new TikFakeDoneSentence(),
                 ]);
 
+    /// <summary>
+    /// Returns the two authoritative Valskerm backbone template rows (sfpp + eth) on
+    /// <paramref name="area"/>.
+    /// </summary>
+    /// <param name="area">Area name assigned to both templates.</param>
     private static List<Dictionary<string, string>> ValskermTemplateRows(string area) =>
     [
         new()

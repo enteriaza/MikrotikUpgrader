@@ -858,6 +858,14 @@ internal static class OspfMigrationPlanner
         };
     }
 
+    /// <summary>
+    /// Appends a planner diagnostic when raw inventory contained disabled or unknown-admin-state
+    /// objects that were stripped before OSPF decision-making.
+    /// </summary>
+    /// <param name="notes">Mutable planner diagnostic list.</param>
+    /// <param name="kind">Inventory kind label (for example <c>template</c> or <c>address</c>).</param>
+    /// <param name="rawCount">Count before eligibility filtering.</param>
+    /// <param name="eligibleCount">Count remaining after disabled/unknown exclusion.</param>
     private static void NoteExcludedDisabled(
         List<string> notes,
         string kind,

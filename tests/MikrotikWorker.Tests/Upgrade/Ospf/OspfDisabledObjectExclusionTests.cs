@@ -17,6 +17,12 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfDisabledObjectExclusionTests
 {
+    /// <summary>
+    /// Scenario: one enabled management address plus a disabled management address on another
+    /// interface (Cashane-shaped /27,/26,/24 variants).
+    /// Invariant: management derivation selects only the enabled contributor; the disabled address
+    /// is recorded in ignored diagnostics and never appears as a candidate or /24 expansion source.
+    /// </summary>
     [Theory]
     [InlineData("10.16.6.62/27", "10.16.6.32", "Bridge-VLAN-197_MGMT")]
     [InlineData("10.16.6.94/26", "10.16.6.64", "Bridge-VLAN-99_MGMT")]
@@ -43,6 +49,11 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.DoesNotContain(result.SelectionDiagnostics, d => d.StartsWith("candidate", StringComparison.OrdinalIgnoreCase) && d.Contains(address, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: disabled Loopback-OSPF /32 and an enabled Loopback /32 with the same RID.
+    /// Invariant: router-id derivation prefers the enabled loopback interface and ignores the
+    /// disabled one.
+    /// </summary>
     [Fact]
     public void DisabledLoopback_IsNotSelectedAsRouterId()
     {
@@ -57,6 +68,12 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.Equal("Loopback", result.LoopbackInterfaceName);
     }
 
+    /// <summary>
+    /// Scenario: enabled management /27 plus a disabled transport /30 on the planned backhaul
+    /// interface; isolation check also sees a second disabled /30 on another interface.
+    /// Invariant: management CIDR stays on the enabled /27 expansion, and backhaul isolation
+    /// succeeds without treating disabled transport addresses as conflicting inventory.
+    /// </summary>
     [Fact]
     public void DisabledTransportSlash30_DoesNotAffectIsolationOrManagement()
     {
@@ -102,6 +119,11 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.Empty(isolation);
     }
 
+    /// <summary>
+    /// Scenario: same interface name carries one enabled and one disabled management address.
+    /// Invariant: only the enabled address contributes; the disabled sibling is ignored and
+    /// documented in <c>IgnoredDisabledAddresses</c>.
+    /// </summary>
     [Fact]
     public void MixedEnabledDisabledSameInterfaceName_OnlyEnabledContributes()
     {
@@ -120,6 +142,11 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.Contains(result.IgnoredDisabledAddresses, s => s.Contains("10.16.6.62/27", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: one enabled management address and three unrelated disabled management addresses.
+    /// Invariant: derivation still succeeds on the single enabled contributor; disabled rows do not
+    /// create multi-candidate ambiguity.
+    /// </summary>
     [Fact]
     public void MultipleDisabledAddresses_DoNotCreateAmbiguity()
     {
@@ -139,6 +166,12 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.Equal(3, result.IgnoredDisabledAddresses.Count);
     }
 
+    /// <summary>
+    /// Scenario: an address with <see cref="OspfAdminState.Unknown"/> alongside an enabled
+    /// management address.
+    /// Invariant: unknown admin state is ineligible and fail-closed excluded from candidates with
+    /// an "Excluded unknown-disabled-state" diagnostic.
+    /// </summary>
     [Fact]
     public void UnknownDisabledState_IsNotEligible_AndDoesNotContribute()
     {
@@ -173,6 +206,11 @@ public sealed class OspfDisabledObjectExclusionTests
             d => d.StartsWith("Excluded unknown-disabled-state:", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: Cashane-shaped capture plus disabled instance, area, range, template, and IP.
+    /// Invariant: planner normalises away disabled/unknown-admin-state objects; they never become
+    /// the migration target, planned areas/ranges, or passive site networks.
+    /// </summary>
     [Fact]
     public void DisabledOspfObjects_DoNotParticipateInPlanning()
     {
@@ -197,6 +235,12 @@ public sealed class OspfDisabledObjectExclusionTests
             n => n.Contains("10.16.99.", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: baseline Cashane capture plus a disabled OSPFv3 instance that is also listed in
+    /// <c>OspfV3Objects</c>.
+    /// Invariant: the v3 instance is never chosen as the OSPFv2 migration target, yet remains an
+    /// OSPFv3 removal candidate.
+    /// </summary>
     [Fact]
     public void DisabledOspfV3_DoesNotSelectAsOspfV2Target_ButRemainsRemovalCandidate()
     {
@@ -229,6 +273,11 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.Contains(result.Plan.OspfV3ToRemove, o => o.Name == "default-v3");
     }
 
+    /// <summary>
+    /// Scenario: reconstructed Cashane production inventory where <c>10.16.6.62/27</c> is disabled.
+    /// Invariant: management derivation never emits <c>10.16.6.0/24</c> as a contributor or CIDR;
+    /// enabled 10.16.2/10.16.22 same-interface expansions still succeed.
+    /// </summary>
     [Fact]
     public void Cashane_Disabled_10_16_6_62_NeverProduces_10_16_6_0_24()
     {
@@ -272,6 +321,11 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.DoesNotContain(result.ManagementCidrs, c => c.Contains("10.16.6.0/24", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: Valskerm (.3) management/backhaul inventory with no Cashane addresses.
+    /// Invariant: derivation succeeds on Valskerm CIDRs only and never imports Cashane-shaped
+    /// 10.16.6.0/24 or Cashane identity strings.
+    /// </summary>
     [Fact]
     public void Valskerm_Dot3_Fixture_IsIndependentOfCashaneInventory()
     {
@@ -300,6 +354,11 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.DoesNotContain(result.ContributingAddresses, c => c.Contains("Cashane", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: raw RouterOS disabled strings including null, empty, yes/no/true/false, and junk.
+    /// Invariant: parsing maps known values to Enabled/Disabled and unknown tokens to Unknown;
+    /// only Enabled is eligible.
+    /// </summary>
     [Theory]
     [InlineData(null, "Enabled")]
     [InlineData("", "Disabled")]
@@ -315,6 +374,12 @@ public sealed class OspfDisabledObjectExclusionTests
         Assert.Equal(expected == OspfAdminState.Enabled, OspfInventoryEligibility.IsEligible(expected));
     }
 
+    /// <summary>
+    /// Derives a successful loopback router-id result for the given /32, asserting success so
+    /// callers can focus on management or planner behaviour.
+    /// </summary>
+    /// <param name="rid">Loopback host used as the /32 address and router-id.</param>
+    /// <param name="iface">Loopback interface name; defaults to <c>Loopback</c>.</param>
     private static OspfLoopbackRouterIdResult RequireLoopback(string rid, string iface = "Loopback")
     {
         OspfLoopbackRouterIdResult loopback = OspfLoopbackRouterId.Derive(
@@ -323,6 +388,13 @@ public sealed class OspfDisabledObjectExclusionTests
         return loopback;
     }
 
+    /// <summary>
+    /// Builds an IP address inventory row with admin state tied to the disabled flag.
+    /// </summary>
+    /// <param name="address">Address with prefix length.</param>
+    /// <param name="network">Network address.</param>
+    /// <param name="iface">Interface the address is assigned to.</param>
+    /// <param name="disabled">When true, marks the row disabled with <see cref="OspfAdminState.Disabled"/>.</param>
     private static OspfIpAddressRow Addr(
         string address,
         string network,
@@ -337,6 +409,10 @@ public sealed class OspfDisabledObjectExclusionTests
             AdminState = disabled ? OspfAdminState.Disabled : OspfAdminState.Enabled,
         };
 
+    /// <summary>
+    /// Minimal Cashane-shaped ROS7 capture used as the enabled baseline before injecting disabled
+    /// extras for planner exclusion tests.
+    /// </summary>
     private static OspfCaptureSnapshot BaselineCashaneShape() =>
         new()
         {
@@ -418,6 +494,11 @@ public sealed class OspfDisabledObjectExclusionTests
             ],
         };
 
+    /// <summary>
+    /// Clones <paramref name="baseline"/> and appends disabled instance, area, range, template, and
+    /// management-address rows that must be excluded from planning.
+    /// </summary>
+    /// <param name="baseline">Enabled Cashane-shaped snapshot to extend.</param>
     private static OspfCaptureSnapshot WithDisabledExtras(OspfCaptureSnapshot baseline)
     {
         List<OspfInstanceRow> instances = baseline.Instances.ToList();
@@ -467,6 +548,17 @@ public sealed class OspfDisabledObjectExclusionTests
         return CloneSnapshot(baseline, instances, areas, ranges, templates, addresses);
     }
 
+    /// <summary>
+    /// Shallow-copies a capture snapshot, optionally replacing individual inventory collections
+    /// while preserving identity, version, and neighbour metadata.
+    /// </summary>
+    /// <param name="source">Snapshot to copy.</param>
+    /// <param name="instances">Replacement instances, or null to keep <paramref name="source"/>.</param>
+    /// <param name="areas">Replacement areas, or null to keep source.</param>
+    /// <param name="ranges">Replacement area ranges, or null to keep source.</param>
+    /// <param name="templates">Replacement interface templates, or null to keep source.</param>
+    /// <param name="addresses">Replacement IP addresses, or null to keep source.</param>
+    /// <param name="v3">Replacement OSPFv3 refs, or null to keep source.</param>
     private static OspfCaptureSnapshot CloneSnapshot(
         OspfCaptureSnapshot source,
         IReadOnlyList<OspfInstanceRow>? instances = null,

@@ -19,6 +19,11 @@ namespace MikrotikWorker.Tests.Upgrade.Ospf;
 /// </summary>
 public sealed class OspfVerifierDisabledAndDynamicResidualTests
 {
+    /// <summary>
+    /// Scenario: planned inventory plus one disabled unplanned OSPFv2 template on a site interface.
+    /// Expected: verification succeeds and no error mentions the disabled unplanned leftover.
+    /// Invariant: disabled OSPFv2 leftovers are excluded from final equality and do not fail verify.
+    /// </summary>
     [Fact]
     public async Task Verify_DisabledUnplannedOspfV2Template_DoesNotFail()
     {
@@ -45,6 +50,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             e => e.Contains("Disabled unplanned", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: planned inventory plus an enabled unplanned more-specific under the management summary.
+    /// Expected: verification fails with an Unexpected error naming 10.16.3.0/27.
+    /// Invariant: enabled residuals under fleet aggregates must be cleaned, not preserved unmanaged.
+    /// </summary>
     [Fact]
     public async Task Verify_EnabledUnplannedOspfV2Template_StillFails()
     {
@@ -73,6 +83,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
                  && e.Contains("10.16.3.0/27", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Scenario: unplanned template whose admin state cannot be resolved (Unknown).
+    /// Expected: verification fails mentioning unknown disabled-state.
+    /// Invariant: ambiguous disabled/enabled state fails closed rather than treating the row as disabled.
+    /// </summary>
     [Fact]
     public async Task Verify_UnknownDisabledState_FailsClosed()
     {
@@ -97,6 +112,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             e => e.Contains("unknown disabled-state", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: successful verify with an extra disabled template present.
+    /// Expected: success with no template-count or disabled-leftovers equality errors.
+    /// Invariant: disabled rows must not inflate eligible inventory counts used for equality.
+    /// </summary>
     [Fact]
     public async Task Verify_DisabledTemplates_DoNotAffectEligibleCountOrEquality()
     {
@@ -122,6 +142,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
                  || e.Contains("disabled leftovers", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Scenario: enabled passive interfaces=dynamic public prefix outside fleet aggregates.
+    /// Expected: verification succeeds.
+    /// Invariant: non-conflicting dynamic public residuals are preserved unmanaged through verify.
+    /// </summary>
     [Fact]
     public async Task Verify_EnabledDynamicPublicPrefix_IsPreservedUnmanaged()
     {
@@ -144,6 +169,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.True(result.Succeeded, result.Detail);
     }
 
+    /// <summary>
+    /// Scenario: two distinct enabled dynamic public prefixes on the backbone area.
+    /// Expected: verification succeeds with both present.
+    /// Invariant: each dynamic residual is classified independently; one does not poison the other.
+    /// </summary>
     [Fact]
     public async Task Verify_SecondDistinctDynamicPrefix_IsIndependentlyPreserved()
     {
@@ -176,6 +206,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.True(result.Succeeded, result.Detail);
     }
 
+    /// <summary>
+    /// Scenario: disabled dynamic public-prefix template alongside an otherwise clean inventory.
+    /// Expected: verification succeeds.
+    /// Invariant: disabled dynamic rows are excluded from preserved/legacy/unexpected decisions.
+    /// </summary>
     [Fact]
     public async Task Verify_DisabledDynamicTemplate_IsExcludedFromDecisions()
     {
@@ -198,6 +233,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.True(result.Succeeded, result.Detail);
     }
 
+    /// <summary>
+    /// Scenario: cleanup classifier sees planned templates plus an enabled dynamic public prefix.
+    /// Expected: the dynamic row is the sole PreservedUnmanaged entry; Unknown and KnownLegacy empty.
+    /// Invariant: cleanup must retain non-conflicting dynamic public templates rather than remove them.
+    /// </summary>
     [Fact]
     public void Cleanup_EnabledDynamicPublicPrefix_IsPreservedUnmanaged()
     {
@@ -226,6 +266,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.Equal("*dyn", Assert.Single(report.PreservedUnmanaged).Row.Id);
     }
 
+    /// <summary>
+    /// Scenario: dynamic template whose prefix sits under a fleet CGNAT aggregate (100.99.0.0/16).
+    /// Expected: classified KnownLegacy (not PreservedUnmanaged).
+    /// Invariant: dynamic under fleet aggregates is removable legacy, not preserved unmanaged.
+    /// </summary>
     [Fact]
     public void Cleanup_DynamicUnderFleetAggregate_IsKnownLegacyWithProvenance()
     {
@@ -252,6 +297,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.Empty(report.PreservedUnmanaged);
     }
 
+    /// <summary>
+    /// Scenario: superseded provenance for 102.66.242.0/24 dynamic, live residual is 102.66.243.0/24.
+    /// Expected: ClassifyUnplannedResidual returns PreservedUnmanaged (no provenance match).
+    /// Invariant: similar-but-distinct prefixes must not inherit superseded provenance by adjacency.
+    /// </summary>
     [Fact]
     public void ClassifyUnplannedResidual_SimilarButDistinctDynamicPrefix_DoesNotMatch()
     {
@@ -284,6 +334,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.Equal(OspfTemplateClassification.PreservedUnmanaged, classification);
     }
 
+    /// <summary>
+    /// Scenario: logical plan carries superseded dynamic 100.99.0.0/16; RemapPlan binds live *-v2 names.
+    /// Expected: remapped superseded entry keeps interfaces/network and uses live area/instance names.
+    /// Invariant: live-identity remapping must preserve dynamic superseded provenance fields.
+    /// </summary>
     [Fact]
     public void RemapPlan_PreservesDynamicSupersededProvenance()
     {
@@ -334,6 +389,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.Equal("default-v2", kept.AreaInstanceName);
     }
 
+    /// <summary>
+    /// Scenario: inventory with an enabled OSPFv2 instance and a fully disabled OSPFv3 instance/area/template.
+    /// Expected: V3 removal selection succeeds and includes the disabled v3 instance, area, and template ids.
+    /// Invariant: disabled OSPFv3 objects remain mandatory removal candidates (unlike disabled OSPFv2 leftovers).
+    /// </summary>
     [Fact]
     public void DisabledOspfV3_RemainsEligibleForMandatoryRemovalSelection()
     {
@@ -393,6 +453,12 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         Assert.Contains("*t3", selection.TemplateIds);
     }
 
+    /// <summary>
+    /// Runs <see cref="OspfV7MigrationVerifier.VerifyAsync"/> against a fully populated fake connection
+    /// using <see cref="FakeOps"/> seeded with the supplied inventory.
+    /// </summary>
+    /// <param name="plan">Migration plan under verification.</param>
+    /// <param name="inventory">Live v7 inventory the fake ops will return.</param>
     private static async Task<OspfVerificationResult> VerifyAsync(
         OspfMigrationPlan plan,
         OspfV7Inventory inventory)
@@ -402,6 +468,13 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             .VerifyAsync(FakeMikrotikConnections.CreateFullyPopulated(), plan, CancellationToken.None);
     }
 
+    /// <summary>
+    /// Builds a dual-management-prefix Valskerm-shaped plan (two backhauls, loopback, consolidated site).
+    /// When <paramref name="logicalNames"/> is true, uses pre-rename logical area/instance names for remap tests.
+    /// </summary>
+    /// <param name="logicalNames">
+    /// True for logical names (backbone/default); false for live *-v2 names used by most verify scenarios.
+    /// </param>
     private static OspfMigrationPlan BuildPlan(bool logicalNames = false)
     {
         string backbone = logicalNames ? "backbone" : "backbone-v2";
@@ -507,6 +580,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         };
     }
 
+    /// <summary>
+    /// Shallow-clones a plan while replacing <see cref="OspfMigrationPlan.SupersededTemplates"/>.
+    /// </summary>
+    /// <param name="plan">Source plan whose non-superseded fields are copied.</param>
+    /// <param name="superseded">Superseded-template provenance list for the clone.</param>
     private static OspfMigrationPlan CloneWithSuperseded(
         OspfMigrationPlan plan,
         IReadOnlyList<OspfSupersededTemplateIdentity> superseded) =>
@@ -539,6 +617,10 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             ContentHash = plan.ContentHash,
         };
 
+    /// <summary>
+    /// Builds a complete v7 inventory that exactly covers the planned instance, areas, ranges, and templates.
+    /// </summary>
+    /// <param name="plan">Plan whose target names and template matchers seed the inventory.</param>
     private static OspfV7Inventory BaseInventory(OspfMigrationPlan plan)
     {
         string backbone = plan.TargetBackboneAreaName;
@@ -627,6 +709,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
         };
     }
 
+    /// <summary>
+    /// Returns a copy of <paramref name="source"/> with <paramref name="extra"/> appended to Templates.
+    /// </summary>
+    /// <param name="source">Inventory to clone.</param>
+    /// <param name="extra">Additional interface template row under test.</param>
     private static OspfV7Inventory WithExtraTemplate(
         OspfV7Inventory source,
         OspfInterfaceTemplateRow extra) =>
@@ -639,6 +726,11 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             Templates = [.. source.Templates, extra],
         };
 
+    /// <summary>
+    /// Cleanup-classifier inventory row matching the planned backhaul at <paramref name="index"/>.
+    /// </summary>
+    /// <param name="plan">Plan supplying backhaul matchers.</param>
+    /// <param name="index">Zero-based index into <see cref="OspfMigrationPlan.ActiveBackhauls"/>.</param>
     private static OspfTemplateInventoryRow PlannedBackhaulRow(OspfMigrationPlan plan, int index) =>
         new()
         {
@@ -652,6 +744,10 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             Passive = false,
         };
 
+    /// <summary>
+    /// Cleanup-classifier inventory row matching the planned passive loopback.
+    /// </summary>
+    /// <param name="plan">Plan supplying loopback matchers.</param>
     private static OspfTemplateInventoryRow PlannedLoopbackRow(OspfMigrationPlan plan) =>
         new()
         {
@@ -663,6 +759,10 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             Passive = true,
         };
 
+    /// <summary>
+    /// Cleanup-classifier inventory row matching the planned consolidated site template.
+    /// </summary>
+    /// <param name="plan">Plan supplying site-network matchers.</param>
     private static OspfTemplateInventoryRow PlannedSiteRow(OspfMigrationPlan plan) =>
         new()
         {
@@ -674,13 +774,29 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             Passive = true,
         };
 
+    /// <summary>
+    /// Minimal <see cref="IOspfMikrotikOperations"/> for verify-only tests: returns the seeded inventory and
+    /// fixed IP addresses covering the plan's backhauls, loopback, and dual management prefixes.
+    /// Mutation and capture APIs are no-ops or throw <see cref="NotSupportedException"/>; this fake does not
+    /// model live RouterOS writes or management-plane baselines.
+    /// </summary>
     private sealed class FakeOps(OspfV7Inventory inventory, OspfMigrationPlan plan) : IOspfMikrotikOperations
     {
+        /// <summary>
+        /// Returns the seeded v7 inventory regardless of connection.
+        /// </summary>
+        /// <param name="connection">Unused fake connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<OspfV7Inventory> ReadV7InventoryAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(inventory);
 
+        /// <summary>
+        /// Returns fixed IP rows for the plan's two backhauls, loopback, and Bridge-VLAN-99 dual mgmt prefixes.
+        /// </summary>
+        /// <param name="connection">Unused fake connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<IReadOnlyList<OspfIpAddressRow>> ReadIpAddressInventoryAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
@@ -713,34 +829,69 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
                 },
             ]);
 
+        /// <summary>
+        /// Reports zero routing filters so filter leftover checks cannot fail unrelated to these scenarios.
+        /// </summary>
+        /// <param name="connection">Unused fake connection.</param>
+        /// <param name="cancellationToken">Cancellation token (ignored).</param>
         public Task<int> CountRoutingFiltersAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(0);
 
+        /// <summary>
+        /// Always throws: live capture is outside the verify-only contract of this fake.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="request">Unused capture request.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task<OspfCaptureSnapshot> CaptureAsync(
             ITikConnection connection,
             OspfCaptureRequest request,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        /// <summary>
+        /// No-op: filter removal is not exercised by these verify scenarios.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task RemoveAllRoutingFiltersAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: redistribution clearing is not under test here.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="instanceName">Unused instance name.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task ClearOspfRedistributionAsync(
             ITikConnection connection,
             string instanceName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: instance filter-reference clearing is not under test here.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="instanceName">Unused instance name.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task ClearOspfInstanceFilterReferencesAsync(
             ITikConnection connection,
             string instanceName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: area ensure is assumed already satisfied by the seeded inventory.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="instanceName">Unused.</param>
+        /// <param name="area">Unused planned area.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task EnsureOspfAreaAsync(
             ITikConnection connection,
             string instanceName,
@@ -748,18 +899,37 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: area-range ensure is assumed already satisfied by the seeded inventory.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="range">Unused planned range.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task EnsureOspfAreaRangeAsync(
             ITikConnection connection,
             OspfPlanAreaRange range,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: backhaul ensure is not invoked on the verify path under test.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="template">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task EnsureBackhaulTemplateAsync(
             ITikConnection connection,
             OspfPlanBackhaulTemplate template,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: loopback ensure is not invoked on the verify path under test.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="template">Unused.</param>
+        /// <param name="protectedBackhauls">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task EnsureLoopbackTemplateAsync(
             ITikConnection connection,
             OspfPlanLoopbackTemplate template,
@@ -767,6 +937,13 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: site-network ensure is not invoked on the verify path under test.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="template">Unused.</param>
+        /// <param name="protectedBackhauls">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task EnsureSiteNetworkTemplateAsync(
             ITikConnection connection,
             OspfPlanSiteNetworkTemplate template,
@@ -774,18 +951,37 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: post-ensure site assertion is assumed to pass for these scenarios.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="template">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task AssertSiteNetworkTemplateStateAsync(
             ITikConnection connection,
             OspfPlanSiteNetworkTemplate template,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: obsolete-template removal is outside verify-only coverage.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="migrationPlan">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task RemoveObsoleteTemplatesAsync(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Always throws: management-plane baseline capture is not modeled by this fake.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="migrationPlan">Unused.</param>
+        /// <param name="managementHost">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task<OspfManagementPlaneBaseline> CaptureManagementPlaneBaselineAsync(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
@@ -793,6 +989,14 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        /// <summary>
+        /// No-op: backbone activity assertion is treated as satisfied.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="migrationPlan">Unused.</param>
+        /// <param name="baseline">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
+        /// <param name="requireFleetCost">Unused fleet-cost flag.</param>
         public Task AssertBackboneStillActiveAsync(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
@@ -801,6 +1005,13 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             bool requireFleetCost = true) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: instance rename/rebind is not exercised by these verify scenarios.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="currentName">Unused.</param>
+        /// <param name="targetName">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task EnsureOspfInstanceNameAsync(
             ITikConnection connection,
             string currentName,
@@ -808,23 +1019,47 @@ public sealed class OspfVerifierDisabledAndDynamicResidualTests
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: unused routing-id cleanup is not under test here.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="routingIdName">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task TryRemoveUnusedRoutingIdAsync(
             ITikConnection connection,
             string? routingIdName,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Returns an empty neighbour list so neighbour-based checks stay out of scope.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task<IReadOnlyList<Dictionary<string, string>>> ReadOspfNeighboursAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<Dictionary<string, string>>>([]);
 
+        /// <summary>
+        /// No-op: OSPFv3 removal is not invoked on the verify path under test.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="migrationPlan">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task RemoveOspfV3Async(
             ITikConnection connection,
             OspfMigrationPlan migrationPlan,
             CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// No-op: router-id set is not exercised by these scenarios.
+        /// </summary>
+        /// <param name="connection">Unused.</param>
+        /// <param name="instanceName">Unused.</param>
+        /// <param name="routerId">Unused.</param>
+        /// <param name="cancellationToken">Unused.</param>
         public Task SetInstanceRouterIdAsync(
             ITikConnection connection,
             string instanceName,

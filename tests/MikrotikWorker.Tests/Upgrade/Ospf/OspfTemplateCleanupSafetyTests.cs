@@ -1084,8 +1084,15 @@ public sealed class OspfTemplateCleanupSafetyTests
         public Task AssertBackboneStillActiveAsync(ITikConnection connection, OspfMigrationPlan plan, OspfManagementPlaneBaseline baseline, CancellationToken cancellationToken = default, bool requireFleetCost = true) =>
             Task.CompletedTask;
 
+        /// <summary>
+        /// Forwards OSPF instance rename to the real operations implementation.
+        /// </summary>
         public Task EnsureOspfInstanceNameAsync(ITikConnection connection, string currentName, string targetName, CancellationToken cancellationToken = default) =>
             real.EnsureOspfInstanceNameAsync(connection, currentName, targetName, cancellationToken);
+
+        /// <summary>
+        /// Forwards unused routing-id cleanup to the real operations implementation.
+        /// </summary>
         public Task TryRemoveUnusedRoutingIdAsync(ITikConnection connection, string? routingIdName, CancellationToken cancellationToken = default) =>
             real.TryRemoveUnusedRoutingIdAsync(connection, routingIdName, cancellationToken);
 

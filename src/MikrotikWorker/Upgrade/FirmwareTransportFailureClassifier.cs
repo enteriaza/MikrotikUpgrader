@@ -146,6 +146,12 @@ internal static class FirmwareTransportFailureClassifier
         || Contains(message, "502")
         || Contains(message, "504");
 
+    /// <summary>
+    /// Case-insensitive substring match used by message-marker heuristics after typed exception checks.
+    /// </summary>
+    /// <param name="haystack">Exception or status message text.</param>
+    /// <param name="needle">Marker phrase (for example <c>timed out</c>).</param>
+    /// <returns><see langword="true"/> when <paramref name="haystack"/> contains <paramref name="needle"/>.</returns>
     private static bool Contains(string haystack, string needle) =>
         haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
 }

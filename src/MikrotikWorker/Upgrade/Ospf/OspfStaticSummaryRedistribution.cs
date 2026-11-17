@@ -1147,6 +1147,13 @@ internal sealed class OspfStaticSummaryRedistributionService(
         return false;
     }
 
+    /// <summary>
+    /// Returns whether a route/filter sentence has the named RouterOS ownership flag present and enabled
+    /// (for example <c>ospf</c> / <c>static</c> protocol markers used when classifying routes).
+    /// </summary>
+    /// <param name="row">Live <c>/ip/route</c> or related print sentence.</param>
+    /// <param name="flagName">Flag field name to interpret via <see cref="TryReadRosFlag"/>.</param>
+    /// <returns><see langword="true"/> only when the flag parses as enabled.</returns>
     private static bool HasProtocolOwnershipFlag(ITikReSentence row, string flagName) =>
         TryReadRosFlag(row, flagName, out bool enabled, out _) && enabled;
 
