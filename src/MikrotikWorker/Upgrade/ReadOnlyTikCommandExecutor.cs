@@ -14,7 +14,7 @@ namespace MikrotikWorker.Upgrade;
 /// <summary>
 /// Issues only permitted read-only RouterOS print commands for live inventory audits.
 /// </summary>
-internal sealed class ReadOnlyTikCommandExecutor : IReadOnlyTikCommandExecutor
+internal sealed class ReadOnlyTikCommandExecutor
 {
     /// <summary>
     /// Exact RouterOS print commands permitted by the read-only audit.

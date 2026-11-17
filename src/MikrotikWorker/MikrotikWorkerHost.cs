@@ -138,13 +138,8 @@ public static class MikrotikWorkerHost
                     configuration.GetValue("RedistributeSummaryviaStatics", false);
             });
 
-        builder.Services
-            .AddOptions<LivePackageCompatibilityAuditOptions>()
-            .BindConfiguration(LivePackageCompatibilityAuditOptions.SectionName)
-            .ValidateOnStart();
-        builder.Services.AddSingleton<
-            IValidateOptions<LivePackageCompatibilityAuditOptions>,
-            LivePackageCompatibilityAuditOptionsValidator>();
+        // Live package-compatibility audit options and services live only on
+        // LivePackageCompatibilityAuditHost (CLI). They are not part of the production worker graph.
 
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<DeviceLogIdentityRegistry>();
@@ -157,10 +152,6 @@ public static class MikrotikWorkerHost
         builder.Services.AddSingleton<IFirmwarePackageCatalog, FirmwarePackageCatalog>();
         builder.Services.AddSingleton<IDeviceCompatibilityAssessor, DeviceCompatibilityAssessor>();
         builder.Services.AddSingleton<IUpgradePackageResolver, UpgradePackageResolver>();
-        builder.Services.AddSingleton<IPackageCompatibilityAuditor, PackageCompatibilityAuditor>();
-        builder.Services.AddSingleton<ICatalogueCoverageReporter, CatalogueCoverageReporter>();
-        builder.Services.AddSingleton<IReadOnlyMikrotikInventoryCollector, ReadOnlyMikrotikInventoryCollector>();
-        builder.Services.AddSingleton<ILivePackageCompatibilityFleetAuditor, LivePackageCompatibilityFleetAuditor>();
         builder.Services.AddSingleton<IMikrotikFileTransferClient, MikrotikScpFileTransferClient>();
         builder.Services.AddSingleton<IDeviceBackupService, DeviceBackupService>();
         builder.Services.AddSingleton<LegacyFleetUpgradeAutomationCleanup>();

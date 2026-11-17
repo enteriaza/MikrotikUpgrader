@@ -36,7 +36,6 @@ public sealed class JobOutcomeMappingTests
     [InlineData(UpgradeOutcome.UpgradeTimedOut, ScheduledJobTerminalState.Failed, false)]
     [InlineData(UpgradeOutcome.UpgradeVersionMismatch, ScheduledJobTerminalState.Failed, false)]
     [InlineData(UpgradeOutcome.UpgradePackageMismatch, ScheduledJobTerminalState.Failed, false)]
-    [InlineData(UpgradeOutcome.ManualReviewRequired, ScheduledJobTerminalState.Failed, false)]
     [InlineData(UpgradeOutcome.BackupFailed, ScheduledJobTerminalState.Failed, false)]
     [InlineData(UpgradeOutcome.PackageResolutionFailed, ScheduledJobTerminalState.Failed, false)]
     [InlineData(UpgradeOutcome.LegacyFirmwareAutomationCleanupFailed, ScheduledJobTerminalState.Failed, false)]

@@ -29,17 +29,11 @@ internal sealed class ControllableFileMover(string? completedDirectory = null) :
         ? null
         : Path.GetFullPath(completedDirectory);
 
-    /// <summary>Remaining number of Completed moves that will fail.</summary>
-    private int _failCompletedMoves;
-
     /// <summary>When true, every Completed move fails until cleared.</summary>
     private bool _failAllCompletedMoves;
 
     /// <summary>Remaining number of Accepted moves that will fail.</summary>
     private int _failAcceptedMoves;
-
-    /// <summary>Exception thrown (once) by the next Accepted move, if set.</summary>
-    private Exception? _throwOnAcceptedMove;
 
     /// <summary>Number of attempted moves whose destination resolved as Completed.</summary>
     public int CompletedMoveAttempts { get; private set; }
@@ -50,26 +44,14 @@ internal sealed class ControllableFileMover(string? completedDirectory = null) :
     /// <summary>Number of attempted moves into an Accepted folder.</summary>
     public int AcceptedMoveAttempts { get; private set; }
 
-    /// <summary>Fails the next <paramref name="count"/> Completed moves with <see cref="IOException"/>.</summary>
-    public void FailNextCompletedMoves(int count) => _failCompletedMoves = count;
-
     /// <summary>Fails every subsequent Completed move until <see cref="AllowCompletedMoves"/>.</summary>
     public void FailAllCompletedMoves() => _failAllCompletedMoves = true;
 
     /// <summary>Clears Completed-move failure gates.</summary>
-    public void AllowCompletedMoves()
-    {
-        _failAllCompletedMoves = false;
-        _failCompletedMoves = 0;
-    }
+    public void AllowCompletedMoves() => _failAllCompletedMoves = false;
 
     /// <summary>Fails the next <paramref name="count"/> Accepted moves with <see cref="IOException"/>.</summary>
     public void FailNextAcceptedMoves(int count) => _failAcceptedMoves = count;
-
-    /// <summary>
-    /// Throws <paramref name="exception"/> on the next Accepted move, then clears the gate.
-    /// </summary>
-    public void ThrowOnNextAcceptedMove(Exception exception) => _throwOnAcceptedMove = exception;
 
     /// <inheritdoc />
     /// <remarks>
@@ -94,13 +76,8 @@ internal sealed class ControllableFileMover(string? completedDirectory = null) :
         if (toCompleted)
         {
             CompletedMoveAttempts++;
-            if (_failAllCompletedMoves || _failCompletedMoves > 0)
+            if (_failAllCompletedMoves)
             {
-                if (!_failAllCompletedMoves && _failCompletedMoves > 0)
-                {
-                    _failCompletedMoves--;
-                }
-
                 throw new IOException("Simulated Completed move failure.");
             }
 
@@ -112,13 +89,6 @@ internal sealed class ControllableFileMover(string? completedDirectory = null) :
         if (string.Equals(folderName, "Accepted", StringComparison.OrdinalIgnoreCase))
         {
             AcceptedMoveAttempts++;
-            if (_throwOnAcceptedMove is not null)
-            {
-                Exception ex = _throwOnAcceptedMove;
-                _throwOnAcceptedMove = null;
-                throw ex;
-            }
-
             if (_failAcceptedMoves > 0)
             {
                 _failAcceptedMoves--;

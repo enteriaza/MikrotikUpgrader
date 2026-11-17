@@ -89,7 +89,7 @@ internal static class LivePackageCompatibilityAuditHost
         services.AddSingleton<IFirmwarePackageCatalog, FirmwarePackageCatalog>();
         services.AddSingleton<IUpgradePackageResolver, UpgradePackageResolver>();
         services.AddSingleton<IPackageCompatibilityAuditor, PackageCompatibilityAuditor>();
-        services.AddSingleton<ICatalogueCoverageReporter, CatalogueCoverageReporter>();
+        // CatalogueCoverageReporter is constructed directly by fixture/live report paths; not DI-resolved.
         services.AddSingleton<IMikrotikConnectionFactory, Tik4netConnectionFactory>();
         services.AddSingleton<IReadOnlyMikrotikInventoryCollector, ReadOnlyMikrotikInventoryCollector>();
         services.AddSingleton<ILivePackageCompatibilityFleetAuditor, LivePackageCompatibilityFleetAuditor>();

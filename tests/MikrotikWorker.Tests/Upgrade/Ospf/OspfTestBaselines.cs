@@ -30,24 +30,6 @@ internal static class OspfTestBaselines
         },
     ];
 
-    /// <summary>Builds the loopback /32 address rows implied by <paramref name="plan"/>.</summary>
-    /// <param name="plan">Plan supplying the router id and loopback interface name.</param>
-    public static IReadOnlyList<OspfIpAddressRow> LoopbackSlash32ForPlan(OspfMigrationPlan plan) =>
-        LoopbackSlash32(
-            plan.RouterId,
-            plan.LoopbackInterfaceName
-            ?? plan.PassiveLoopbacks.FirstOrDefault()?.Interface
-            ?? OspfLoopbackRouterId.InterfaceNameLoopback);
-
-    /// <summary>Eligible management address deriving <paramref name="managementSlash24"/>.</summary>
-    public static OspfIpAddressRow ManagementAddress(string hostCidr, string managementSlash24, string iface) =>
-        new()
-        {
-            Address = hostCidr,
-            Network = managementSlash24.Contains('/') ? managementSlash24[..managementSlash24.IndexOf('/')] : managementSlash24,
-            Interface = iface,
-        };
-
     /// <summary>Creates a baseline with only a management host and no backbone details.</summary>
     /// <param name="managementHost">Management host address.</param>
     public static OspfManagementPlaneBaseline Minimal(string managementHost = "198.18.240.11") => new()
@@ -145,57 +127,4 @@ internal static class OspfTestBaselines
         };
     }
 
-    /// <summary>
-    /// Tommy-style ROS7 conversion inventory for a ROS6 logical plan (<c>default</c>/<c>backbone</c>).
-    /// </summary>
-    public static OspfV7Inventory TommyConvertedFromRos6Plan(OspfMigrationPlan plan)
-    {
-        string liveInstance = OspfFleetNaming.Ros7InstanceName;
-        string backbone = OspfFleetNaming.Ros7BackboneAreaName;
-        string site = string.IsNullOrWhiteSpace(plan.TargetSiteAreaName)
-            ? OspfFleetNaming.Ros7SiteAreaName(plan.Identity)
-            : plan.TargetSiteAreaName;
-
-        return new OspfV7Inventory
-        {
-           
-            CaptureStatus = OspfInventoryCaptureStatus.Complete,Instances =
-            [
-                new OspfInstanceRow
-                {
-                    Id = "*1",
-                    Name = liveInstance,
-                    RouterId = plan.RouterId,
-                    Version = "2",
-                },
-            ],
-            Areas = plan.Areas
-                .Select(a => new OspfAreaRow
-                {
-                    Id = a.IsBackbone ? "*a0" : "*a1",
-                    Name = a.IsBackbone ? backbone : site,
-                    AreaId = a.AreaId,
-                    Instance = liveInstance,
-                    Type = a.TargetType,
-                    DefaultCost = a.DefaultCost,
-                })
-                .ToList(),
-        };
-    }
-
-    /// <summary>
-    /// Copies <paramref name="inventory"/> while forcing <see cref="OspfInventoryCaptureStatus.Complete"/>.
-    /// </summary>
-    public static OspfV7Inventory WithCompleteCapture(OspfV7Inventory inventory) =>
-        new()
-        {
-            CaptureStatus = OspfInventoryCaptureStatus.Complete,
-            Instances = inventory.Instances,
-            Areas = inventory.Areas,
-            AreaRanges = inventory.AreaRanges,
-            Templates = inventory.Templates,
-            Filters = inventory.Filters,
-            OspfV3Objects = inventory.OspfV3Objects,
-            IssuedMutatingCommands = inventory.IssuedMutatingCommands,
-        };
 }

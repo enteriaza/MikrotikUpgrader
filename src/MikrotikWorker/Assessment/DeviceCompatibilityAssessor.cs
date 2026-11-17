@@ -395,8 +395,6 @@ internal sealed class DeviceCompatibilityAssessor(
 
     /// <summary>
     /// Rolls path/package/blocker findings into ReadyForUpgrade, AlreadyAtTarget, or Blocked.
-    /// Does not currently emit <see cref="DeviceAssessmentStatus.ManualReviewRequired"/> or
-    /// <see cref="DeviceAssessmentStatus.Unsupported"/>.
     /// </summary>
     private static DeviceAssessmentStatus DetermineOverall(
         RouterOsVersionClassification classification,

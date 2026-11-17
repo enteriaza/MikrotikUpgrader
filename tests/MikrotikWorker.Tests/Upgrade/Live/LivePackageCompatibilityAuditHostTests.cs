@@ -115,6 +115,49 @@ public sealed class LivePackageCompatibilityAuditHostTests
     }
 
     /// <summary>
+    /// Production worker DI must not register live-audit-only services or options; those belong on
+    /// <see cref="LivePackageCompatibilityAuditHost"/>. Fixture audit constructs
+    /// <see cref="CatalogueCoverageReporter"/> directly.
+    /// </summary>
+    [Fact]
+    public void NormalApplicationHost_DoesNotRegisterLiveAuditOnlyServices()
+    {
+        WebApplicationBuilder builder = MikrotikWorkerHost.CreateApplicationBuilder([]);
+
+        Assert.DoesNotContain(
+            builder.Services,
+            static d => d.ServiceType == typeof(IPackageCompatibilityAuditor));
+        Assert.DoesNotContain(
+            builder.Services,
+            static d => d.ServiceType == typeof(IReadOnlyMikrotikInventoryCollector));
+        Assert.DoesNotContain(
+            builder.Services,
+            static d => d.ServiceType == typeof(ILivePackageCompatibilityFleetAuditor));
+        Assert.DoesNotContain(
+            builder.Services,
+            static d => d.ServiceType == typeof(IOptions<LivePackageCompatibilityAuditOptions>)
+                || d.ServiceType == typeof(IConfigureOptions<LivePackageCompatibilityAuditOptions>)
+                || d.ServiceType == typeof(IValidateOptions<LivePackageCompatibilityAuditOptions>));
+        Assert.DoesNotContain(
+            builder.Services,
+            static d => d.ServiceType == typeof(CatalogueCoverageReporter));
+    }
+
+    /// <summary>
+    /// Live-audit host still resolves the read-only audit graph and live-audit options after the
+    /// production-host cleanup.
+    /// </summary>
+    [Fact]
+    public void LiveAuditHost_StillResolvesLiveAuditOptions()
+    {
+        using IHost host = BuildLiveHost();
+        IOptions<LivePackageCompatibilityAuditOptions> options =
+            host.Services.GetRequiredService<IOptions<LivePackageCompatibilityAuditOptions>>();
+        Assert.True(options.Value.Enabled);
+        Assert.Equal(5, options.Value.MaxConcurrentConnections);
+    }
+
+    /// <summary>
     /// On a live-audit host built with firmware upgrade not enabled, the resolved
     /// <c>FirmwareUpgradeOptions.Enabled</c> is false.
     /// </summary>

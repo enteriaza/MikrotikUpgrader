@@ -46,8 +46,7 @@ public enum UpgradeOutcome
     /// <summary>Caller cancellation interrupted an in-progress upgrade stage.</summary>
     UpgradeInterrupted = 8,
 
-    /// <summary>Automated path cannot safely decide; operator review required.</summary>
-    ManualReviewRequired = 9,
+    // 9 was ManualReviewRequired (removed: never assigned by production upgrade paths).
 
     /// <summary>Pre-upgrade or pre-OSPF central backup failed verification.</summary>
     BackupFailed = 10,

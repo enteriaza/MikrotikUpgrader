@@ -43,8 +43,8 @@ public enum PackageCompatibilityStatus
     Ambiguous = 4,
     /// <summary>Device identity fields were insufficient to evaluate packages.</summary>
     Unidentifiable = 5,
-    /// <summary>Package matching was skipped.</summary>
-    NotEvaluated = 6,
+
+    // 6 was NotEvaluated (removed: package assessor always returns a concrete status).
 }
 
 /// <summary>
@@ -54,18 +54,18 @@ public enum UpgradePathStatus
 {
     /// <summary>RouterOS v6 older than the fixed stepping release — step to 6.49.23 then v7.</summary>
     EligibleSubjectToManualPathVerification = 0,
-    /// <summary>Legacy overall-at-target path value; prefer the v7-specific statuses.</summary>
-    AlreadyAtTarget = 1,
-    /// <summary>Legacy: newer v6 no longer requires review; prefer <see cref="SkipV6SteppingProceedToV7"/>.</summary>
-    NewerV6RequiresReview = 2,
-    /// <summary>Legacy: v7 is no longer out of scope; prefer the direct-v7 path statuses.</summary>
-    OutOfScopeV7 = 3,
+
+    // 1 was AlreadyAtTarget (removed: prefer AlreadyAtV7Target / NewerThanV7Target).
+    // 2 was NewerV6RequiresReview (removed: prefer SkipV6SteppingProceedToV7).
+    // 3 was OutOfScopeV7 (removed: v7 is in scope via EligibleDirectV7Upgrade / AlreadyAtV7Target).
+
     /// <summary>Version unparseable or otherwise unknown — manual review required.</summary>
     UnknownRequiresManualReview = 4,
     /// <summary>Path blocked (e.g. v7 device with no validated FirmwareFiles target).</summary>
     Blocked = 5,
-    /// <summary>Upgrade path was not assessed.</summary>
-    NotEvaluated = 6,
+
+    // 6 was NotEvaluated (removed: assessor always assigns a concrete path).
+
     /// <summary>Device already runs 6.49.23 or newer RouterOS 6 — skip stepping, proceed to v7.</summary>
     SkipV6SteppingProceedToV7 = 7,
     /// <summary>Device runs RouterOS 7 older than the dynamic target — upgrade directly.</summary>
@@ -89,8 +89,8 @@ public enum RouterboardFirmwareStatus
     Unavailable = 2,
     /// <summary>Fields present but comparison inconclusive.</summary>
     Inconclusive = 3,
-    /// <summary>RouterBOARD assessment was skipped.</summary>
-    NotEvaluated = 4,
+
+    // 4 was NotEvaluated (removed: routerboard assessor always returns a concrete status).
 }
 
 /// <summary>
@@ -102,12 +102,13 @@ public enum DeviceAssessmentStatus
     ReadyForUpgrade = 0,
     /// <summary>Device already at the intended target (v7 target or newer than target).</summary>
     AlreadyAtTarget = 1,
-    /// <summary>Findings require human review before upgrade.</summary>
-    ManualReviewRequired = 2,
+
+    // 2 was ManualReviewRequired (removed: DetermineOverall never emits it).
+
     /// <summary>Hard blockers prevent automatic upgrade.</summary>
     Blocked = 3,
-    /// <summary>Device/version combination is unsupported by automation.</summary>
-    Unsupported = 4,
+
+    // 4 was Unsupported (removed: DetermineOverall never emits it).
 }
 
 /// <summary>

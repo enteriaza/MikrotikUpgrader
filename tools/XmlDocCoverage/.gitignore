@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+coverage-report.txt
+audit-stdout.txt
+test-missing.txt
+test-missing*.txt
