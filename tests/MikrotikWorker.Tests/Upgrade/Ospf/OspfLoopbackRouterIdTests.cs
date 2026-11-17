@@ -172,9 +172,10 @@ public sealed class OspfLoopbackRouterIdTests
     }
 
     /// <summary>
-    /// Scenario: <c>Loopback</c> carries bare addresses 172.16.150.253, 102.66.242.100 and 10.255.1.1 (outside the 10.16.0.0/24 loopback scope) and 10.16.0.1 (inside).
-    /// Expected: derivation succeeds with router-id 10.16.0.1 and CIDR 10.16.0.1/32, three addresses reported as ignored and one as in-scope.
-    /// Invariant: out-of-range loopback addresses are skipped rather than blocking selection of the in-scope one.
+    /// Scenario: <c>Loopback</c> carries bare addresses 172.16.150.253 and 102.66.242.100 (outside 10.0.0.0/8)
+    /// and 10.16.0.1 (inside).
+    /// Expected: derivation succeeds with router-id 10.16.0.1; outside-range addresses are ignored.
+    /// Invariant: non-10/8 loopback addresses are skipped rather than blocking selection of the in-scope one.
     /// </summary>
     [Fact]
     public void Derive_IgnoresOutsideRangeLoopback_AndSelectsInScope()
@@ -183,15 +184,108 @@ public sealed class OspfLoopbackRouterIdTests
         [
             new OspfIpAddressRow { Address = "172.16.150.253", Network = "172.16.150.253", Interface = "Loopback" },
             new OspfIpAddressRow { Address = "102.66.242.100", Network = "102.66.242.100", Interface = "Loopback" },
-            new OspfIpAddressRow { Address = "10.255.1.1", Network = "10.255.1.1", Interface = "Loopback" },
             new OspfIpAddressRow { Address = "10.16.0.1", Network = "10.16.0.1", Interface = "Loopback" },
         ]);
 
         Assert.True(result.Succeeded, result.Detail);
         Assert.Equal("10.16.0.1", result.RouterId);
         Assert.Equal("10.16.0.1/32", result.LoopbackCidr);
-        Assert.Equal(3, result.IgnoredOutsideRangeAddresses.Count);
+        Assert.Equal(2, result.IgnoredOutsideRangeAddresses.Count);
         Assert.Single(result.ObservedInScopeAddresses);
+    }
+
+    /// <summary>
+    /// Eligible 10.0.0.0/8 Loopback /32 addresses across the former 10.16.0.0/24 boundary.
+    /// </summary>
+    [Theory]
+    [InlineData("10.0.0.1/32", "lo", "10.0.0.1")]
+    [InlineData("10.16.0.3/32", "Loopback", "10.16.0.3")]
+    [InlineData("10.100.20.5/32", "Loopback", "10.100.20.5")]
+    [InlineData("10.255.255.254/32", "Loopback-OSPF", "10.255.255.254")]
+    public void Derive_AcceptsAnyTenSlashEightLoopbackSlash32(string address, string iface, string expectedHost)
+    {
+        OspfLoopbackRouterIdResult result = OspfLoopbackRouterId.Derive(
+        [
+            new OspfIpAddressRow { Address = address, Network = expectedHost, Interface = iface },
+        ]);
+
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.Equal(expectedHost, result.RouterId);
+        Assert.Equal($"{expectedHost}/32", result.LoopbackCidr);
+        Assert.Equal(iface, result.LoopbackInterfaceName);
+    }
+
+    /// <summary>
+    /// Non-10/8 and non-/32 Loopback candidates are rejected.
+    /// </summary>
+    [Theory]
+    [InlineData("172.16.0.1/32", "Loopback")]
+    [InlineData("192.168.1.1/32", "lo")]
+    [InlineData("10.16.0.3/24", "Loopback")]
+    [InlineData("10.16.0.3/30", "Loopback")]
+    public void Derive_RejectsNonTenSlashEightOrNonSlash32(string address, string iface)
+    {
+        OspfLoopbackRouterIdResult result = OspfLoopbackRouterId.Derive(
+        [
+            new OspfIpAddressRow { Address = address, Network = address.Split('/')[0], Interface = iface },
+        ]);
+
+        Assert.False(result.Succeeded);
+    }
+
+    /// <summary>
+    /// A valid 10/8 /32 on bridge/VLAN/transport is never selected; only supported Loopback names qualify.
+    /// </summary>
+    [Theory]
+    [InlineData("bridge1")]
+    [InlineData("vlan99")]
+    [InlineData("ether1")]
+    [InlineData("Bridge-VLAN-99_MGMT")]
+    public void Derive_RejectsEligibleAddressOnNonLoopbackInterface(string iface)
+    {
+        OspfLoopbackRouterIdResult result = OspfLoopbackRouterId.Derive(
+        [
+            new OspfIpAddressRow { Address = "10.100.20.5/32", Network = "10.100.20.5", Interface = iface },
+        ]);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Errors, e => e.Contains("Loopback interface is missing", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Two distinct 10/8 Loopbacks without router-id corroboration fail closed (no 10.16 preference).
+    /// </summary>
+    [Fact]
+    public void Derive_Fails_WhenMultipleTenSlashEightAddressesWithoutCorroboration()
+    {
+        OspfLoopbackRouterIdResult result = OspfLoopbackRouterId.Derive(
+        [
+            new OspfIpAddressRow { Address = "10.16.0.1/32", Network = "10.16.0.1", Interface = "Loopback" },
+            new OspfIpAddressRow { Address = "10.255.1.1/32", Network = "10.255.1.1", Interface = "Loopback" },
+        ]);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Errors, e => e.Contains("Multiple distinct in-scope", StringComparison.Ordinal));
+        Assert.Contains(result.Errors, e => e.Contains("10.0.0.0/8", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Instance router-id corroboration uniquely selects among multiple 10/8 Loopbacks.
+    /// </summary>
+    [Fact]
+    public void Derive_SelectsCorroboratedAddress_AcrossFormerSixteenBoundary()
+    {
+        OspfLoopbackRouterIdResult result = OspfLoopbackRouterId.Derive(
+        [
+            new OspfIpAddressRow { Address = "10.16.0.1/32", Network = "10.16.0.1", Interface = "Loopback" },
+            new OspfIpAddressRow { Address = "10.100.20.5/32", Network = "10.100.20.5", Interface = "Loopback" },
+        ],
+        corroboratingRouterId: "10.100.20.5");
+
+        Assert.True(result.Succeeded, result.Detail);
+        Assert.Equal("10.100.20.5", result.RouterId);
+        Assert.Equal(2, result.ObservedInScopeAddresses.Count);
+        Assert.Empty(result.IgnoredOutsideRangeAddresses);
     }
 
     /// <summary>
@@ -248,8 +342,9 @@ public sealed class OspfLoopbackRouterIdTests
 
     /// <summary>
     /// Scenario: interface-name and host-scope helpers are queried with a spread of names and addresses.
-    /// Expected: "bridge-loopback", "lo0" and "ether1" are rejected; "LO" and "loopback" are accepted (case-insensitive); 10.16.0.11 is an infrastructure-scope host and 172.16.150.253 is not.
-    /// Invariant: only the exact names <c>lo</c> and <c>Loopback</c> count as loopbacks, and only in-range hosts count as infrastructure scope.
+    /// Expected: "bridge-loopback", "lo0" and "ether1" are rejected; "LO" and "loopback" are accepted (case-insensitive);
+    /// hosts in 10.0.0.0/8 are in-scope; 172.16.150.253 is not.
+    /// Invariant: only the exact names <c>lo</c>/<c>Loopback</c>/<c>Loopback-OSPF</c> count as loopbacks.
     /// </summary>
     [Fact]
     public void IsSupportedLoopbackInterfaceName_RejectsUnrelatedNames()
@@ -260,6 +355,9 @@ public sealed class OspfLoopbackRouterIdTests
         Assert.True(OspfLoopbackRouterId.IsSupportedLoopbackInterfaceName("LO"));
         Assert.True(OspfLoopbackRouterId.IsSupportedLoopbackInterfaceName("loopback"));
         Assert.True(OspfLoopbackRouterId.IsInfrastructureScopeHost("10.16.0.11"));
+        Assert.True(OspfLoopbackRouterId.IsInfrastructureScopeHost("10.0.0.1"));
+        Assert.True(OspfLoopbackRouterId.IsInfrastructureScopeHost("10.255.255.254"));
         Assert.False(OspfLoopbackRouterId.IsInfrastructureScopeHost("172.16.150.253"));
+        Assert.Equal("10.0.0.0/8", OspfLoopbackRouterId.InfrastructureScopeCidr);
     }
 }

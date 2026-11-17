@@ -15,7 +15,7 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// <remarks>
 /// Target fleet identities are:
 /// instance <c>default-v2</c>, backbone <c>backbone-v2</c>/<c>0.0.0.0</c>,
-/// site <c>{Identity}-v2</c>/<c>{Loopback}</c>, Router ID = Loopback <c>/32</c> in <c>10.16.0.0/24</c>.
+/// site <c>{Identity}-v2</c>/<c>{Loopback}</c>, Router ID = Loopback <c>/32</c> in <c>10.0.0.0/8</c>.
 /// Legacy live instance/area names and non-matching live router-ids are discovery inputs;
 /// migration renames/normalises them. Live <c>.id</c> values are ephemeral for the current
 /// inventory snapshot only.

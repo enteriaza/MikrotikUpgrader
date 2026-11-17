@@ -132,7 +132,7 @@ Live Tommy harnesses were **not** armed and were excluded (fail-closed without e
 Preserved:
 
 - Mandatory OSPFv3 removal; incomplete inventory cannot prove removal  
-- `default-v2` instance; literal Loopback `/32` router-id in `10.16.0.0/24`  
+- `default-v2` instance; literal Loopback `/32` router-id in `10.0.0.0/8`  
 - Management `/24` expansion rules; no supernet merge; disabled/unknown excluded  
 - Backhaul cost 10; post-mutation backbone guard  
 - Central verified backup before OSPF mutation  

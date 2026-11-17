@@ -134,12 +134,12 @@ public sealed class OspfFleetFixtureMatrixTests
     /// <summary>
     /// Scenario: a RouterOS 7 Loopback holding 172.16.150.253, 102.66.242.100 and 10.16.0.254.
     /// Expected: router-id 10.16.0.254 is chosen, two outside-range addresses are recorded as ignored, and the v2 naming helpers return default-v2, backbone-v2 and '&lt;identity&gt;-v2'.
-    /// Invariant: only the in-scope 10.16.0.0/24 loopback address can become the router-id; extras are ignored rather than fatal.
+    /// Invariant: only an in-scope 10.0.0.0/8 loopback address can become the router-id; extras outside 10/8 are ignored rather than fatal.
     /// </summary>
     [Fact]
     public void RustenburgRos7_MultipleLoopbackAddresses_SelectsInScopeIdentity()
     {
-        // ROS7 naming reference fixture — outside-range Loopbacks are ignored; sole 10.16.0.0/24 address wins.
+        // ROS7 naming reference fixture — outside-range Loopbacks are ignored; sole 10.0.0.0/8 address wins.
         OspfLoopbackRouterIdResult rid = OspfLoopbackRouterId.Derive(
         [
             new OspfIpAddressRow { Address = "172.16.150.253", Network = "172.16.150.253", Interface = "Loopback" },

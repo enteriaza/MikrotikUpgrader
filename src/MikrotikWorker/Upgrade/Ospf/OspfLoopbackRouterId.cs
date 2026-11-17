@@ -14,7 +14,7 @@ namespace MikrotikWorker.Upgrade.Ospf;
 
 /// <summary>
 /// Authoritative OSPF Router ID derivation from the dedicated Loopback IPv4 <c>/32</c>
-/// inside the BR identity range <c>10.16.0.0/24</c>.
+/// inside <c>10.0.0.0/8</c>.
 /// </summary>
 /// <remarks>
 /// Supported Loopback interface names from fleet fixtures (exact, case-insensitive):
@@ -22,7 +22,7 @@ namespace MikrotikWorker.Upgrade.Ospf;
 /// interface names — never backhaul, management, or PPPoE addresses.
 /// RouterOS export may omit <c>/32</c> for host addresses; those are normalised to <c>/32</c>.
 /// Multiple Loopback addresses are allowed: outside-range addresses are ignored for migration
-/// identity; only unambiguous in-scope (<c>10.16.0.0/24</c>) identity is selected.
+/// identity; only unambiguous in-scope (<c>10.0.0.0/8</c>) identity is selected.
 /// The selected host address is the literal target OSPF router-id (never a hostname or
 /// <c>/routing/id</c> symbolic name).
 /// </remarks>
@@ -41,9 +41,10 @@ internal static class OspfLoopbackRouterId
     /// </summary>
     public const string InterfaceNameLoopbackOspf = "Loopback-OSPF";
     /// <summary>
-    /// CIDR of the BR Loopback identity range; only Loopback hosts inside it can supply the Router ID.
+    /// CIDR of eligible Loopback identity hosts; only Loopback <c>/32</c> addresses inside
+    /// <c>10.0.0.0/8</c> can supply the Router ID (not restricted to <c>10.16.0.0/24</c>).
     /// </summary>
-    public const string InfrastructureScopeCidr = "10.16.0.0/24";
+    public const string InfrastructureScopeCidr = "10.0.0.0/8";
 
     /// <summary>
     /// Parsed form of <see cref="InfrastructureScopeCidr"/> used for host containment checks.
@@ -139,7 +140,7 @@ internal static class OspfLoopbackRouterId
             if (ignoredDisabled.Count > 0 && ignoredOutside.Count == 0)
             {
                 return Failed(
-                    "No eligible (enabled) in-scope (10.16.0.0/24) Loopback IPv4 address found for migration "
+                    "No eligible (enabled) in-scope (10.0.0.0/8) Loopback IPv4 address found for migration "
                     + "identity. Disabled/unknown Loopback address(es) were excluded: "
                     + string.Join(", ", ignoredDisabled)
                     + ".");
@@ -148,7 +149,7 @@ internal static class OspfLoopbackRouterId
             if (ignoredOutside.Count > 0)
             {
                 return Failed(
-                    "No in-scope (10.16.0.0/24) Loopback IPv4 address found for migration identity. "
+                    "No in-scope (10.0.0.0/8) Loopback IPv4 address found for migration identity. "
                     + "Ignored outside-range Loopback address(es): "
                     + string.Join(", ", ignoredOutside)
                     + (ignoredDisabled.Count == 0
@@ -182,7 +183,7 @@ internal static class OspfLoopbackRouterId
         else
         {
             return Failed(
-                "Multiple distinct in-scope (10.16.0.0/24) Loopback addresses present ("
+                "Multiple distinct in-scope (10.0.0.0/8) Loopback addresses present ("
                 + string.Join(", ", uniqueHosts)
                 + "); refusing to select a Router ID without unambiguous corroborating OSPF router-id."
                 + (string.IsNullOrWhiteSpace(corroboratingRouterId)

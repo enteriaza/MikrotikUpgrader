@@ -565,7 +565,7 @@ internal sealed class OspfMigrationPlan
     public string? LoopbackCidr { get; init; }
 
     /// <summary>
-    /// Distinct in-scope (<c>10.16.0.0/24</c>) Loopback hosts observed during Router ID selection.
+    /// Distinct in-scope (<c>10.0.0.0/8</c>) Loopback hosts observed during Router ID selection.
     /// </summary>
     public IReadOnlyList<string> ObservedInScopeLoopbackAddresses { get; init; } = [];
 
@@ -997,7 +997,7 @@ internal sealed class OspfMigrationPlanHashPayload
     public string? LoopbackInterfaceName { get; init; }
     /// <summary>Selected loopback CIDR used for Router ID derivation.</summary>
     public string? LoopbackCidr { get; init; }
-    /// <summary>Distinct in-scope (<c>10.16.0.0/24</c>) loopback hosts observed during Router ID selection.</summary>
+    /// <summary>Distinct in-scope (<c>10.0.0.0/8</c>) loopback hosts observed during Router ID selection.</summary>
     public required IReadOnlyList<string> ObservedInScopeLoopbackAddresses { get; init; }
     /// <summary>Outside-range loopback hosts ignored for migration identity (configuration is preserved).</summary>
     public required IReadOnlyList<string> IgnoredOutsideRangeLoopbackAddresses { get; init; }

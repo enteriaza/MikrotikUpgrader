@@ -300,13 +300,20 @@ public sealed class OspfProductionCompatibilityPolicyTests
     }
 
     [Fact]
-    public void LoopbackDerive_RequiresTenSixteenZeroSlash24Scope()
+    public void LoopbackDerive_RequiresTenSlashEightScope()
     {
         OspfLoopbackRouterIdResult outside = OspfLoopbackRouterId.Derive(
         [
-            new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
+            new OspfIpAddressRow { Address = "172.16.0.1/32", Network = "172.16.0.1", Interface = "lo" },
         ]);
         Assert.False(outside.Succeeded);
+
+        OspfLoopbackRouterIdResult acrossFormerBoundary = OspfLoopbackRouterId.Derive(
+        [
+            new OspfIpAddressRow { Address = "10.255.0.1/32", Network = "10.255.0.1", Interface = "lo" },
+        ]);
+        Assert.True(acrossFormerBoundary.Succeeded, acrossFormerBoundary.Detail);
+        Assert.Equal("10.255.0.1", acrossFormerBoundary.RouterId);
 
         OspfLoopbackRouterIdResult inside = OspfLoopbackRouterId.Derive(
             OspfTestBaselines.LoopbackSlash32("10.16.0.14", "Loopback"));

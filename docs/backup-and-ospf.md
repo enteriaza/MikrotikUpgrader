@@ -50,7 +50,7 @@ Migration exists to move **legacy** configurations into the **target** fleet arc
 
 ### Router ID
 
-- Authoritative identity is the dedicated Loopback `/32` in `10.16.0.0/24` (supported names: `lo`, `Loopback`, `Loopback-OSPF`).
+- Authoritative identity is the dedicated Loopback `/32` in `10.0.0.0/8` (not restricted to `10.16.0.0/24`; supported names: `lo`, `Loopback`, `Loopback-OSPF`). Ambiguous or conflicting Loopback/router-id evidence fails closed. The OSPFv2 instance remains `default-v2` with the literal Loopback IP as router-id.
 - Target OSPF instance `router-id` is the **literal IPv4 address** from that loopback (for example `10.16.0.4`), never a hostname or symbolic name.
 - Legacy values (`main`, hostnames, `/routing/id` references) are migration inputs. They do not block planning.
 - Apply sets the literal loopback IP on the OSPFv2 instance and verifies it from fresh live inventory.
