@@ -194,19 +194,35 @@ internal static class SchedulerExecutionTestHost
 /// Fake upgrade executor for scheduler/preflight tests. Defaults to a verified-target success so those tests
 /// exercise the connect/assess/disconnect path; pass another outcome to test job-outcome mapping.
 /// </summary>
-/// <param name="outcome">Outcome returned by every <see cref="ExecuteAsync"/> call.</param>
-internal sealed class StubUpgradeExecutor(UpgradeOutcome outcome = UpgradeOutcome.UpgradeSucceeded) : IRouterOsV6UpgradeExecutor
+internal sealed class StubUpgradeExecutor : IRouterOsV6UpgradeExecutor
 {
-    /// <summary>Returns the configured outcome without touching the router.</summary>
-    /// <param name="connection">Router connection (unused).</param>
-    /// <param name="job">Scheduled job (unused).</param>
-    /// <param name="deviceInfo">Device info (unused).</param>
-    /// <param name="assessment">Compatibility assessment (unused).</param>
-    /// <param name="username">Router user name (unused).</param>
-    /// <param name="password">Router password (unused).</param>
-    /// <param name="isWithinScheduleWindow">Schedule-window check (unused).</param>
-    /// <param name="cancellationToken">Token (unused).</param>
-    /// <returns>A completed task containing a result with the configured outcome.</returns>
+    private readonly UpgradeOutcome _outcome;
+    private readonly string? _detail;
+    private readonly Exception? _failure;
+    private readonly Func<int, UpgradeExecutionResult>? _resultFactory;
+
+    /// <summary>Creates a stub that always returns <paramref name="outcome"/>.</summary>
+    public StubUpgradeExecutor(
+        UpgradeOutcome outcome = UpgradeOutcome.UpgradeSucceeded,
+        string? detail = null,
+        Exception? failure = null)
+    {
+        _outcome = outcome;
+        _detail = detail;
+        _failure = failure;
+    }
+
+    /// <summary>Creates a stub that builds a result from the 1-based attempt number.</summary>
+    public StubUpgradeExecutor(Func<int, UpgradeExecutionResult> resultFactory)
+    {
+        _resultFactory = resultFactory;
+        _outcome = UpgradeOutcome.UpgradeSucceeded;
+    }
+
+    /// <summary>Number of times <see cref="ExecuteAsync"/> has been invoked.</summary>
+    public int Attempts { get; private set; }
+
+    /// <inheritdoc />
     public Task<UpgradeExecutionResult> ExecuteAsync(
         ITikConnection connection,
         MikrotikScheduledJob job,
@@ -215,8 +231,24 @@ internal sealed class StubUpgradeExecutor(UpgradeOutcome outcome = UpgradeOutcom
         string username,
         string password,
         Func<bool> isWithinScheduleWindow,
-        CancellationToken cancellationToken) =>
-        Task.FromResult(new UpgradeExecutionResult { Outcome = outcome, Detail = $"Stub outcome {outcome}" });
+        CancellationToken cancellationToken)
+    {
+        Attempts++;
+        if (_resultFactory is not null)
+        {
+            return Task.FromResult(_resultFactory(Attempts));
+        }
+
+        return Task.FromResult(new UpgradeExecutionResult
+        {
+            Outcome = _outcome,
+            Detail = _detail ?? $"Stub outcome {_outcome}",
+            Failure = _failure,
+            CompletedStage = UpgradeCompletedStages.None,
+            RebootInitiated = false,
+            TransportRetryEligible = _outcome == UpgradeOutcome.TransientTransportFailure,
+        });
+    }
 }
 
 /// <summary>

@@ -553,8 +553,13 @@ internal sealed class RouterOsV6UpgradeExecutor(
                     PostUpgradeVersion = stage2.Execution.PostUpgradeVersion ?? workingDevice.Version,
                     PostUpgradeArchitecture =
                         stage2.PostDeviceInfo?.ArchitectureName ?? workingDevice.ArchitectureName,
+                    // Prior verified stage may have rebooted; dispose still needs RebootInitiated.
                     RebootInitiated = rebootInitiated || stage2.Execution.RebootInitiated,
+                    // Scheduler transport retry is allowed only when this stage never reached install/reboot.
+                    TransportRetryEligible = stage2.Execution.TransportRetryEligible
+                        && !stage2.Execution.RebootInitiated,
                     CompletedStage = completedAfterV6,
+                    Failure = stage2.Execution.Failure,
                 };
             }
 
@@ -723,7 +728,9 @@ internal sealed class RouterOsV6UpgradeExecutor(
             PostUpgradeVersion = result.PostUpgradeVersion,
             PostUpgradeArchitecture = postArchitecture ?? result.PostUpgradeArchitecture,
             RebootInitiated = result.RebootInitiated,
+            TransportRetryEligible = result.TransportRetryEligible,
             CompletedStage = completedStage ?? result.CompletedStage,
+            Failure = result.Failure,
         };
 
     /// <summary>
@@ -929,8 +936,14 @@ internal sealed class RouterOsV6UpgradeExecutor(
         }
 
         logger.LogInformation(
-            "Required packages resolved: {SelectedPackages}",
+            "Required packages resolved: layout={Layout}, count={PackageCount}, packages={SelectedPackages}",
+            resolution.Layout,
+            resolution.Packages.Count,
             string.Join(", ", resolution.Packages.Select(p => $"{p.CatalogPackage.FileName}:{p.CatalogPackage.SizeBytes}")));
+        foreach (string diagnostic in resolution.Diagnostics)
+        {
+            logger.LogInformation("Package resolution diagnostic: {Diagnostic}", diagnostic);
+        }
 
         logger.LogInformation("{Stage} backup prerequisite starting", stageLabel);
         DeviceBackupResult backup = await backupService
@@ -992,10 +1005,35 @@ internal sealed class RouterOsV6UpgradeExecutor(
             catch (Exception ex)
             {
                 logger.LogError(ex, "Fetch failed for {PackageFile}", dst);
+                FirmwareTransportFailureClassifier.Kind kind = FirmwareTransportFailureClassifier.ClassifyException(ex);
+                if (kind == FirmwareTransportFailureClassifier.Kind.Cancellation)
+                {
+                    return StageExecutionResult.Failed(new UpgradeExecutionResult
+                    {
+                        Outcome = UpgradeOutcome.UpgradeInterrupted,
+                        Detail = $"Cancelled during {stageLabel} package download.",
+                        Failure = ex,
+                    });
+                }
+
+                bool transient = kind == FirmwareTransportFailureClassifier.Kind.TransientTransport;
+                if (transient)
+                {
+                    logger.LogWarning(
+                        "Package fetch classified as transient transport failure (scheduler Connection retry). "
+                        + "Package={PackageFile}, ExceptionType={ExceptionType}",
+                        dst,
+                        ex.GetType().Name);
+                }
+
                 return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
-                    Outcome = UpgradeOutcome.UpgradeFailed,
+                    Outcome = transient
+                        ? UpgradeOutcome.TransientTransportFailure
+                        : UpgradeOutcome.UpgradeFailed,
                     Detail = $"Fetch failed for '{dst}': {ex.Message}",
+                    Failure = ex,
+                    TransportRetryEligible = transient,
                 });
             }
 
@@ -1012,14 +1050,22 @@ internal sealed class RouterOsV6UpgradeExecutor(
                 RouterFileInfo? current = await routerOperations
                     .FindFileAsync(connection, dst, cancellationToken)
                     .ConfigureAwait(false);
+                string incompleteDetail = current is null
+                    ? $"Downloaded file '{dst}' is missing on the router."
+                    : current.SizeBytes <= 0
+                        ? $"Downloaded file '{dst}' is empty."
+                        : $"Downloaded file '{dst}' size mismatch (router={current.SizeBytes}, expected={package.CatalogPackage.SizeBytes}).";
+                logger.LogWarning(
+                    "Package fetch incomplete after transfer; classifying as transient transport failure. "
+                    + "Package={PackageFile}, Detail={Detail}",
+                    dst,
+                    incompleteDetail);
                 return StageExecutionResult.Failed(new UpgradeExecutionResult
                 {
-                    Outcome = UpgradeOutcome.UpgradeFailed,
-                    Detail = current is null
-                        ? $"Downloaded file '{dst}' is missing on the router."
-                        : current.SizeBytes <= 0
-                            ? $"Downloaded file '{dst}' is empty."
-                            : $"Downloaded file '{dst}' size mismatch (router={current.SizeBytes}, expected={package.CatalogPackage.SizeBytes}).",
+                    Outcome = UpgradeOutcome.TransientTransportFailure,
+                    Detail = incompleteDetail,
+                    Failure = new IOException(incompleteDetail),
+                    TransportRetryEligible = true,
                 });
             }
 

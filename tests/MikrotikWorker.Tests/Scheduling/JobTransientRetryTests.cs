@@ -16,6 +16,7 @@ using Microsoft.Extensions.Options;
 using MikrotikWorker.Configuration;
 using MikrotikWorker.MikroTik;
 using MikrotikWorker.Scheduling;
+using MikrotikWorker.Upgrade;
 using tik4net;
 using tik4net.Testing;
 
@@ -26,6 +27,166 @@ namespace MikrotikWorker.Tests.Scheduling;
 /// </summary>
 public sealed class JobTransientRetryTests
 {
+    /// <summary>
+    /// Transient package-fetch failure after a successful connect requeues with the Connection delay/budget.
+    /// </summary>
+    [Fact]
+    public async Task FirmwareTransportFailure_FirstFailure_RequeuesAboutTenMinutesLater()
+    {
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero));
+        SucceedingConnectionFactory factory = new();
+        StubUpgradeExecutor upgrades = new(
+            UpgradeOutcome.TransientTransportFailure,
+            detail: "Fetch failed for 'advanced-tools-6.49.23-mipsbe.npk': connection lost",
+            failure: new TikConnectionReceiveTimeoutException(30_000, new TimeoutException("recv")));
+
+        await using RetryHarness harness = await RetryHarness.CreateAsync(
+            time,
+            factory,
+            upgradeExecutor: upgrades);
+
+        MikrotikScheduledJob job = await harness.ScheduleSingleAsync();
+        await WaitForAsync(() => job.ConnectionFailureCount == 1, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(JobRetryFailureCategory.FirmwareTransport, job.LastRetryFailureCategory);
+        Assert.NotNull(job.NextRetryUtc);
+        Assert.Equal(time.GetUtcNow().AddMinutes(10), job.NextRetryUtc);
+        Assert.Equal(1, harness.Scheduler.QueuedCount);
+        Assert.Equal(0, harness.Scheduler.DispatchedCount);
+        Assert.Equal(1, upgrades.Attempts);
+        Assert.True(harness.Scheduler.IsTracked(job.ImportId));
+    }
+
+    /// <summary>
+    /// Firmware transport failures share the Connection unsuccessful-attempt limit; the 11th is terminal.
+    /// </summary>
+    [Fact]
+    public async Task FirmwareTransportFailures_AttemptsOneThroughTen_AreRetryable_EleventhIsTerminal()
+    {
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero));
+        SucceedingConnectionFactory factory = new();
+        StubUpgradeExecutor upgrades = new(
+            UpgradeOutcome.TransientTransportFailure,
+            detail: "Fetch failed: connection lost",
+            failure: new TikConnectionReceiveTimeoutException(30_000, new TimeoutException("recv")));
+
+        await using RetryHarness harness = await RetryHarness.CreateAsync(
+            time,
+            factory,
+            new JobRetryOptions
+            {
+                ConnectionRetryDelay = TimeSpan.FromMinutes(10),
+                MaximumUnsuccessfulAttempts = 10,
+            },
+            upgradeExecutor: upgrades);
+
+        MikrotikScheduledJob job = await harness.ScheduleSingleAsync();
+
+        for (int attempt = 1; attempt <= 10; attempt++)
+        {
+            await WaitForAsync(() => job.ConnectionFailureCount == attempt, TimeSpan.FromSeconds(5));
+            Assert.Equal(1, harness.Scheduler.QueuedCount);
+            Assert.True(harness.Scheduler.IsTracked(job.ImportId));
+            Assert.Equal(JobRetryFailureCategory.FirmwareTransport, job.LastRetryFailureCategory);
+
+            time.Advance(TimeSpan.FromMinutes(10));
+            harness.Scheduler.NudgeWake();
+        }
+
+        await WaitForAsync(() => job.ConnectionFailureCount == 11, TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => !harness.Scheduler.IsTracked(job.ImportId), TimeSpan.FromSeconds(5));
+        Assert.Null(job.NextRetryUtc);
+        Assert.Equal(11, upgrades.Attempts);
+    }
+
+    /// <summary>
+    /// Permanent upgrade failure is not requeued as firmware transport.
+    /// </summary>
+    [Fact]
+    public async Task PermanentUpgradeFailed_IsTerminalWithoutTransportRetry()
+    {
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero));
+        SucceedingConnectionFactory factory = new();
+        StubUpgradeExecutor upgrades = new(
+            UpgradeOutcome.UpgradeFailed,
+            detail: "Fetch failed: 404 Not Found",
+            failure: new InvalidOperationException("Fetch failed: 404 Not Found"));
+
+        await using RetryHarness harness = await RetryHarness.CreateAsync(
+            time,
+            factory,
+            upgradeExecutor: upgrades);
+
+        MikrotikScheduledJob job = await harness.ScheduleSingleAsync();
+        await WaitForAsync(() => !harness.Scheduler.IsTracked(job.ImportId), TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, job.ConnectionFailureCount);
+        Assert.Null(job.NextRetryUtc);
+        Assert.Equal(1, upgrades.Attempts);
+    }
+
+    /// <summary>
+    /// Prior-stage reboot with a later pre-install transport failure remains scheduler-retryable.
+    /// </summary>
+    [Fact]
+    public async Task TransientTransport_WithPriorStageReboot_StillRequeuesWhenEligible()
+    {
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero));
+        SucceedingConnectionFactory factory = new();
+        StubUpgradeExecutor upgrades = new(_ => new UpgradeExecutionResult
+        {
+            Outcome = UpgradeOutcome.TransientTransportFailure,
+            Detail = "v7 fetch lost after verified v6 stepping",
+            Failure = new TikConnectionReceiveTimeoutException(30_000, new TimeoutException("recv")),
+            RebootInitiated = true,
+            TransportRetryEligible = true,
+            CompletedStage = UpgradeCompletedStages.V6Stepping,
+        });
+
+        await using RetryHarness harness = await RetryHarness.CreateAsync(
+            time,
+            factory,
+            upgradeExecutor: upgrades);
+
+        MikrotikScheduledJob job = await harness.ScheduleSingleAsync();
+        await WaitForAsync(() => job.ConnectionFailureCount == 1, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(JobRetryFailureCategory.FirmwareTransport, job.LastRetryFailureCategory);
+        Assert.Equal(time.GetUtcNow().AddMinutes(10), job.NextRetryUtc);
+        Assert.True(harness.Scheduler.IsTracked(job.ImportId));
+    }
+
+    /// <summary>
+    /// TransientTransport without TransportRetryEligible is terminal (post-install boundary).
+    /// </summary>
+    [Fact]
+    public async Task TransientTransport_NotEligible_IsTerminal()
+    {
+        FakeTimeProvider time = new(new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero));
+        SucceedingConnectionFactory factory = new();
+        StubUpgradeExecutor upgrades = new(_ => new UpgradeExecutionResult
+        {
+            Outcome = UpgradeOutcome.TransientTransportFailure,
+            Detail = "should not requeue after install boundary",
+            Failure = new IOException("post-install"),
+            RebootInitiated = true,
+            TransportRetryEligible = false,
+            CompletedStage = UpgradeCompletedStages.V6Stepping,
+        });
+
+        await using RetryHarness harness = await RetryHarness.CreateAsync(
+            time,
+            factory,
+            upgradeExecutor: upgrades);
+
+        MikrotikScheduledJob job = await harness.ScheduleSingleAsync();
+        await WaitForAsync(() => !harness.Scheduler.IsTracked(job.ImportId), TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, job.ConnectionFailureCount);
+        Assert.Null(job.NextRetryUtc);
+        Assert.Equal(1, upgrades.Attempts);
+    }
+
     /// <summary>
     /// TimeoutException on connect.
     /// Expects ConnectionFailureCount=1, NextRetryUtc ≈ now+10m, queued not dispatched.
@@ -519,6 +680,16 @@ public sealed class JobTransientRetryTests
     /// Always throws the supplied exception; counts CreateAsync attempts.
     /// </summary>
     /// <param name="exception">Exception thrown on every connection attempt.</param>
+    /// <summary>Always returns a populated fake connection.</summary>
+    private sealed class SucceedingConnectionFactory : IMikrotikConnectionFactory
+    {
+        /// <inheritdoc />
+        public Task<ITikConnection> CreateAsync(
+            MikrotikConnectionOptions connection,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<ITikConnection>(FakeMikrotikConnections.CreateFullyPopulated());
+    }
+
     private sealed class CountingFailFactory(Exception exception) : IMikrotikConnectionFactory
     {
         /// <summary>
@@ -794,13 +965,15 @@ public sealed class JobTransientRetryTests
             FakeTimeProvider time,
             IMikrotikConnectionFactory factory,
             JobRetryOptions? retryOptions = null,
-            int maxConcurrentRouterJobs = 12)
+            int maxConcurrentRouterJobs = 12,
+            IRouterOsV6UpgradeExecutor? upgradeExecutor = null)
         {
             ExecutionHarnessParts parts = await ExecutionHarnessParts.CreateAsync(
                 time,
                 factory,
                 retryOptions ?? new JobRetryOptions(),
-                maxConcurrentRouterJobs);
+                maxConcurrentRouterJobs,
+                upgradeExecutor);
             return new RetryHarness(parts);
         }
 
@@ -908,7 +1081,8 @@ public sealed class JobTransientRetryTests
             FakeTimeProvider time,
             IMikrotikConnectionFactory factory,
             JobRetryOptions retryOptions,
-            int maxConcurrentRouterJobs)
+            int maxConcurrentRouterJobs,
+            IRouterOsV6UpgradeExecutor? upgradeExecutor = null)
         {
             string root = TestHostFactory.CreateScheduledJobsRoot();
             ScheduledJobsOptions options = new()
@@ -931,7 +1105,8 @@ public sealed class JobTransientRetryTests
                     connectionFactory: factory,
                     mikroTikEnabled: true,
                     executionWorkers: maxConcurrentRouterJobs,
-                    jobRetryOptions: retryOptions);
+                    jobRetryOptions: retryOptions,
+                    upgradeExecutor: upgradeExecutor);
 
             return Task.FromResult(new ExecutionHarnessParts(
                 scheduler,

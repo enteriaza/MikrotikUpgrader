@@ -214,6 +214,21 @@ internal sealed class PackageCompatibilityAuditor(
 
         if (resolution.Succeeded)
         {
+            List<PackageResolutionDiagnostic> targetDifferences = resolution.PackageDiagnostics
+                .Where(static d => d.Disposition is PackageResolutionDisposition.NotDistributedInTargetRelease
+                    or PackageResolutionDisposition.NotDistributedForTargetArchitecture
+                    or PackageResolutionDisposition.NoSeparateTargetCounterpart)
+                .ToList();
+            string explanation =
+                $"Catalogue can satisfy {resolution.Packages.Count} independently installed package(s) for target {target}.";
+            if (targetDifferences.Count > 0)
+            {
+                explanation += " Target-release differences (not failures): "
+                    + string.Join(
+                        "; ",
+                        targetDifferences.Select(static d => $"{d.PackageIdentity}={d.Disposition}"));
+            }
+
             return new PackageCompatibilityStageResult
             {
                 RouterIp = device.RouterIp,
@@ -230,8 +245,7 @@ internal sealed class PackageCompatibilityAuditor(
                 ResolvedPackageFileNames = resolution.Packages
                     .Select(static p => p.CatalogPackage.FileName)
                     .ToList(),
-                Explanation =
-                    $"Catalogue can satisfy {resolution.Packages.Count} independently installed package(s) for target {target}.",
+                Explanation = explanation,
                 IsEligibleForV7Policy = classification.ShouldUpgradeToV7,
                 DeviceType = classification.DeviceType,
             };
@@ -443,7 +457,8 @@ internal sealed class PackageCompatibilityAuditor(
     /// <returns><see langword="true"/> when it is a main RouterOS package.</returns>
     private static bool IsMainFailure(string? installedName) =>
         !string.IsNullOrWhiteSpace(installedName)
-        && UpgradePackageResolver.IsMainRouterOsPackage(installedName);
+        && (UpgradePackageResolver.IsMainRouterOsPackage(installedName)
+            || UpgradePackageResolver.IsSystemPackage(installedName));
 
     /// <summary>
     /// Builds a stage result for a decision made without package resolution.

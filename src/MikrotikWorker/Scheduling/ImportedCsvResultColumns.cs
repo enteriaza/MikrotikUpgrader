@@ -85,7 +85,8 @@ internal static class ImportedCsvResultColumns
     /// </summary>
     private static string FormatFailed(string? detail, MikrotikScheduledJob job)
     {
-        if (job.LastRetryFailureCategory == JobRetryFailureCategory.Connection)
+        if (job.LastRetryFailureCategory is JobRetryFailureCategory.Connection
+            or JobRetryFailureCategory.FirmwareTransport)
         {
             return Concise("Failed - Connection", detail ?? job.LastRetryFailureReason);
         }

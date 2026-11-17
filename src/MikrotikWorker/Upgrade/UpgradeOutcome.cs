@@ -104,6 +104,12 @@ public enum UpgradeOutcome
     /// or OSPFv2 redistribute/out-filter-chain verification).
     /// </summary>
     OspfStaticSummaryRedistributionFailed = 25,
+
+    /// <summary>
+    /// Transient package-fetch or transport failure before installation/reboot.
+    /// Eligible for scheduler-level Connection retry (same delay/attempt limits as connect failures).
+    /// </summary>
+    TransientTransportFailure = 26,
 }
 
 /// <summary>
@@ -164,8 +170,21 @@ public sealed class UpgradeExecutionResult
     public bool RebootInitiated { get; init; }
 
     /// <summary>
+    /// When <see cref="Outcome"/> is <see cref="UpgradeOutcome.TransientTransportFailure"/>, whether the
+    /// scheduler may requeue this attempt. True only when the failing package stage has not yet issued a
+    /// reboot for that stage (a prior verified stage reboot may still set <see cref="RebootInitiated"/>).
+    /// </summary>
+    public bool TransportRetryEligible { get; init; }
+
+    /// <summary>
     /// Highest upgrade stage whose verification succeeded.
     /// Use <see cref="UpgradeCompletedStages"/> values; never claim a stage that failed or was skipped.
     /// </summary>
     public string? CompletedStage { get; init; }
+
+    /// <summary>
+    /// Underlying failure when <see cref="Outcome"/> is a failure; used for transport classification.
+    /// Never contains credentials.
+    /// </summary>
+    public Exception? Failure { get; init; }
 }

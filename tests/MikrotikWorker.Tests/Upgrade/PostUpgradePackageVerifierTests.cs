@@ -264,6 +264,241 @@ public sealed class PostUpgradePackageVerifierTests
     }
 
     /// <summary>
+    /// Individual layout: post-upgrade inventory has independent <c>system</c> (no combined routeros) and
+    /// required packages include system + wireless. Verification succeeds.
+    /// </summary>
+    [Fact]
+    public void Individual_SystemCore_WithoutCombinedRouterOs_Passes()
+    {
+        ResolvedUpgradePackage system = Required(
+            "system",
+            "system",
+            Catalog("system", "system-6.49.23-arm.npk", "arm", V6));
+        ResolvedUpgradePackage wireless = Required(
+            "wireless",
+            "wireless",
+            Catalog("wireless", "wireless-6.49.23-arm.npk", "arm", V6));
+
+        PostUpgradePackageVerification result = PostUpgradePackageVerifier.Verify(
+            V6,
+            "arm",
+            [Indep("system", "6.49.23"), Indep("wireless", "6.49.23"), Indep("routing", "6.49.23")],
+            [system, wireless]);
+
+        Assert.True(result.Succeeded, result.Detail);
+    }
+
+    /// <summary>
+    /// Individual layout verification fails when system is missing even if other packages are present.
+    /// </summary>
+    [Fact]
+    public void Individual_MissingSystem_Fails()
+    {
+        ResolvedUpgradePackage system = Required(
+            "system",
+            "system",
+            Catalog("system", "system-6.49.23-arm.npk", "arm", V6));
+
+        PostUpgradePackageVerification result = PostUpgradePackageVerifier.Verify(
+            V6,
+            "arm",
+            [Indep("wireless", "6.49.23")],
+            [system]);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("system", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "missing an independent main RouterOS package",
+            result.Detail,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Combined requirement still fails when only individual packages are present (no routeros).
+    /// </summary>
+    [Fact]
+    public void CombinedRequirement_IndividualInventoryWithoutRouterOs_Fails()
+    {
+        ResolvedUpgradePackage required = Required(
+            "routeros-arm",
+            "routeros-arm",
+            Catalog("routeros", "routeros-arm-6.49.23.npk", "arm", V6));
+
+        PostUpgradePackageVerification result = PostUpgradePackageVerifier.Verify(
+            V6,
+            "arm",
+            [Indep("system", "6.49.23")],
+            [required]);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("main RouterOS package", result.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Optional package absence does not fail when it was not in the required resolved set.
+    /// </summary>
+    [Fact]
+    public void Individual_OptionalNotRequired_AbsenceDoesNotFail()
+    {
+        ResolvedUpgradePackage system = Required(
+            "system",
+            "system",
+            Catalog("system", "system-6.49.23-arm.npk", "arm", V6));
+
+        PostUpgradePackageVerification result = PostUpgradePackageVerifier.Verify(
+            V6,
+            "arm",
+            [Indep("system", "6.49.23")],
+            [system]);
+
+        Assert.True(result.Succeeded, result.Detail);
+    }
+
+    /// <summary>
+    /// End-to-end resolve+verify for individual v6 stepping: resolve against catalogue then verify
+    /// the staged expectation against a post-upgrade individual inventory.
+    /// </summary>
+    [Fact]
+    public void ScenarioB_IndividualResolveThenVerify_Succeeds()
+    {
+        string root = Directory.CreateTempSubdirectory("fw-scenario-b-").FullName;
+        File.WriteAllBytes(Path.Combine(root, "system-6.49.23-arm.npk"), [1, 2, 3]);
+        File.WriteAllBytes(Path.Combine(root, "wireless-6.49.23-arm.npk"), [1, 2, 3]);
+
+        UpgradePackageResolver resolver = new(
+            new StaticFirmwarePackageCatalog(root),
+            Options.Create(new FirmwareFilesOptions { Path = root }));
+
+        UpgradePackageResolution resolution = resolver.Resolve(
+            "arm",
+            [Indep("system", "6.47.9"), Indep("wireless", "6.47.9")],
+            V6);
+
+        Assert.True(resolution.Succeeded, resolution.FailureReason);
+        Assert.Equal(FirmwarePackageLayout.Individual, resolution.Layout);
+
+        PostUpgradePackageVerification verified = PostUpgradePackageVerifier.Verify(
+            V6,
+            "arm",
+            [Indep("system", "6.49.23"), Indep("wireless", "6.49.23")],
+            resolution.Packages);
+
+        Assert.True(verified.Succeeded, verified.Detail);
+    }
+
+    /// <summary>
+    /// End-to-end resolve+verify for combined installation (Scenario A).
+    /// </summary>
+    [Fact]
+    public void ScenarioA_CombinedResolveThenVerify_Succeeds()
+    {
+        string root = Directory.CreateTempSubdirectory("fw-scenario-a-").FullName;
+        File.WriteAllBytes(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3]);
+
+        UpgradePackageResolver resolver = new(
+            new StaticFirmwarePackageCatalog(root),
+            Options.Create(new FirmwareFilesOptions { Path = root }));
+
+        UpgradePackageResolution resolution = resolver.Resolve(
+            "mipsbe",
+            [Indep("routeros-mipsbe", "6.49.10")],
+            V6);
+
+        Assert.True(resolution.Succeeded, resolution.FailureReason);
+        Assert.Equal(FirmwarePackageLayout.Combined, resolution.Layout);
+
+        PostUpgradePackageVerification verified = PostUpgradePackageVerifier.Verify(
+            V6,
+            "mipsbe",
+            [Indep("routeros-mipsbe", "6.49.23")],
+            resolution.Packages);
+
+        Assert.True(verified.Succeeded, verified.Detail);
+    }
+
+    /// <summary>
+    /// Individual source → combined target (system→routeros): resolve then verify against post-v7 inventory.
+    /// </summary>
+    [Fact]
+    public void ScenarioB_IndividualToV7_ResolveThenVerify_Succeeds()
+    {
+        string root = Directory.CreateTempSubdirectory("fw-scenario-b-v7-").FullName;
+        File.WriteAllBytes(Path.Combine(root, "routeros-7.23.8-arm.npk"), [1, 2, 3]);
+        File.WriteAllBytes(Path.Combine(root, "wireless-7.23.8-arm.npk"), [1, 2, 3]);
+
+        UpgradePackageResolver resolver = new(
+            new StaticFirmwarePackageCatalog(root),
+            Options.Create(new FirmwareFilesOptions { Path = root }));
+
+        UpgradePackageResolution resolution = resolver.Resolve(
+            "arm",
+            [Indep("system", "6.49.23"), Indep("wireless", "6.49.23"), Indep("routing", "6.49.23")],
+            V7);
+
+        Assert.True(resolution.Succeeded, resolution.FailureReason);
+        Assert.Contains(resolution.Packages, static p => p.ExpectedInstalledPackageName == "routeros");
+        Assert.DoesNotContain(resolution.Packages, static p => p.InstalledPackageName == "routing");
+
+        PostUpgradePackageVerification verified = PostUpgradePackageVerifier.Verify(
+            V7,
+            "arm",
+            [
+                Indep("routeros", "7.23.8"),
+                Indep("wireless", "7.23.8"),
+                Bundled("routing", "7.23.8", "routeros"),
+            ],
+            resolution.Packages);
+
+        Assert.True(verified.Succeeded, verified.Detail);
+    }
+
+    /// <summary>
+    /// Incomplete individual installation: required wireless missing after upgrade fails verification.
+    /// </summary>
+    [Fact]
+    public void Individual_MissingRequiredIndependent_Fails()
+    {
+        ResolvedUpgradePackage system = Required(
+            "system",
+            "system",
+            Catalog("system", "system-6.49.23-arm.npk", "arm", V6));
+        ResolvedUpgradePackage wireless = Required(
+            "wireless",
+            "wireless",
+            Catalog("wireless", "wireless-6.49.23-arm.npk", "arm", V6));
+
+        PostUpgradePackageVerification result = PostUpgradePackageVerifier.Verify(
+            V6,
+            "arm",
+            [Indep("system", "6.49.23")],
+            [system, wireless]);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("wireless", result.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Wrong installed version on the individual system core fails verification.
+    /// </summary>
+    [Fact]
+    public void Individual_WrongSystemVersion_Fails()
+    {
+        ResolvedUpgradePackage system = Required(
+            "system",
+            "system",
+            Catalog("system", "system-6.49.23-arm.npk", "arm", V6));
+
+        PostUpgradePackageVerification result = PostUpgradePackageVerifier.Verify(
+            V6,
+            "arm",
+            [Indep("system", "6.48.6")],
+            [system]);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("6.49.23", result.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// <c>ExpectedInstalledPackageName</c> returns <c>routeros-mipsbe</c> for <c>routeros</c> on 6.49.23 mipsbe,
     /// <c>routeros-arm</c> on 6.49.23 arm, and plain <c>routeros</c> on 7.x. Other packages such as
     /// <c>user-manager</c> keep their own name.

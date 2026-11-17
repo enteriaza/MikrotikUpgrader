@@ -3,9 +3,10 @@
 //
 // Description:
 // Strict post-reboot package inventory checks used by RouterOsV6UpgradeExecutor
-// after a package stage. Confirms independent installs, a single main RouterOS
-// package, each resolved package present at the target version, and main-package
-// architecture alignment. RouterOS version string alone is never sufficient.
+// after a package stage. Confirms independent installs, the expected core package
+// (combined routeros or individual system), each resolved package present at the
+// target version, and main-package architecture alignment. RouterOS version string
+// alone is never sufficient.
 //
 // -----------------------------------------------------------------------------
 
@@ -27,13 +28,16 @@ internal sealed record PostUpgradePackageVerification(
 
 /// <summary>
 /// Strict post-upgrade inventory verification: version string alone is never sufficient.
-/// Expected main package names are version-aware (v6 <c>routeros-{arch}</c>, v7+ <c>routeros</c>).
+/// Expected core package names are layout-aware (combined <c>routeros</c>/<c>routeros-{arch}</c>
+/// or individual <c>system</c>).
 /// </summary>
 internal static class PostUpgradePackageVerifier
 {
     /// <summary>
     /// Verifies post-upgrade installed packages against the packages that were resolved and staged.
-    /// Fails closed on empty inventory, missing/ambiguous mains, version mismatches, or arch mismatch.
+    /// Fails closed on empty inventory, missing/ambiguous core packages, version mismatches, or arch mismatch.
+    /// Absence of a combined <c>routeros</c> package is not a failure when the resolved set is an
+    /// individual <c>system</c> installation.
     /// </summary>
     /// <param name="targetVersion">Exact RouterOS version the stage targeted.</param>
     /// <param name="expectedArchitecture">Device architecture before upgrade (normalized when compared).</param>
@@ -72,29 +76,49 @@ internal static class PostUpgradePackageVerifier
                 "Post-upgrade inventory has no independently installed packages.");
         }
 
-        List<InstalledPackageInfo> mains = inventory.IndependentPackages
-            .Where(static p => RouterOsInstalledPackageNaming.IsMainRouterOsPackage(p.Name))
-            .ToList();
-
-        if (mains.Count == 0)
-        {
-            return Fail(
-                UpgradeOutcome.UpgradePackageMismatch,
-                "Post-upgrade inventory is missing an independent main RouterOS package.");
-        }
-
-        if (mains.Count > 1)
-        {
-            return Fail(
-                UpgradeOutcome.UpgradePackageMismatch,
-                $"Post-upgrade inventory has multiple independent main RouterOS packages: {string.Join(", ", mains.Select(static p => p.Name))}.");
-        }
-
         if (requiredPackages.Count == 0)
         {
             return Fail(
                 UpgradeOutcome.UpgradePackageMismatch,
                 "No required packages were resolved for post-upgrade verification.");
+        }
+
+        bool requiresRouterOsMain = requiredPackages.Any(static p =>
+            RouterOsInstalledPackageNaming.IsMainRouterOsPackage(p.ExpectedInstalledPackageName)
+            || p.CatalogPackage.PackageName.Equals("routeros", StringComparison.OrdinalIgnoreCase));
+
+        bool requiresSystemCore = !requiresRouterOsMain
+            && requiredPackages.Any(static p =>
+                p.ExpectedInstalledPackageName.Equals("system", StringComparison.OrdinalIgnoreCase)
+                || (p.InstalledPackageName.Equals("system", StringComparison.OrdinalIgnoreCase)
+                    && p.CatalogPackage.PackageName.Equals("system", StringComparison.OrdinalIgnoreCase)));
+
+        if (requiresRouterOsMain)
+        {
+            PostUpgradePackageVerification? mainFailure = VerifyCombinedMain(
+                inventory,
+                requiredPackages,
+                targetVersion);
+            if (mainFailure is not null)
+            {
+                return mainFailure;
+            }
+        }
+        else if (requiresSystemCore)
+        {
+            PostUpgradePackageVerification? systemFailure = VerifyIndividualSystemCore(
+                inventory,
+                targetVersion);
+            if (systemFailure is not null)
+            {
+                return systemFailure;
+            }
+        }
+        else
+        {
+            return Fail(
+                UpgradeOutcome.UpgradePackageMismatch,
+                "Resolved package set does not identify a core 'routeros' or 'system' package for verification.");
         }
 
         string? normalizedExpectedArch = string.IsNullOrWhiteSpace(expectedArchitecture)
@@ -144,6 +168,38 @@ internal static class PostUpgradePackageVerifier
             }
         }
 
+        return new PostUpgradePackageVerification(
+            Succeeded: true,
+            FailureOutcome: UpgradeOutcome.UpgradeSucceeded,
+            Detail: null);
+    }
+
+    /// <summary>
+    /// Combined-layout core check: exactly one independent main routeros package at the target version.
+    /// </summary>
+    private static PostUpgradePackageVerification? VerifyCombinedMain(
+        PackageInventorySummary inventory,
+        IReadOnlyList<ResolvedUpgradePackage> requiredPackages,
+        RouterOsVersion targetVersion)
+    {
+        List<InstalledPackageInfo> mains = inventory.IndependentPackages
+            .Where(static p => RouterOsInstalledPackageNaming.IsMainRouterOsPackage(p.Name))
+            .ToList();
+
+        if (mains.Count == 0)
+        {
+            return Fail(
+                UpgradeOutcome.UpgradePackageMismatch,
+                "Post-upgrade inventory is missing an independent main RouterOS package.");
+        }
+
+        if (mains.Count > 1)
+        {
+            return Fail(
+                UpgradeOutcome.UpgradePackageMismatch,
+                $"Post-upgrade inventory has multiple independent main RouterOS packages: {string.Join(", ", mains.Select(static p => p.Name))}.");
+        }
+
         InstalledPackageInfo main = mains[0];
         ResolvedUpgradePackage? requiredMain = requiredPackages.FirstOrDefault(static p =>
             RouterOsInstalledPackageNaming.IsMainRouterOsPackage(p.ExpectedInstalledPackageName)
@@ -165,10 +221,46 @@ internal static class PostUpgradePackageVerifier
                 $"Main package '{main.Name}' version '{main.Version}' does not match target {targetVersion}.");
         }
 
-        return new PostUpgradePackageVerification(
-            Succeeded: true,
-            FailureOutcome: UpgradeOutcome.UpgradeSucceeded,
-            Detail: null);
+        return null;
+    }
+
+    /// <summary>
+    /// Individual-layout core check: exactly one independent <c>system</c> package at the target version.
+    /// Combined <c>routeros</c> is not required.
+    /// </summary>
+    private static PostUpgradePackageVerification? VerifyIndividualSystemCore(
+        PackageInventorySummary inventory,
+        RouterOsVersion targetVersion)
+    {
+        List<InstalledPackageInfo> systems = inventory.IndependentPackages
+            .Where(static p => UpgradePackageResolver.IsSystemPackage(p.Name))
+            .ToList();
+
+        if (systems.Count == 0)
+        {
+            return Fail(
+                UpgradeOutcome.UpgradePackageMismatch,
+                "Post-upgrade inventory is missing an independent 'system' package "
+                + "(individual package layout; combined 'routeros' is not required).");
+        }
+
+        if (systems.Count > 1)
+        {
+            return Fail(
+                UpgradeOutcome.UpgradePackageMismatch,
+                $"Post-upgrade inventory has multiple independent 'system' packages ({systems.Count}).");
+        }
+
+        InstalledPackageInfo system = systems[0];
+        if (!RouterOsVersion.TryParse(system.Version, out RouterOsVersion systemVersion)
+            || systemVersion != targetVersion)
+        {
+            return Fail(
+                UpgradeOutcome.UpgradePackageMismatch,
+                $"System package version '{system.Version}' does not match target {targetVersion}.");
+        }
+
+        return null;
     }
 
     /// <summary>

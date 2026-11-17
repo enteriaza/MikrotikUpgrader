@@ -55,12 +55,11 @@ public sealed class PackageCompatibilityAuditorTests
 
     /// <summary>
     /// A mipsbe device with installed <c>user-manager</c> and <c>tr069-client</c> against a catalogue containing
-    /// only the main package and <c>user-manager</c> gets <c>MissingOptionalPackage</c>, with <c>tr069-client</c>
-    /// named as missing. Bundled components such as <c>system</c> and <c>ipv6</c> are not listed among the
-    /// independent packages.
+    /// only the main package and <c>user-manager</c> remains <c>Compatible</c>: <c>tr069-client</c> is a
+    /// target-release difference (not a hard failure). Bundled components are not listed as independents.
     /// </summary>
     [Fact]
-    public void MissingInstalledIndependentOptional_IsReported()
+    public void MissingInstalledIndependentOptional_IsReportedAsTargetDifference()
     {
         PackageCompatibilityAuditDevice device = SyntheticPackageInventoryFixtures.MainPlusIndependentOptionalsMipsbe();
         PackageCompatibilityStageResult v6 = AssessStage(
@@ -68,8 +67,10 @@ public sealed class PackageCompatibilityAuditorTests
             PackageCompatibilityUpgradeStage.V6Stepping,
             CreateCatalog("routeros-mipsbe-6.49.23.npk", "user-manager-6.49.23-mipsbe.npk"));
 
-        Assert.Equal(CatalogueCompatibilityStatus.MissingOptionalPackage, v6.Status);
-        Assert.Contains("tr069-client", v6.MissingPackageNames);
+        Assert.Equal(CatalogueCompatibilityStatus.Compatible, v6.Status);
+        Assert.Contains("tr069-client", v6.Explanation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NotDistributedInTargetRelease", v6.Explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain(v6.ResolvedPackageFileNames, static f => f.Contains("tr069", StringComparison.Ordinal));
         Assert.DoesNotContain(v6.IndependentPackageNames, static n => n is "system" or "ipv6");
     }
 
@@ -208,10 +209,10 @@ public sealed class PackageCompatibilityAuditorTests
 
     /// <summary>
     /// An smips device with installed <c>user-manager</c> and <c>tr069-client</c>, where the catalogue only has
-    /// <c>tr069-client</c>, gets <c>MissingOptionalPackage</c> and <c>user-manager</c> is named as missing.
+    /// <c>tr069-client</c>, remains Compatible: <c>user-manager</c> is reported as a target-release difference.
     /// </summary>
     [Fact]
-    public void SparseOptionalCoverage_FailsClosed()
+    public void SparseOptionalCoverage_ReportsTargetDifferenceNotFailure()
     {
         PackageCompatibilityStageResult v6 = AssessStage(
             SyntheticPackageInventoryFixtures.MissingOptionalInCatalogueSmips(),
@@ -221,19 +222,18 @@ public sealed class PackageCompatibilityAuditorTests
                 "tr069-client-6.49.23-smips.npk",
                 "routeros-7.23.8-smips.npk"));
 
-        Assert.Equal(CatalogueCompatibilityStatus.MissingOptionalPackage, v6.Status);
-        Assert.Contains("user-manager", v6.MissingPackageNames);
+        Assert.Equal(CatalogueCompatibilityStatus.Compatible, v6.Status);
+        Assert.Contains("user-manager", v6.Explanation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NotDistributedInTargetRelease", v6.Explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Filename looks valid but does not satisfy the installed independent optional.
-    /// A catalogue file named <c>wireless-6.49.23-mipsbe.npk</c> does not stand in for the installed independent
-    /// optionals. The v6 stage is still <c>MissingOptionalPackage</c>.
+    /// A catalogue file named <c>wireless-6.49.23-mipsbe.npk</c> does not stand in for installed independents
+    /// that are absent from the target release; those are target differences, not hard failures.
     /// </summary>
     [Fact]
-    public void UnambiguousFilename_StillRequiresExactInstalledMapping()
+    public void UnambiguousFilename_DoesNotSubstituteForOtherInstalledOptionals()
     {
-        // Filename looks valid but does not satisfy the installed independent optional.
         PackageCompatibilityStageResult v6 = AssessStage(
             SyntheticPackageInventoryFixtures.MainPlusIndependentOptionalsMipsbe(),
             PackageCompatibilityUpgradeStage.V6Stepping,
@@ -241,7 +241,9 @@ public sealed class PackageCompatibilityAuditorTests
                 "routeros-mipsbe-6.49.23.npk",
                 "wireless-6.49.23-mipsbe.npk"));
 
-        Assert.Equal(CatalogueCompatibilityStatus.MissingOptionalPackage, v6.Status);
+        Assert.Equal(CatalogueCompatibilityStatus.Compatible, v6.Status);
+        Assert.Contains("NotDistributedInTargetRelease", v6.Explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain(v6.ResolvedPackageFileNames, static f => f.Contains("user-manager", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -326,13 +328,11 @@ public sealed class PackageCompatibilityAuditorTests
     }
 
     /// <summary>
-    /// tr069-client missing for v7.
-    /// The v6 stage is <c>Compatible</c> but the RouterOS 7 stage is <c>MissingOptionalPackage</c>, because the
-    /// catalogue has v7 files for <c>routeros</c> and <c>user-manager</c> but not <c>tr069-client</c>. That package
-    /// is named in the v7 missing list.
+    /// tr069-client missing for v7 is a normal target-release difference: both stages remain Compatible, and the
+    /// v7 explanation names the discontinued optional without treating it as a hard failure.
     /// </summary>
     [Fact]
-    public void SuccessfulV6_DoesNotImplyV7WhenOptionalMissingForV7()
+    public void SuccessfulV6_V7OptionalAbsentFromTarget_RemainsCompatibleWithDiagnostic()
     {
         PackageCompatibilityAuditDevice device = SyntheticPackageInventoryFixtures.MainPlusIndependentOptionalsMipsbe();
         PackageCompatibilityDeviceReport report = AssessDevice(
@@ -343,7 +343,6 @@ public sealed class PackageCompatibilityAuditorTests
                 "tr069-client-6.49.23-mipsbe.npk",
                 "routeros-7.23.8-mipsbe.npk",
                 "user-manager-7.23.8-mipsbe.npk"));
-        // tr069-client missing for v7
 
         PackageCompatibilityStageResult v6 = report.Stages.Single(
             static s => s.Stage == PackageCompatibilityUpgradeStage.V6Stepping);
@@ -351,8 +350,10 @@ public sealed class PackageCompatibilityAuditorTests
             static s => s.Stage == PackageCompatibilityUpgradeStage.RouterOs7);
 
         Assert.Equal(CatalogueCompatibilityStatus.Compatible, v6.Status);
-        Assert.Equal(CatalogueCompatibilityStatus.MissingOptionalPackage, v7.Status);
-        Assert.Contains("tr069-client", v7.MissingPackageNames);
+        Assert.Equal(CatalogueCompatibilityStatus.Compatible, v7.Status);
+        Assert.Contains("tr069-client", v7.Explanation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NotDistributedInTargetRelease", v7.Explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain(v7.ResolvedPackageFileNames, static f => f.Contains("tr069", StringComparison.Ordinal));
     }
 
     /// <summary>

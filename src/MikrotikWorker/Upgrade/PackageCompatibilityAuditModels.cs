@@ -35,7 +35,10 @@ public enum CatalogueCompatibilityStatus
     /// <summary>Main RouterOS package missing from inventory or catalogue.</summary>
     MissingMainPackage = 1,
 
-    /// <summary>An optional independent package has no catalogue match.</summary>
+    /// <summary>
+    /// Legacy/hard failure when an optional independent package could not be resolved.
+    /// Target-release discontinuations are now Compatible with diagnostic text instead.
+    /// </summary>
     MissingOptionalPackage = 2,
 
     /// <summary>Multiple catalogue candidates matched a package.</summary>

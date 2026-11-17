@@ -209,9 +209,15 @@ internal sealed class RouterJobExecutor(
                     return;
                 }
 
-                // Authenticated session established — clear both per-job retry counters.
-                job.ConnectionFailureCount = 0;
+                // Authenticated session established. Authentication failures are forgiven.
+                // Connection failures from CreateAsync are forgiven, but FirmwareTransport failures
+                // must keep ConnectionFailureCount so fetch retries share the same attempt budget.
                 job.AuthenticationFailureCount = 0;
+                if (job.LastRetryFailureCategory is not JobRetryFailureCategory.FirmwareTransport)
+                {
+                    job.ConnectionFailureCount = 0;
+                }
+
                 job.NextRetryUtc = null;
 
                 logger.LogInformation("Connected successfully");
@@ -397,6 +403,22 @@ internal sealed class RouterJobExecutor(
                 }
 
                 stopwatch.Stop();
+
+                // TransportRetryEligible (not merely !RebootInitiated): a prior verified stage may have
+                // rebooted while the failing stage never reached install — that attempt remains requeueable.
+                if (upgradeResult.Outcome == UpgradeOutcome.TransientTransportFailure
+                    && upgradeResult.TransportRetryEligible)
+                {
+                    HandleTransientTransportFailure(
+                        upgradeResult,
+                        workItem,
+                        completer,
+                        stopwatch,
+                        job,
+                        assessment.OverallStatus);
+                    return;
+                }
+
                 (ScheduledJobTerminalState terminal, bool success) = MapUpgradeOutcome(upgradeResult.Outcome);
                 using (DeviceLogging.BeginServiceSummary())
                 {
@@ -413,7 +435,8 @@ internal sealed class RouterJobExecutor(
                     stopwatch.Elapsed,
                     success
                         ? null
-                        : new InvalidOperationException(upgradeResult.Detail ?? upgradeResult.Outcome.ToString()));
+                        : upgradeResult.Failure
+                          ?? new InvalidOperationException(upgradeResult.Detail ?? upgradeResult.Outcome.ToString()));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -488,6 +511,85 @@ internal sealed class RouterJobExecutor(
                 stopwatch.Elapsed,
                 ex);
         }
+    }
+
+    /// <summary>
+    /// Requeues a job after a transient package-fetch / transport failure using the Connection
+    /// retry delay and unsuccessful-attempt budget. Installation/reboot must not have started.
+    /// </summary>
+    private void HandleTransientTransportFailure(
+        UpgradeExecutionResult upgradeResult,
+        RouterJobWorkItem workItem,
+        IRouterJobExecutionCompleter completer,
+        Stopwatch stopwatch,
+        MikrotikScheduledJob job,
+        DeviceAssessmentStatus assessmentStatus)
+    {
+        Exception error = upgradeResult.Failure
+            ?? new IOException(upgradeResult.Detail ?? "Transient firmware transport failure.");
+        string reason = $"{error.GetType().Name}: {upgradeResult.Detail ?? error.Message}";
+
+        logger.LogWarning(
+            error,
+            "Transient firmware transport failure during package fetch. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ConnectionFailures={ConnectionFailures}, Detail={Detail}",
+            job.ImportId,
+            job.JobId,
+            job.RouterName,
+            job.RouterIp,
+            job.ConnectionFailureCount,
+            upgradeResult.Detail);
+
+        if (completer.TryScheduleTransientRetry(
+                workItem.EntryToken,
+                JobRetryFailureCategory.FirmwareTransport,
+                reason,
+                error))
+        {
+            using (DeviceLogging.BeginServiceSummary())
+            {
+                logger.LogInformation(
+                    "Job delayed for retry after {FailureCategory} failure (nextRetryUtc={NextRetryUtc}, connectionFailures={ConnectionFailures}, authenticationFailures={AuthenticationFailures})",
+                    JobRetryFailureCategory.FirmwareTransport,
+                    job.NextRetryUtc,
+                    job.ConnectionFailureCount,
+                    job.AuthenticationFailureCount);
+            }
+
+            return;
+        }
+
+        using (DeviceLogging.BeginServiceOnly())
+        {
+            logger.LogError(
+                error,
+                "Router {FailureCategory} failure is terminal. ImportId={ImportId}, JobId={JobId}, RouterName={RouterName}, RouterIp={RouterIp}, ConnectionFailures={ConnectionFailures}, AuthenticationFailures={AuthenticationFailures}, AssessmentStatus={AssessmentStatus}, JobOutcome={JobOutcome}",
+                JobRetryFailureCategory.FirmwareTransport,
+                job.ImportId,
+                job.JobId,
+                job.RouterName,
+                job.RouterIp,
+                job.ConnectionFailureCount,
+                job.AuthenticationFailureCount,
+                assessmentStatus,
+                nameof(ScheduledJobTerminalState.Failed));
+        }
+
+        using (DeviceLogging.BeginServiceSummary())
+        {
+            logger.LogInformation(
+                "Final job outcome: {JobOutcome} (exhausted {FailureCategory} retries, assessment={AssessmentStatus}, upgrade={UpgradeOutcome}, duration={Duration})",
+                nameof(ScheduledJobTerminalState.Failed),
+                JobRetryFailureCategory.FirmwareTransport,
+                assessmentStatus,
+                upgradeResult.Outcome,
+                stopwatch.Elapsed);
+        }
+
+        completer.CompleteDispatchedJob(
+            workItem.EntryToken,
+            ScheduledJobTerminalState.Failed,
+            stopwatch.Elapsed,
+            error);
     }
 
     /// <summary>
@@ -772,6 +874,8 @@ internal sealed class RouterJobExecutor(
             UpgradeOutcome.NotAttempted => (ScheduledJobTerminalState.Failed, false),
 
             UpgradeOutcome.UpgradeInterrupted => (ScheduledJobTerminalState.Cancelled, false),
+            // Handled before MapUpgradeOutcome when RebootInitiated is false; if mapped, treat as Failed.
+            UpgradeOutcome.TransientTransportFailure => (ScheduledJobTerminalState.Failed, false),
             _ => (ScheduledJobTerminalState.Failed, false),
         };
 }

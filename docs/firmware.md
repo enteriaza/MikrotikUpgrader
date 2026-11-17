@@ -35,10 +35,14 @@ Backups are **not** under FirmwareFiles and are **not** served.
 
 Summarised from production resolvers/assessors:
 
-- Combined main package vs bundled components (`bundle` field)
-- Independent optionals require matching `{name}-{version}-{arch}.npk`
-- Stages never mix RouterOS 6 and 7 packages
-- Ambiguous duplicates fail safe
+- **Target catalogue is authoritative:** source inventory identifies layout and candidate independents; it is not a mandatory target package list
+- **Combined layout:** target core is `routeros` / `routeros-{arch}`; independents are selected only when still distributed for the target version/architecture
+- **Individual layout:** target core is `system` when the release ships it; no combined `routeros` is required
+- **v6 → v7:** when `system` is not distributed for the target, core becomes architecture-matched `routeros` (layout Combined)
+- Source packages discontinued in the target release, or shipped only for another architecture, produce diagnostics (`NotDistributedInTargetRelease` / `NotDistributedForTargetArchitecture`) and are not downloaded
+- Stages never mix RouterOS 6 and 7 packages in one resolved set
+- Missing/ambiguous **target core**, mixed architectures/versions in the selected set, and duplicate identities fail closed
+- Absence of a combined `routeros` package is not by itself a resolution failure when a legitimate individual `system` installation is present
 
 ## Related
 

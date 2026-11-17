@@ -11,8 +11,9 @@
 namespace MikrotikWorker.Scheduling;
 
 /// <summary>
-/// Failure category for transient connect/login retry counters.
-/// Counters are independent — a connection failure never consumes an authentication attempt.
+/// Failure category for transient retry counters.
+/// Connection and authentication budgets are independent.
+/// Firmware transport shares the connection delay and unsuccessful-attempt limit.
 /// </summary>
 public enum JobRetryFailureCategory
 {
@@ -25,4 +26,10 @@ public enum JobRetryFailureCategory
     /// Transient authentication/login failure during <c>CreateAsync</c>.
     /// </summary>
     Authentication = 2,
+
+    /// <summary>
+    /// Transient firmware package download / router <c>/tool/fetch</c> transport failure before installation.
+    /// Uses the same delay and maximum unsuccessful attempts as <see cref="Connection"/>.
+    /// </summary>
+    FirmwareTransport = 3,
 }

@@ -930,6 +930,9 @@ internal sealed class InMemoryJobScheduler : IInMemoryJobScheduler, IRouterJobEx
         switch (category)
         {
             case JobRetryFailureCategory.Connection:
+            case JobRetryFailureCategory.FirmwareTransport:
+                // Shared ConnectionFailureCount + ConnectionRetryDelay so fetch interruptions use the
+                // same unsuccessful-attempt budget and schedule as CreateAsync transport failures.
                 attempt = ++job.ConnectionFailureCount;
                 delay = _retryOptions.ConnectionRetryDelay;
                 break;

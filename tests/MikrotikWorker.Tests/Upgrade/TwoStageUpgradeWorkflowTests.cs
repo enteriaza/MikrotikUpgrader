@@ -1055,6 +1055,53 @@ public sealed class TwoStageUpgradeWorkflowTests
     }
 
     /// <summary>
+    /// After verified v6 stepping, a transient RouterOS 7 package-fetch failure remains transport-retry eligible
+    /// even though <c>RebootInitiated</c> is true from the prior stage. OSPF and RouterBOARD must not run.
+    /// </summary>
+    [Fact]
+    public async Task AfterV6Stepping_TransientV7FetchFailure_IsTransportRetryEligible_WithoutOspfOrRouterboard()
+    {
+        StageTrackingOps ops = new("AP01.POP001.001.access")
+        {
+            VersionsAfterReboot = ["6.49.23"],
+            FailOnFetchCallNumber = 2,
+        };
+        CountingBackup backup = new();
+        RecordingStaticSummaryService summary = new(OspfStaticSummaryRedistributionResult.Ok());
+        TrackingOspfMigrationService ospf = new();
+        string root = CreateFirmwareRootWithV6AndV7();
+        ScriptedMikrotikConnectionFactory reconnect = new(_ =>
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.23"));
+        RouterOsV6UpgradeExecutor executor = CreateTwoStageExecutor(
+            ops,
+            backup,
+            root,
+            reconnect,
+            summary: summary,
+            ospf: ospf);
+
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "AP01.POP001.001.access", version: "6.49.10"),
+            CreateJob(),
+            CreateDevice("AP01.POP001.001.access", "6.49.10"),
+            CreateAssessment(DeviceAssessmentStatus.ReadyForUpgrade, "6.49.23"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.TransientTransportFailure, result.Outcome);
+        Assert.True(result.RebootInitiated);
+        Assert.True(result.TransportRetryEligible);
+        Assert.Equal(UpgradeCompletedStages.V6Stepping, result.CompletedStage);
+        Assert.Equal(1, ops.RebootCount);
+        Assert.Equal(2, ops.FetchedFiles.Count);
+        Assert.Equal(0, ospf.ApplyCount);
+        Assert.Equal(0, summary.CallCount);
+        Assert.Equal(0, ops.RouterboardUpgradeCount);
+    }
+
+    /// <summary>
     /// If the backup taken after the RouterOS 7 install fails, the result is <c>BackupFailed</c> with
     /// <c>CompletedStage</c> RouterOs7. OSPF apply, static summary, RouterBOARD upgrade and the OSPF delete plan
     /// are all skipped.
@@ -2093,6 +2140,14 @@ public sealed class TwoStageUpgradeWorkflowTests
         public Action? OnBeforeFetch { get; init; }
 
         /// <summary>
+        /// 1-based fetch call that throws (simulates transport loss on a later package stage).
+        /// </summary>
+        public int? FailOnFetchCallNumber { get; init; }
+
+        /// <summary>Exception factory for <see cref="FailOnFetchCallNumber"/> (default receive timeout).</summary>
+        public Func<Exception>? FetchThrowFactory { get; init; }
+
+        /// <summary>
         /// RouterOS version reported right now: <see cref="InitialVersion"/> before any reboot, then the entry of
         /// <see cref="VersionsAfterReboot"/> selected by the latest reboot.
         /// </summary>
@@ -2216,6 +2271,14 @@ public sealed class TwoStageUpgradeWorkflowTests
             OnBeforeFetch?.Invoke();
             FetchedUrls.Add(url);
             FetchedFiles.Add(destinationFileName);
+            if (FailOnFetchCallNumber is int failAt && FetchedFiles.Count == failAt)
+            {
+                throw FetchThrowFactory?.Invoke()
+                    ?? new TikConnectionReceiveTimeoutException(
+                        30_000,
+                        new TimeoutException($"fetch lost on '{destinationFileName}'"));
+            }
+
             return Task.CompletedTask;
         }
 

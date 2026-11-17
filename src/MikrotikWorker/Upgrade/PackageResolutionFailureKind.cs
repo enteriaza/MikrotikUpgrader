@@ -29,7 +29,10 @@ public enum PackageResolutionFailureKind
     /// <summary>Inventory had no independently installed packages.</summary>
     NoIndependentPackages = 4,
 
-    /// <summary>No main combined RouterOS package was found in inventory.</summary>
+    /// <summary>
+    /// Inventory has neither a combined <c>routeros</c>/<c>routeros-{arch}</c> package nor an
+    /// individual <c>system</c> package that can anchor resolution.
+    /// </summary>
     MissingMainPackage = 5,
 
     /// <summary>More than one main RouterOS package was installed.</summary>

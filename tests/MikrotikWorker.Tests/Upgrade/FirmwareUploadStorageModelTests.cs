@@ -121,8 +121,11 @@ public sealed class FirmwareUploadStorageModelTests
 
         Assert.Contains("/tool/fetch", api, StringComparison.Ordinal);
         Assert.Contains("AddParameter(\"dst-path\", destinationFileName)", api, StringComparison.Ordinal);
+        Assert.Contains("Removing existing router file before fetch", api, StringComparison.Ordinal);
+        Assert.Contains("RemoveFileAsync(connection, destinationFileName", api, StringComparison.Ordinal);
         Assert.Contains("FetchUrlToFileAsync", executor, StringComparison.Ordinal);
         Assert.Contains("WaitForFetchedPackageSizeAsync", executor, StringComparison.Ordinal);
+        Assert.Contains("file.SizeBytes == expectedSizeBytes", executor, StringComparison.Ordinal);
         Assert.DoesNotContain("free-hdd", executor, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -169,16 +172,48 @@ public sealed class FirmwareUploadStorageModelTests
     }
 
     /// <summary>
-    /// When the fake fetch throws, the executor must return <c>UpgradeFailed</c> after attempting the fetch
-    /// (<c>FetchCalled</c>) and never reboot (<c>RebootCount</c> is 0).
+    /// Transient receive-timeout during fetch returns <c>TransientTransportFailure</c> and never reboots.
     /// </summary>
     [Fact]
-    public async Task GenuineFetchFailure_StillBlocksReboot()
+    public async Task TransientFetchFailure_StillBlocksReboot()
     {
         string root = Directory.CreateTempSubdirectory("fw-storage-fail-").FullName;
         await File.WriteAllBytesAsync(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4]);
 
         TrackingOps ops = new("ACE01.POP001.001.core") { FetchThrows = true };
+        RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(ops, root);
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "ACE01.POP001.001.core", version: "6.49.10"),
+            CreateJob("ACE", "10.0.0.50"),
+            CreateDevice("ACE01.POP001.001.core", "6.49.10"),
+            CreateAssessment("10.0.0.50"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.TransientTransportFailure, result.Outcome);
+        Assert.True(result.TransportRetryEligible);
+        Assert.False(result.RebootInitiated);
+        Assert.Equal(0, ops.RebootCount);
+        Assert.True(ops.FetchCalled);
+    }
+
+    /// <summary>
+    /// Permanent RouterOS fetch failure (HTTP 404) remains <c>UpgradeFailed</c> and never reboots.
+    /// </summary>
+    [Fact]
+    public async Task PermanentFetch404_StillBlocksReboot()
+    {
+        string root = Directory.CreateTempSubdirectory("fw-storage-404-").FullName;
+        await File.WriteAllBytesAsync(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4]);
+
+        TrackingOps ops = new("ACE01.POP001.001.core")
+        {
+            FetchThrows = true,
+            FetchThrowFactory = static () =>
+                new InvalidOperationException("Fetch of 'routeros-mipsbe-6.49.23.npk' failed: 404 Not Found"),
+        };
         RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(ops, root);
         UpgradeExecutionResult result = await executor.ExecuteAsync(
             FakeMikrotikConnections.CreateFullyPopulated(identity: "ACE01.POP001.001.core", version: "6.49.10"),
@@ -197,7 +232,7 @@ public sealed class FirmwareUploadStorageModelTests
 
     /// <summary>
     /// An 8-byte package where the router reports only 3 bytes after the 50 ms fetch timeout must give
-    /// <c>UpgradeFailed</c>, with the fetch attempted and no reboot.
+    /// <c>TransientTransportFailure</c>, with the fetch attempted and no reboot.
     /// </summary>
     [Fact]
     public async Task IncompleteFetchSizeMismatch_StillBlocksReboot()
@@ -225,9 +260,92 @@ public sealed class FirmwareUploadStorageModelTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeFailed, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TransientTransportFailure, result.Outcome);
+        Assert.True(result.TransportRetryEligible);
+        Assert.False(result.RebootInitiated);
         Assert.Equal(0, ops.RebootCount);
         Assert.True(ops.FetchCalled);
+    }
+
+    /// <summary>
+    /// Wrong-size staged file is rejected (existence alone is insufficient) and never reboots.
+    /// </summary>
+    [Fact]
+    public async Task WrongSizeStagedPackage_IsRejectedWithoutReboot()
+    {
+        string root = Directory.CreateTempSubdirectory("fw-storage-wrongsize-").FullName;
+        await File.WriteAllBytesAsync(Path.Combine(root, "routeros-mipsbe-6.49.23.npk"), [1, 2, 3, 4, 5, 6, 7, 8]);
+
+        // Catalogue size is 8 bytes from the local file; router reports only 3.
+        TrackingOps ops = new("ACE01.POP001.001.core")
+        {
+            ExpectedFetchSizeBytes = 8,
+            IncompleteFetchSizeBytes = 3,
+        };
+
+        RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(
+            ops,
+            root,
+            fetchTimeout: TimeSpan.FromMilliseconds(50));
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(identity: "ACE01.POP001.001.core", version: "6.49.10"),
+            CreateJob("ACE", "10.0.0.50"),
+            CreateDevice("ACE01.POP001.001.core", "6.49.10"),
+            CreateAssessment("10.0.0.50"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.TransientTransportFailure, result.Outcome);
+        Assert.True(result.TransportRetryEligible);
+        Assert.Contains("size mismatch", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, ops.RebootCount);
+    }
+
+    /// <summary>
+    /// Individual layout: first package transfers successfully, second fetch fails — reboot must not start.
+    /// </summary>
+    [Fact]
+    public async Task IndividualLayout_SecondPackageFetchFailure_BlocksReboot()
+    {
+        string root = Directory.CreateTempSubdirectory("fw-storage-multi-").FullName;
+        await File.WriteAllBytesAsync(Path.Combine(root, "system-6.49.23-mipsbe.npk"), [1, 2, 3, 4]);
+        await File.WriteAllBytesAsync(Path.Combine(root, "wireless-6.49.23-mipsbe.npk"), [1, 2, 3, 4]);
+
+        TrackingOps ops = new("BR01.POP009.016.Kopefontein")
+        {
+            ArchitectureName = "mipsbe",
+            InitialVersion = "6.47.9",
+            ExpectedFetchSizeBytes = 4,
+            FailOnFetchCallNumber = 2,
+            InstalledPackagesOverride =
+            [
+                new("system", "6.47.9", Disabled: false, Bundle: null),
+                new("wireless", "6.47.9", Disabled: false, Bundle: null),
+            ],
+        };
+
+        RouterOsV6UpgradeExecutor executor = CreateExecutorWithoutV7Target(ops, root);
+        UpgradeExecutionResult result = await executor.ExecuteAsync(
+            FakeMikrotikConnections.CreateFullyPopulated(
+                identity: "BR01.POP009.016.Kopefontein",
+                version: "6.47.9",
+                architecture: "mipsbe"),
+            CreateJob("Kopefontein", "10.16.0.9"),
+            CreateDevice("BR01.POP009.016.Kopefontein", "6.47.9", architecture: "mipsbe"),
+            CreateAssessment("10.16.0.9"),
+            "admin",
+            "secret",
+            static () => true,
+            CancellationToken.None);
+
+        Assert.Equal(UpgradeOutcome.TransientTransportFailure, result.Outcome);
+        Assert.True(result.TransportRetryEligible);
+        Assert.False(result.RebootInitiated);
+        Assert.Equal(0, ops.RebootCount);
+        Assert.Equal(2, ops.FetchCallCount);
+        Assert.Contains("wireless", result.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -292,14 +410,17 @@ public sealed class FirmwareUploadStorageModelTests
         };
 
     /// <summary>
-    /// Builds <see cref="MikrotikDeviceInfo"/> (mipsbe, hEX PoE) with the given identity and version.
+    /// Builds <see cref="MikrotikDeviceInfo"/> (default mipsbe, hEX PoE) with the given identity and version.
     /// </summary>
-    private static MikrotikDeviceInfo CreateDevice(string identity, string version) =>
+    private static MikrotikDeviceInfo CreateDevice(
+        string identity,
+        string version,
+        string architecture = "mipsbe") =>
         new()
         {
             Identity = identity,
             Version = version,
-            ArchitectureName = "mipsbe",
+            ArchitectureName = architecture,
             BoardName = "hEX PoE",
         };
 
@@ -399,6 +520,17 @@ public sealed class FirmwareUploadStorageModelTests
         /// </summary>
         public bool FetchThrows { get; init; }
 
+        /// <summary>
+        /// Optional factory for the exception thrown when <see cref="FetchThrows"/> is set
+        /// (defaults to a transient receive-timeout abort).
+        /// </summary>
+        public Func<Exception>? FetchThrowFactory { get; init; }
+
+        /// <summary>
+        /// 1-based fetch call index that should throw (for multi-package partial transfer tests).
+        /// </summary>
+        public int? FailOnFetchCallNumber { get; init; }
+
         /// <summary>Size reported for the fetched package once fetched; defaults to 4 bytes when null.</summary>
         public long? ExpectedFetchSizeBytes { get; init; }
 
@@ -407,11 +539,23 @@ public sealed class FirmwareUploadStorageModelTests
         /// </summary>
         public long? IncompleteFetchSizeBytes { get; init; }
 
+        /// <summary>Optional architecture override (default mipsbe).</summary>
+        public string ArchitectureName { get; init; } = "mipsbe";
+
+        /// <summary>Optional installed inventory override for individual-layout staging tests.</summary>
+        public IReadOnlyList<InstalledPackageInfo>? InstalledPackagesOverride { get; init; }
+
         /// <summary>
         /// True once <see cref="FetchUrlToFileAsync"/> has been invoked, i.e. the firmware package fetch was
         /// attempted.
         /// </summary>
         public bool FetchCalled { get; private set; }
+
+        /// <summary>Number of <see cref="FetchUrlToFileAsync"/> invocations.</summary>
+        public int FetchCallCount { get; private set; }
+
+        /// <summary>Destination file names fetched, in order.</summary>
+        public List<string> FetchedFileNames { get; } = [];
 
         /// <summary>Number of reboots requested so far.</summary>
         public int RebootCount { get; private set; }
@@ -436,10 +580,15 @@ public sealed class FirmwareUploadStorageModelTests
             TimeSpan timeout,
             CancellationToken cancellationToken = default)
         {
+            FetchCallCount++;
             FetchCalled = true;
-            if (FetchThrows)
+            FetchedFileNames.Add(destinationFileName);
+            if (FetchThrows || FailOnFetchCallNumber == FetchCallCount)
             {
-                throw new InvalidOperationException("simulated fetch failure");
+                throw FetchThrowFactory?.Invoke()
+                    ?? new TikConnectionReceiveTimeoutException(
+                        30_000,
+                        new TimeoutException($"connection lost while reading tag test for '{destinationFileName}'"));
             }
 
             return Task.CompletedTask;
@@ -454,7 +603,14 @@ public sealed class FirmwareUploadStorageModelTests
             string fileName,
             CancellationToken cancellationToken = default)
         {
-            if (!FetchCalled || FetchThrows)
+            if (FetchCallCount == 0 || FetchThrows)
+            {
+                return Task.FromResult<RouterFileInfo?>(null);
+            }
+
+            if (FailOnFetchCallNumber is int failAt && FetchCallCount >= failAt
+                && FetchedFileNames.Count > 0
+                && FetchedFileNames[^1].Equals(fileName, StringComparison.OrdinalIgnoreCase))
             {
                 return Task.FromResult<RouterFileInfo?>(null);
             }
@@ -518,22 +674,27 @@ public sealed class FirmwareUploadStorageModelTests
             {
                 Identity = Identity,
                 Version = CurrentVersion,
-                ArchitectureName = "mipsbe",
+                ArchitectureName = ArchitectureName,
                 BoardName = "hEX PoE",
             });
 
-        /// <summary>Returns a single enabled <c>routeros-mipsbe</c> package at the numeric current version.</summary>
+        /// <summary>Returns installed packages (override or a single combined <c>routeros-*</c> entry).</summary>
         public Task<IReadOnlyList<InstalledPackageInfo>> ListInstalledPackagesAsync(
             ITikConnection connection,
             CancellationToken cancellationToken = default)
         {
+            if (InstalledPackagesOverride is not null)
+            {
+                return Task.FromResult(InstalledPackagesOverride);
+            }
+
             string version = CurrentVersion;
             string numeric = RouterOsVersion.TryParse(version, out RouterOsVersion parsed)
                 ? parsed.ToString()
                 : version;
             return Task.FromResult<IReadOnlyList<InstalledPackageInfo>>(
             [
-                new("routeros-mipsbe", numeric, Disabled: false, Bundle: null),
+                new($"routeros-{ArchitectureName}", numeric, Disabled: false, Bundle: null),
             ]);
         }
 

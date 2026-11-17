@@ -87,8 +87,8 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
     /// <summary>
     /// With a successful backup and the firmware file present, the executor does attempt the fetch
-    /// (<c>FetchCalled</c>). When the router never reports the file, the result is <c>UpgradeFailed</c> and no
-    /// reboot is requested.
+    /// (<c>FetchCalled</c>). When the router never reports the file, the result is
+    /// <c>TransientTransportFailure</c> (incomplete fetch) and no reboot is requested.
     /// </summary>
     [Fact]
     public async Task SuccessfulBackup_AllowsPackageStagingFetch_WithoutRebootWhenFetchFailsMissingFile()
@@ -116,7 +116,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
         Assert.True(ops.FetchCalled);
         Assert.False(ops.RebootCalled);
-        Assert.Equal(UpgradeOutcome.UpgradeFailed, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TransientTransportFailure, result.Outcome);
+        Assert.True(result.TransportRetryEligible);
+        Assert.False(result.RebootInitiated);
     }
 
     /// <summary>
@@ -184,17 +186,17 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
     /// <summary>
     /// A router with <c>routeros-mipsbe</c> and an installed <c>tr069-client</c> but only the main package in the
-    /// firmware folder gives <c>PackageResolutionFailed</c>. Nothing is fetched or rebooted.
+    /// firmware folder still resolves: the discontinued optional does not block fetch of the target core.
     /// </summary>
     [Fact]
-    public async Task MissingOptionalPackage_PreventsFetchAndReboot()
+    public async Task DiscontinuedOptional_DoesNotBlockCoreFetch()
     {
         TrackingOps ops = new()
         {
             Installed =
             [
-                new("routeros-mipsbe", "6.49.23", false),
-                new("tr069-client", "6.49.23", false),
+                new("routeros-mipsbe", "6.49.10", false),
+                new("tr069-client", "6.49.10", false),
             ],
         };
         string root = Directory.CreateTempSubdirectory("upg-missing-opt-").FullName;
@@ -216,9 +218,11 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.PackageResolutionFailed, result.Outcome);
-        Assert.False(ops.FetchCalled);
-        Assert.False(ops.RebootCalled);
+        Assert.NotEqual(UpgradeOutcome.PackageResolutionFailed, result.Outcome);
+        Assert.True(ops.FetchCalled);
+        Assert.DoesNotContain(
+            ops.FetchedFiles,
+            f => f.Contains("tr069", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -253,7 +257,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
 
     /// <summary>
     /// When the fetched file never appears on the router (<c>OmitFetchedFile</c>), the fetch is attempted but the
-    /// result is <c>UpgradeFailed</c> and no reboot is requested.
+    /// result is <c>TransientTransportFailure</c> and no reboot is requested.
     /// </summary>
     [Fact]
     public async Task IncompleteStaging_PreventsReboot()
@@ -271,7 +275,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
             static () => true,
             CancellationToken.None);
 
-        Assert.Equal(UpgradeOutcome.UpgradeFailed, result.Outcome);
+        Assert.Equal(UpgradeOutcome.TransientTransportFailure, result.Outcome);
+        Assert.True(result.TransportRetryEligible);
+        Assert.False(result.RebootInitiated);
         Assert.True(ops.FetchCalled);
         Assert.False(ops.RebootCalled);
     }
@@ -1029,6 +1035,9 @@ public sealed class RouterOsV6UpgradeExecutorTests
         /// </summary>
         public bool FetchCalled { get; private set; }
 
+        /// <summary>Destination file names passed to <see cref="FetchUrlToFileAsync"/>, in order.</summary>
+        public List<string> FetchedFiles { get; } = [];
+
         /// <summary>
         /// True once <see cref="RebootAsync"/> has been invoked, i.e. the executor requested a router reboot.
         /// </summary>
@@ -1243,6 +1252,7 @@ public sealed class RouterOsV6UpgradeExecutorTests
             CancellationToken cancellationToken = default)
         {
             FetchCalled = true;
+            FetchedFiles.Add(destinationFileName);
             if (FetchDelay > TimeSpan.Zero)
             {
                 await Task.Delay(FetchDelay, cancellationToken);
