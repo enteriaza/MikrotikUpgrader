@@ -49,6 +49,8 @@ Do not commit real credentials. Use placeholders in repository files.
 
 **Independence:** `Mikrotik:Enabled` and `FirmwareUpgrade:Enabled` are separate gates.
 
+**Credentials:** `AppSettingsRouterCredentialResolver` returns the shared username/password for every job. CSV files must not contain credentials. Missing/empty configured credentials fail closed at execution. No environment-variable or external secrets-manager architecture is required for this milestone (optional local `appsettings.*.local.json` overrides remain supported for development).
+
 ## `ScheduledJobs`
 
 | Key | Default | Purpose |
@@ -69,11 +71,11 @@ Do not commit real credentials. Use placeholders in repository files.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `ConnectionRetryDelay` | `00:10:00` | Requeue delay after connection failure |
+| `ConnectionRetryDelay` | `00:10:00` | Requeue delay after connection **or** transient firmware-transport failure |
 | `AuthenticationRetryDelay` | `00:10:00` | Requeue delay after auth rejection |
-| `MaximumUnsuccessfulAttempts` | `10` | Per-category retryable attempts |
+| `MaximumUnsuccessfulAttempts` | `10` | Retryable unsuccessful attempts per budget (Connection and FirmwareTransport **share** `ConnectionFailureCount`; Authentication has its own counter) |
 
-See [retries.md](retries.md).
+See [retries.md](retries.md). There is no separate download-retry configuration section.
 
 ## `Csv`
 

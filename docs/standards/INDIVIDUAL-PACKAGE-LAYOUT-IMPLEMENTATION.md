@@ -1,5 +1,7 @@
 # Combined and Individual RouterOS Package Layout Support
 
+> **Historical remediation report** (2026-11-17). Documents the production defect and the layout-support fix. Current behaviour: [../firmware.md](../firmware.md).
+
 **Date:** 2026-11-17  
 **Branch:** `master`  
 **Production defect:** `PackageResolutionFailed` on individual-package routers (Koperfontein `10.16.0.9`, Thirsty Falls `10.16.0.10`)

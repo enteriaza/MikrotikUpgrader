@@ -1,5 +1,7 @@
 # Firmware Transport Scheduler Retry
 
+> **Historical remediation report** (authored ~2026-11-17). Describes the defect, design, and verification at the time of the change. Current operator behaviour: [../retries.md](../retries.md), [../firmware.md](../firmware.md).
+
 ## A. Verdict
 
 **PASS**

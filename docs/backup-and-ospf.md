@@ -100,16 +100,29 @@ Migration exists to move **legacy** configurations into the **target** fleet arc
 
 ### Site management `/24`
 
+- Eligible management hosts must lie in **`10.0.0.0/8`** (intentional fleet convention — the application is **not** address-plan-independent for management). Structural discovery still uses `*_MGMT` interfaces; the CIDR gate is additional.
 - Never derive management candidates from `/30` addresses.
-- Exclude disabled `/ip/address` rows entirely before deriving prefixes; a disabled `10.16.6.62/27` must never produce a `10.16.6.0/24` candidate.
+- Exclude disabled `/ip/address` rows entirely before deriving prefixes; a disabled management address must never produce a management `/24` candidate.
 - Prefer `*_MGMT` interface evidence and MGMT area-range corroboration; collapse `/26`/`/27` management subdivisions into their common `/24`.
-- **Same-management-interface expansion:** when an established `*_MGMT` interface carries additional enabled subnets whose `/24` differs from the existing aggregate (for example `10.16.103.254/24` beside subdivided `10.16.3.0/24` on `Bridge-VLAN-99_MGMT`), accept each distinct `/24` as a required management prefix. Do not reject them as ambiguous and do not merge them into a broader supernet.
+- **Same-management-interface expansion:** when an established `*_MGMT` interface carries additional enabled subnets whose `/24` differs from the existing aggregate, accept each distinct `/24` as a required management prefix. Do not reject them as ambiguous and do not merge them into a broader supernet.
 - **No unrestricted transitive merging:** a shared prefix on two management interfaces must not bridge every other prefix on those interfaces into one domain. Domains are the inclusion-maximal per-interface prefix sets; multiple distinct maximals fail closed unless uniquely corroborated.
 - **Authoritative set:** `DerivedManagementCidrs` is the full required management prefix set used for area-ranges, site matchers, verification and supersession. Scalar `DerivedManagementCidr` is the primary aggregate only (compatibility / diagnostics) and must not be the sole membership boundary.
 - Multi-prefix supersession treats every derived management `/24` equally when classifying obsolete more-specific templates.
 - Genuine ambiguity remains fail-closed when distinct management `/24` domains come from unrelated management interfaces without direct same-interface evidence.
 - Diagnostics distinguish existing aggregates, accepted expansion, excluded disabled/transport rows, and genuine ambiguity.
-- Address comments (for example `ODU DHCP MGMT Extra`) are operator provenance; inventory address rows do not drive acceptance via comment text.
+- Address comments are operator provenance; inventory address rows do not drive acceptance via comment text.
+
+### Address-plan conventions (intentional)
+
+| Convention | Role |
+|---|---|
+| Loopback `/32` in `10.0.0.0/8` | Router-id eligibility |
+| Management hosts in `10.0.0.0/8` | Management `/24` derivation |
+| Active backhaul exact `/30`, PTP, cost `10` | Backbone adjacency role |
+| Site-matcher aggregates `100.64.0.0/10` and `172.16.0.0/12` | Consolidation of PPPoE/customer-style matchers (not universal “all traffic must be in these nets”) |
+| Backbone area-id `0.0.0.0`; site area-id = Loopback IP | Fleet OSPF naming |
+
+Analysis of hard-coded ranges: [standards/OSPF-HARD-CODED-IP-RANGE-AUDIT.md](standards/OSPF-HARD-CODED-IP-RANGE-AUDIT.md) (historical audit; do not treat as a mandate to remove intentional conventions).
 
 ### Template cleanup
 

@@ -33,7 +33,7 @@ Backups are **not** under FirmwareFiles and are **not** served.
 
 ## Package resolution rules
 
-Summarised from production resolvers/assessors:
+Summarised from production resolvers/assessors (`UpgradePackageResolver` and related):
 
 - **Target catalogue is authoritative:** source inventory identifies layout and candidate independents; it is not a mandatory target package list
 - **Combined layout:** target core is `routeros` / `routeros-{arch}`; independents are selected only when still distributed for the target version/architecture
@@ -44,7 +44,24 @@ Summarised from production resolvers/assessors:
 - Missing/ambiguous **target core**, mixed architectures/versions in the selected set, and duplicate identities fail closed
 - Absence of a combined `routeros` package is not by itself a resolution failure when a legitimate individual `system` installation is present
 
+Do not invent undeclared package dependencies beyond what the target catalogue and installed inventory imply.
+
+## Package staging (`/tool/fetch`)
+
+Each required package is fetched by the router from `FirmwareUpgrade:AdvertisedBaseUrl` via `/tool/fetch` (`MikrotikApiClient.FetchUrlToFileAsync`):
+
+1. Any existing same-named file on the router is **removed** before fetch (avoids accepting leftovers by name alone).
+2. Fetch must complete with RouterOS status **`finished`** (failed status or missing finished/failed sentence fails the stage).
+3. The worker then polls until the staged file’s **`SizeBytes` exactly equals** the local catalogue package size.
+4. Only after **every** package in the resolved set passes those checks does the stage issue reboot/install.
+
+Incomplete, missing, or wrong-size sets return a transport or permanent failure **without** reboot. There is **no** separate in-process fetch retry loop: transient transport interruptions are requeued by the **scheduler** (see [retries.md](retries.md)).
+
+**Limitation:** completeness is fetch-finished + byte-size equality. The worker does not compute cryptographic package hashes on the router.
+
 ## Related
 
 - [RouterOS upgrade](routeros-upgrade.md)
+- [Retries](retries.md)
 - [Deployment](deployment.md)
+- Historical package-layout reports: [standards/](standards/README.md)

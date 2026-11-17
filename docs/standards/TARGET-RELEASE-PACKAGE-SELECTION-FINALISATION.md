@@ -1,5 +1,7 @@
 # Finalisation — Target-Release-Driven RouterOS Package Selection
 
+> **Historical design finalisation** (authored ~2026-11-17). Current package-selection rules: [../firmware.md](../firmware.md).
+
 **Date:** 2026-11-17  
 **HEAD:** `cb2d60af1f02fa13edda5e444b040c37a7b254ff` (`master`)  
 **Constraints:** No live MikroTik operations; no commits or pushes.

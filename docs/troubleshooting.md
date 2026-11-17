@@ -31,6 +31,9 @@
 - Confirm Kestrel listening and firewall.
 - Confirm `AdvertisedBaseUrl` is reachable **from the router**.
 - Confirm NPK names match architecture/version rules.
+- Transient API/HTTP transport interruptions may be **requeued** (scheduler FirmwareTransport / Connection budget). Check logs for `NextRetryUtc` and `ConnectionFailureCount`.
+- Permanent errors (404, missing local package, catalogue/resolution failure) are terminal — not requeued as transport.
+- Incomplete or wrong-size staged files never reboot; see [firmware.md](firmware.md) and [retries.md](retries.md).
 
 ## Process restarted mid-run
 

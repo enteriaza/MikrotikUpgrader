@@ -1,5 +1,7 @@
 # Final Safety Audit — Scheduler Retries, Partial Package Files and Upgrade Stage Boundaries
 
+> **Historical safety audit** (authored ~2026-11-17). Findings describe the implementation at audit time. Current staging and stage-boundary behaviour: [../firmware.md](../firmware.md), [../routeros-upgrade.md](../routeros-upgrade.md), [../retries.md](../retries.md).
+
 ## A. Verdict
 
 **PASS WITH FINDINGS**

@@ -1,5 +1,7 @@
 # Independent Audit — Combined and Individual RouterOS Package Resolution
 
+> **Historical independent audit.** Findings reflect the codebase at audit time. Current package-layout behaviour: [../firmware.md](../firmware.md).
+
 **Date:** 2026-11-17  
 **Auditor stance:** Code and tests are authoritative; implementation report is secondary.  
 **HEAD audited:** `cb2d60af1f02fa13edda5e444b040c37a7b254ff` (`master`)  

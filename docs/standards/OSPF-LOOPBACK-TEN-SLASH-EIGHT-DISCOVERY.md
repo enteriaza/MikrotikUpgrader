@@ -1,5 +1,7 @@
 # OSPF Loopback Address Discovery Correction (`10.0.0.0/8`)
 
+> **Historical remediation report.** Documents the change from the prior narrower Loopback scope to `10.0.0.0/8`. Current Loopback and address-plan rules: [../backup-and-ospf.md](../backup-and-ospf.md).
+
 ## Verdict
 
 **PASS**

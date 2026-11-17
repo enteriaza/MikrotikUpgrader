@@ -33,12 +33,13 @@ Create writable directories for ScheduledJobs, Backups, and Logs for the service
 ## Startup validation checklist
 
 - [ ] `Mikrotik:Enabled` intentional
-- [ ] Credentials valid for API 8728 and SFTP 22
+- [ ] Shared credentials valid for API 8728 and SFTP 22 (same account for all routers)
 - [ ] `FirmwareUpgrade:Enabled` and non-empty reachable `AdvertisedBaseUrl`
 - [ ] `FirmwareFiles/mikrotik/version` valid RouterOS 7 target
-- [ ] Matching NPKs present for 6.49.23 and v7 target architectures in scope
-- [ ] Sample CSV validates into Accepted in a lab window
+- [ ] Matching NPKs present for 6.49.23 and v7 target architectures in scope (combined and/or individual cores as needed)
+- [ ] Sample CSV validates into Accepted in a lab window (no credential columns)
 - [ ] Routers can HTTP GET a package from AdvertisedBaseUrl
+- [ ] Operators understand in-memory scheduling: restart discards jobs and delayed retries
 
 ## Related
 

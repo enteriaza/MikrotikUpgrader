@@ -1,5 +1,7 @@
 # OSPF Migration Completeness Forensic Audit
 
+> **Historical forensic audit.** Findings and defect lists describe the implementation at audit time; some items may already have been remediated. Current OSPF behaviour: [../backup-and-ospf.md](../backup-and-ospf.md).
+
 **Repository:** `MikrotikUpgrader`  
 **Branch:** `master`  
 **Known HEAD at audit start:** `00873db62a9851d34d323b7bc5066b1fb756e195`  

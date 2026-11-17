@@ -1,5 +1,7 @@
 # OSPF Consolidation Source-Template Cleanup Remediation
 
+> **Historical remediation report.** Documents consolidation-cleanup behaviour at the time of the change. Current OSPF cleanup rules: [../backup-and-ospf.md](../backup-and-ospf.md).
+
 **Repository:** `MikrotikUpgrader`  
 **Branch:** `master`  
 **Known HEAD at start:** `00873db`  

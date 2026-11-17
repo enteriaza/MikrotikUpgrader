@@ -32,9 +32,9 @@ flowchart LR
 |---|---|---|
 | Hosting | `MikrotikWorkerHost`, `Worker`, listening options | DI, Kestrel binding, heartbeat |
 | CSV ingestion | `ScheduledJobsWatcherService`, `ScheduledJobFileProcessor`, `ScheduledJobCsvParser` | Discover, validate, move, schedule |
-| Scheduling | `InMemoryJobScheduler`, `RouterJobExecutionQueue` | Eligibility, capacity, dispatch, import accounting |
-| Execution | `RouterJobExecutor`, `RouterJobExecutionService` | Connect, preflight, call upgrade path, complete jobs |
-| Upgrade | `RouterOsV6UpgradeExecutor`, package resolvers, verifiers, `RouterboardFirmwareUpgradeService` | Two-stage RouterOS upgrade, OSPF, optional RouterBOARD upgrade |
+| Scheduling | `InMemoryJobScheduler`, `RouterJobExecutionQueue` | Eligibility, capacity, dispatch, import accounting, delayed Connection/Auth/FirmwareTransport requeues |
+| Execution | `RouterJobExecutor`, `RouterJobExecutionService`, `AppSettingsRouterCredentialResolver` | Shared credentials, connect, preflight, call upgrade path, complete jobs / schedule retries |
+| Upgrade | `RouterOsV6UpgradeExecutor`, package resolvers, verifiers, `RouterboardFirmwareUpgradeService` | Two-stage RouterOS upgrade (staging vs install), OSPF, optional RouterBOARD upgrade |
 | Firmware HTTP | Kestrel + static files under `/firmware_files` | Serve **`.npk` only** for `/tool/fetch` |
 | Persistence | `ImportedCsvPathStore`, `ImportedCsvResultWriter` | Per-import Accepted CSV result columns |
 | Logging | Serilog + `DeviceLogSink` | Application and per-device logs |
@@ -67,6 +67,10 @@ CSV ingestion is additionally bounded by `MaxConcurrentCsvImports` and a discove
 
 Future jobs never block eligible jobs. Occupied workers never block the scheduler loop.
 
+## Credentials
+
+Production DI registers `IRouterCredentialResolver` → `AppSettingsRouterCredentialResolver`. Every scheduled job receives the shared `Mikrotik:Username` / `Mikrotik:Password`. CSV rows never carry credentials. Empty/missing username or password yields a failed credential resolution (job fails closed). There is no per-router vault integration in this milestone.
+
 ## Related documents
 
 - [CSV import](csv-import.md)
@@ -74,3 +78,5 @@ Future jobs never block eligible jobs. Occupied workers never block the schedule
 - [Retries](retries.md)
 - [RouterOS upgrade](routeros-upgrade.md)
 - [Firmware](firmware.md)
+- [Backup and OSPF](backup-and-ospf.md)
+- [Standards / historical reports](standards/README.md)

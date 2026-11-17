@@ -102,7 +102,7 @@ The worker always picks the path from the device's current RouterOS version. Not
 | 7.x newer than the target | Never downgrades → `Blocked` |
 | Unsupported major version / unreadable version | `Blocked` with the reason |
 
-After the package stage the worker reconciles OSPF, takes a backup and checks RouterBOARD firmware. The RouterOS 7 target comes from `FirmwareFiles/mikrotik/version`.
+After the package stage the worker reconciles OSPF (mandatory **OSPFv3 removal**, OSPFv2 target instance `default-v2`, Loopback `/32` in `10.0.0.0/8` as literal router-id), takes a backup before OSPF mutation, and checks RouterBOARD firmware. The RouterOS 7 target comes from `FirmwareFiles/mikrotik/version`. OSPF discovery uses intentional fleet address-plan conventions (management `10.0.0.0/8`, backhaul `/30`/PTP/cost `10`); the migrator is not address-plan-independent. Details: [docs/backup-and-ospf.md](docs/backup-and-ospf.md).
 
 Excel CSV exports depend on regional settings. Configure the application culture to match the exported date representation.
 
@@ -194,7 +194,7 @@ Default and **minimum** is **12**. Raise only after considering CPU, memory, soc
 
 ### Shared RouterOS API credentials
 
-All routers use the **same** username and password from `appsettings.json`. CSV files supply only router addresses (`routerip`) — never credentials.
+All routers use the **same** username and password from `appsettings.json`, resolved at execution time by `AppSettingsRouterCredentialResolver` (`IRouterCredentialResolver`). CSV files supply only router addresses (`routerip`) — never credentials. There is no per-router credential store and no required secrets-manager integration in this milestone.
 
 ```json
 {
@@ -266,13 +266,22 @@ Removed configuration keys (do not restore them):
 
 Standard identity: `[ACE|AP|BR|DCL]dd.POPddd.ddd.sss`. Classification is logged for diagnostics. **All device types — including ACE and BR — are eligible for the configured RouterOS 7 target.** Identity retrieval failure must not interrupt the workflow and must not produce a manual-review outcome.
 
-**Package matching** uses the FirmwareFiles catalog and the live `/system/package/print` `bundle` field:
+**Package selection** is **target-release driven**. The on-disk catalogue for the stage version/architecture decides what must be installed. Source inventory is diagnostic input (layout and independent candidates), not a mandatory “install everything that was on the source” checklist. Packages discontinued or not distributed for the target architecture are reported and skipped; missing or ambiguous **required target core** packages fail closed.
 
-- Combined main package: unbundled `routeros` / `routeros-{arch}` → catalog `routeros-{arch}-{version}.npk` or `routeros-{version}-{arch}.npk`
-- Bundled components (`bundle=<main>`, including disabled ones such as `ipv6`) are **not** fetched separately
-- Independently installed optionals (`bundle` empty): `{name}-{version}-{arch}.npk`
-- Exact package identity + architecture + version required; ambiguous duplicates fail safe
+Supported installation layouts:
+
+| Layout | Target core | Notes |
+|---|---|---|
+| Combined | `routeros` / `routeros-{arch}` | Bundled components (`bundle=<main>`) are not fetched separately |
+| Individual | `system` when the target ships it | No combined `routeros` required solely because the catalogue also has one |
+| v6 → v7 | May move from `system` to architecture-matched `routeros` | When `system` is not distributed for the v7 target |
+
+Additional rules:
+
+- Independently installed optionals (`bundle` empty) resolve to `{name}-{version}-{arch}.npk` when still distributed for the target
+- Exact package identity + architecture + version required; ambiguous duplicates fail closed
 - A stage never mixes RouterOS 6 and RouterOS 7 packages
+- Details: [docs/firmware.md](docs/firmware.md)
 
 RouterBOARD (RouterBOOT) current vs upgrade firmware is collected and logged around the upgrade path. After RouterOS 7 package verification (and optional static redistribution), `RouterboardFirmwareUpgradeService` assesses whether RouterBOOT must advance. When assessment returns **UpgradeRequired**, `MikrotikApiClient.UpgradeRouterboardAsync` issues exactly one `/system/routerboard/upgrade`, then reboots and reconnects (using `FirmwareUpgrade:ReconnectInterval` / `RebootTimeout`) until `current-firmware` matches the expected upgrade-firmware value (or the stage fails). Compatibility **assessment** alone does not issue that command; only the dedicated RouterBOARD stage does.
 
@@ -331,7 +340,7 @@ The worker never stops at the v6 stage: a device that verifies on 6.49.23 always
 
 Devices already on 6.49.23 or newer RouterOS 6 skip steps 2–3 and never receive 6.49.23 packages. Devices already on RouterOS 7 never receive RouterOS 6 packages.
 
-Backup failure, remote cleanup failure, missing packages, fetch failures, or verification mismatches stop that device — no fetch/reboot after a failed backup/cleanup. There is no automatic rollback or durable crash recovery: if the worker stops mid-upgrade, inspect the device and re-import the CSV manually.
+Backup failure, remote cleanup failure, missing/permanent package errors, or verification mismatches stop that device — no fetch/reboot after a failed backup/cleanup. **Transient** firmware download / `/tool/fetch` interruptions are requeued by the scheduler (shared Connection retry budget); incomplete package sets never reboot. There is no automatic rollback or durable crash recovery: if the worker stops mid-upgrade, inspect the device and re-import the CSV manually.
 
 #### Manual recovery (no persistent job store)
 
@@ -366,9 +375,17 @@ Production device logs are expected to cover job start, connection, inventory/re
 - Execution concurrency is separate (`MaxConcurrentRouterJobs`)
 - `HeldForDispatch` until Accepted path registration; import closure via `FinalizeImportActivation`
 
-### Connection / authentication retries
+### Connection / authentication / firmware-transport retries
 
-Section `JobRetry` (defaults: 10 minute delays, 10 attempts per category). Applies only to **initial connect/login** failures before upgrade mutation. Connection and authentication counters are independent. Retries requeue the **same** job; they do not decrement import `Remaining` or write terminal CSV columns. Upgrade-stage failures are not retried by this policy. Delayed retries are in-memory only — **no automatic resume after process restart**. Details: [docs/retries.md](docs/retries.md).
+Section `JobRetry` (defaults: **10-minute** delays, **10** unsuccessful attempts). Scheduler-level requeues of the **same** job (same identity and window):
+
+| Category | Budget |
+|---|---|
+| Connection (connect/login transport) | `ConnectionFailureCount` + `ConnectionRetryDelay` |
+| Authentication | `AuthenticationFailureCount` + `AuthenticationRetryDelay` |
+| FirmwareTransport (pre-install `/tool/fetch` / incomplete size) | **Shares** Connection count and delay |
+
+There is **no** separate local fetch-retry loop. Permanent package/config errors stay terminal. Cancellation/shutdown are not transport retries. Staging requires fetch status `finished` **and** exact `SizeBytes` (existence alone is insufficient; not a cryptographic hash). Delayed retries are in-memory only — **no automatic resume after process restart**. Details: [docs/retries.md](docs/retries.md), [docs/firmware.md](docs/firmware.md).
 
 ### Restart and re-import
 
@@ -531,17 +548,19 @@ Outputs under gitignored `release/{win-x64,linux-x64}/` (executable, `appsetting
 
 | Document | Contents |
 |---|---|
+| [docs/README.md](docs/README.md) | Documentation map |
 | [docs/architecture.md](docs/architecture.md) | Host composition, components, concurrency |
 | [docs/configuration.md](docs/configuration.md) | Configuration keys and defaults |
 | [docs/csv-import.md](docs/csv-import.md) | CSV format, results, activation/cancel |
-| [docs/scheduler.md](docs/scheduler.md) | Scheduler queues, accounting, closure |
-| [docs/retries.md](docs/retries.md) | Connection/auth retry policy |
-| [docs/routeros-upgrade.md](docs/routeros-upgrade.md) | Upgrade lifecycle and gates |
-| [docs/firmware.md](docs/firmware.md) | Packages and HTTP distribution |
-| [docs/backup-and-ospf.md](docs/backup-and-ospf.md) | Backup and OSPF stages |
+| [docs/scheduler.md](docs/scheduler.md) | In-memory scheduler, accounting, closure |
+| [docs/retries.md](docs/retries.md) | Connection / authentication / firmware-transport retries |
+| [docs/routeros-upgrade.md](docs/routeros-upgrade.md) | Upgrade lifecycle, staging vs install, gates |
+| [docs/firmware.md](docs/firmware.md) | Packages, HTTP distribution, staging verification |
+| [docs/backup-and-ospf.md](docs/backup-and-ospf.md) | Backup gate, OSPFv2/v3, Loopback, management, backhaul |
 | [docs/build-and-release.md](docs/build-and-release.md) | Build, test, Native AOT |
 | [docs/deployment.md](docs/deployment.md) | Windows/Linux deployment |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Failure diagnosis |
+| [docs/standards/README.md](docs/standards/README.md) | Historical audits and remediation reports |
 
 ## Dependencies
 

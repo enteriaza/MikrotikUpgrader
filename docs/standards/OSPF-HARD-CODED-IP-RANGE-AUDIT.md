@@ -1,5 +1,7 @@
 # OSPF Hard-Coded IP Range and Address-Plan Dependency Audit
 
+> **Historical read-only audit** (~2026-11-17). Maps intentional address-plan conventions; it is **not** a mandate to remove those conventions. Current operator summary: [../backup-and-ospf.md](../backup-and-ospf.md#address-plan-conventions-intentional).
+
 **Audit type:** Read-only investigation  
 **Report file (sole permitted write):** `docs/standards/OSPF-HARD-CODED-IP-RANGE-AUDIT.md`  
 **No production code, tests, or other documentation were modified.**

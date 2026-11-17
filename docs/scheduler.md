@@ -55,7 +55,12 @@ stateDiagram-v2
 
 If `ScheduleAsync` runs before `AcceptedOnDisk`, entries are stored on the batch and released only from `SetAcceptedPath` **after** the path store is updated. Production ingestion registers the path before scheduling; the hold is a correctness invariant.
 
+## Transient retries
+
+`TryScheduleTransientRetry` requeues the **same** job after Connection, Authentication, or FirmwareTransport failures (shared Connection budget for transport). See [retries.md](retries.md). Scheduling remains separate from RouterOS I/O: workers perform connect/upgrade; the scheduler only admits, delays, and redispatches.
+
 ## Related
 
 - [CSV import](csv-import.md)
 - [Retries](retries.md)
+- [Architecture](architecture.md)
